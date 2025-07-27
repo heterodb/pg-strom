@@ -220,20 +220,186 @@ print_field_names(std::shared_ptr<arrow::Schema> arrow_schema)
 
 	for (auto cell = arrow_fields.begin(); cell != arrow_fields.end(); cell++)
 	{
+		auto	__field = (*cell);
+
 		if (cell == arrow_fields.begin())
 			std::cout << "#";
 		else if (csv_mode)
 			std::cout << ",";
 		else
 			std::cout << "\t";
-		auto	__field = (*cell);
-		std::cout << "\"";
-		std::cout << __field->name() ;
-		std::cout << "[";
-		std::cout << __field->type()->ToString();
-		std::cout << "]\"";
+
+		std::cout << "\""
+				  << __field->name()
+				  << "["
+				  << __field->type()->ToString()
+				  << "]\"";
 	}
 	std::cout << std::endl;
+}
+
+#define arrow_type_as_pgsql_name(field)						\
+	__arrow_type_as_pgsql_name((field),(char *)alloca(80), 80)
+static const char *
+__arrow_type_as_pgsql_name(std::shared_ptr<arrow::Field> arrow_field,
+						   char *buffer, size_t buffer_sz)
+{
+	auto	af_type = arrow_field->type();
+
+	switch (af_type->id())
+	{
+		case Type::BOOL:
+			return "bool";
+		case Type::INT8:
+		case Type::UINT8:
+			return "int8";
+		case Type::INT16:
+		case Type::UINT16:
+			return "smallint";
+        case Type::INT32:
+		case Type::UINT32:
+			return "int";
+		case Type::INT64:
+		case Type::UINT64:
+			return "bigint";
+		case Type::HALF_FLOAT:
+			return "float2";
+        case Type::FLOAT:
+			return "float4";
+		case Type::DOUBLE:
+			return "float8";
+        case Type::DECIMAL128: {
+			auto	d_type = std::static_pointer_cast<arrow::Decimal128Type>(af_type);
+			snprintf(buffer, buffer_sz, "numeric(%d,%d)",
+					 d_type->precision(),
+					 d_type->scale());
+			return buffer;
+		}
+		case Type::DECIMAL256: {
+			auto	d_type = std::static_pointer_cast<arrow::Decimal256Type>(af_type);
+			snprintf(buffer, buffer_sz, "numeric(%d,%d)",
+					 d_type->precision(),
+					 d_type->scale());
+			return buffer;
+		}
+        case Type::STRING:
+        case Type::LARGE_STRING:
+			return "text";
+        case Type::BINARY:
+		case Type::LARGE_BINARY:
+			return "bytea";
+        case Type::FIXED_SIZE_BINARY: {
+			auto	fb_type = std::static_pointer_cast<arrow::FixedSizeBinaryType>(af_type);
+			snprintf(buffer, buffer_sz, "char(%u)", fb_type->byte_width());
+			return buffer;
+		}
+		case Type::DATE32:
+		case Type::DATE64:
+			return "date";
+		case Type::TIME32:
+		case Type::TIME64:
+			return "time";
+        case Type::TIMESTAMP:
+			return "timestamp";
+		case Type::INTERVAL_MONTHS:
+		case Type::INTERVAL_DAY_TIME:
+		case Type::INTERVAL_MONTH_DAY_NANO:
+		case Type::DURATION:
+			return "interval";
+		case Type::LIST: {
+			auto	ls_type = std::static_pointer_cast<arrow::ListType>(af_type);
+			auto	child = ls_type->value_field();
+			snprintf(buffer, buffer_sz, "%s[]",
+					 arrow_type_as_pgsql_name(child));
+			return buffer;
+		}
+		case Type::LARGE_LIST: {
+			auto	ls_type = std::static_pointer_cast<arrow::LargeListType>(af_type);
+			auto	child = ls_type->value_field();
+			snprintf(buffer, buffer_sz, "%s[]",
+					 arrow_type_as_pgsql_name(child));
+			return buffer;
+		}
+		case Type::STRUCT:
+			snprintf(buffer, buffer_sz, "%s_comp", arrow_field->name().c_str());
+			return buffer;
+		default:
+			Elog("not a supported data type");
+	}
+	return NULL;
+}
+	
+static void
+print_create_composite_type(std::shared_ptr<arrow::Field> arrow_field)
+{
+	auto	st_type = std::static_pointer_cast<arrow::StructType>(arrow_field->type());
+	auto	children = st_type->fields();
+	for (auto cell = children.begin(); cell != children.end(); cell++)
+	{
+		auto	__field = (*cell);
+
+		if (__field->type()->id() == Type::STRUCT)
+			print_create_composite_type(__field);
+	}
+	/* CREATE TYPE AS */
+	std::cout << "CREATE TYPE \"" << arrow_field->name() << "_comp\" AS (";
+	for (auto cell = children.begin(); cell != children.end(); cell++)
+	{
+		auto	__field = (*cell);
+
+		if (cell != children.begin())
+			std::cout << ",";
+		std::cout << std::endl
+				  << "    \"" << __field->name() << "\""
+				  << arrow_type_as_pgsql_name(__field);
+	}
+	std::cout << std::endl << ");" << std::endl;
+}
+
+static void
+print_create_table(std::shared_ptr<arrow::Schema> arrow_schema)
+{
+	auto	arrow_fields = arrow_schema->fields();
+
+	/* add CREATE TYPE AS if Struct is given */
+	for (auto cell = arrow_fields.begin(); cell != arrow_fields.end(); cell++)
+	{
+		auto	__field = (*cell);
+
+		if (__field->type()->id() == Type::STRUCT)
+			print_create_composite_type(__field);
+	}
+	
+	std::cout << "CREATE TABLE \"" << with_create_table << "\"" << std::endl;
+	std::cout << "(";
+	for (auto cell = arrow_fields.begin(); cell != arrow_fields.end(); cell++)
+	{
+		auto	__field = (*cell);
+
+		if (cell != arrow_fields.begin())
+			std::cout << ",";
+		std::cout << std::endl
+				  << "    \""
+				  << __field->name()
+				  << "\" "
+				  << arrow_type_as_pgsql_name(__field);
+		if (!__field->nullable())
+			std::cout << " not null";
+	}
+	std::cout << std::endl << ")";
+	if (with_partition_of)
+		std::cout << "  PARTITION OF \"" << with_partition_of << "\"";
+	if (with_tablespace)
+		std::cout << "  TABLESPACE (\"" << with_tablespace << "\")";
+	std::cout << ";" << std::endl;
+
+	/* COPY FROM stdin */
+	std::cout << "COPY \"" << with_create_table << "\" FROM stdin WITH ("
+			  << "DELIMITER " << (csv_mode ? "','" : "'\\t'")
+			  << ", FORMAT " << (csv_mode ? "csv" : "text");
+	if (shows_header)
+		std::cout << ", HEADER true";
+	std::cout << ");" << std::endl;
 }
 
 static void
@@ -727,6 +893,7 @@ process_one_arrow_file(arrowReadableFile arrow_input_file, const char *filename)
 {
 	std::shared_ptr<ipc::RecordBatchFileReader> arrow_reader;
 	std::shared_ptr<Schema> arrow_schema;
+	static bool		is_first_call = true;
 
 	{
 		auto options = ipc::IpcReadOptions::Defaults();
@@ -741,6 +908,9 @@ process_one_arrow_file(arrowReadableFile arrow_input_file, const char *filename)
 	/* shows CSV/TSV field names */
 	if (shows_header)
 		print_field_names(arrow_schema);
+	else if (is_first_call && with_create_table)
+		print_create_table(arrow_schema);
+	is_first_call = false;
 
 	/* read RecordBatch for each */
 	auto num_record_batches = arrow_reader->num_record_batches();
@@ -781,6 +951,7 @@ process_one_parquet_file(arrowReadableFile arrow_input_file, const char *filenam
 	std::unique_ptr<parquet::arrow::FileReader> arrow_reader;
 	std::shared_ptr<arrow::Schema> arrow_schema;
 	Status		status;
+	static bool	is_first_call = true;
 
 	status = parquet::arrow::OpenFile(arrow_input_file,
 									  default_memory_pool(),
@@ -794,8 +965,13 @@ process_one_parquet_file(arrowReadableFile arrow_input_file, const char *filenam
 		Elog("failed on parquet::arrow::FileReader::GetSchema('%s'): %s",
 			 filename, status.ToString().c_str());
 	//auto num_fields = arrow_schema->num_fields();
+	
+	
 	if (shows_header)
 		print_field_names(arrow_schema);
+	else if (is_first_call && with_create_table)
+		print_create_table(arrow_schema);
+	is_first_call = false;
 
 	/* read RowGroup for each */
 	auto num_groups = arrow_reader->num_row_groups();
@@ -921,6 +1097,12 @@ static void parse_options(int argc, char *argv[])
 		input_filenames.push_back(argv[k]);
 	if (input_filenames.empty())
 		Elog("no input files given");
+	if (shows_header && with_create_table)
+		Elog("--header and --create-table are mutually exclusive");
+	if (with_tablespace && !with_create_table)
+		Elog("--tablespace must be used with --create-table");
+	if (with_partition_of && !with_create_table)
+		Elog("--partition-of must be used with --create-table");
 }
 
 int main(int argc, char *argv[])
