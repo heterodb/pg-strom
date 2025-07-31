@@ -10,22 +10,10 @@
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the PostgreSQL License.
  */
+#include "arrow-tools.h"
 #include <iostream>
 #include <list>
 #include <typeinfo>
-#include <arrow/api.h>				/* dnf install libarrow-devel */
-#include <arrow/io/api.h>
-#include <arrow/ipc/api.h>
-#include <arrow/array/builder_adaptive.h>
-#include <arrow/array/builder_binary.h>
-#include <arrow/array/builder_decimal.h>
-#include <arrow/array/builder_primitive.h>
-#include <arrow/array/builder_time.h>
-#include <arrow/array/builder_nested.h>
-#include <arrow/util/value_parsing.h>
-#ifdef HAS_PARQUET
-#include <parquet/stream_writer.h>	/* dnf install parquet-libs-devel */
-#endif
 #include <ctype.h>
 #include <fcntl.h>
 #include <getopt.h>
@@ -36,8 +24,6 @@
 
 using namespace arrow;
 
-typedef std::string							cppString;
-typedef std::vector<cppString>				cppStringVec;
 typedef std::shared_ptr<Schema>				arrowSchema;
 typedef std::shared_ptr<Field>				arrowField;
 typedef std::vector<arrowField>				arrowFieldVec;

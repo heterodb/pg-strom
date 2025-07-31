@@ -33,7 +33,7 @@ MYSQL2ARROW_OBJS = __mysql2arrow.o mysql_client.o \
 PCAP2ARROW_OBJS  = pcap2arrow.o arrow_nodes.o arrow_write.o
 VCF2ARROW_OBJS   = vcf2arrow.o arrow_nodes.o arrow_write.o
 TSV2ARROW_OBJS   = tsv2arrow.o
-ARROW2CSV_OBJS   = arrow2csv.o
+ARROW2CSV_OBJS   = arrow2csv.o arrow_meta.o
 ARROW2CSV_LEGACY_OBJS = arrow2csv_legacy.o arrow_nodes.o
 CLEAN_OBJS = $(PG2ARROW_OBJS) $(MYSQL2ARROW_OBJS) $(TSV2ARROW_OBJS) \
              $(PCAP2ARROW_OBJS) $(VCF2ARROW_OBJS) $(ARROW2CSV_OBJS) \
@@ -141,7 +141,7 @@ install-arrow2csv: arrow2csv
 	install -m 0755 arrow2csv $(DESTDIR)$(BINDIR)
 
 arrow2csv: $(ARROW2CSV_OBJS)
-	$(CXX) $(CPPFLAGS) -o $@ $< $(ARROW2CSV_LDFLAGS)
+	$(CXX) $(CPPFLAGS) -o $@ $(ARROW2CSV_OBJS) $(ARROW2CSV_LDFLAGS)
 
 #
 # TSV2Arrow
