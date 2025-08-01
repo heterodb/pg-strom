@@ -49,7 +49,7 @@ endif
 ifeq ($(DEBUG),1)
 CFLAGS += -g -O0
 endif
-CPPFLAGS = -std=c++11 $(CFLAGS)
+CPPFLAGS = -std=c++17 $(CFLAGS)
 ifeq ($(HAS_LIBARROW),yes)
 CPPFLAGS += -DHAS_LIBARROW=1 $(shell pkgconf --cflags arrow)
 ifeq ($(HAS_PARQUET),yes)

@@ -924,12 +924,24 @@ process_one_parquet_file(arrowReadableFile arrow_input_file, const char *filenam
 	Status		status;
 	static bool	is_first_call = true;
 
+#if PARQUET_VERSION_MAJOR >= 19
+	{
+		auto	rv = parquet::arrow::OpenFile(arrow_input_file,
+											  default_memory_pool());
+		if (!rv.ok())
+			Elog("failed on parquet::arrow::OpenFile('%s'): %s",
+				 filename, rv.status().ToString().c_str());
+		arrow_reader = std::move(rv.ValueOrDie());
+	}
+#else
+	/* OpenFile() API was changed at Arrow v19 (issue #44784) */
 	status = parquet::arrow::OpenFile(arrow_input_file,
 									  default_memory_pool(),
 									  &arrow_reader);
 	if (!status.ok())
 		Elog("failed on parquet::arrow::OpenFile('%s'): %s",
 			 filename, status.ToString().c_str());
+#endif
 
 	status = arrow_reader->GetSchema(&arrow_schema);
 	if (!status.ok())
@@ -1087,6 +1099,7 @@ int main(int argc, char *argv[])
 	{
 		Result<arrowReadableFile>rv;
 		arrowReadableFile arrow_input_filp;
+		Status		status;
 		const char *filename = (*cell).c_str();
 		int			fdesc;
 		bool		file_is_parquet	__attribute__((unused)) = false;
@@ -1130,7 +1143,10 @@ int main(int argc, char *argv[])
 				process_one_arrow_file(arrow_input_filp, filename);
 		}
 		/* close the file stream */
-		arrow_input_filp->Close();
+		status = arrow_input_filp->Close();
+		if (!status.ok())
+			Elog("failed on arrow::io::ReadableFile::Close: %s",
+				 status.ToString().c_str());
 	}
 	return 0;
 }

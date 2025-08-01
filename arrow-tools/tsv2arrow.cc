@@ -1260,7 +1260,7 @@ static void open_output_file(void)
 
 	if (output_filename)
 	{
-		fdesc = open(output_filename, O_RDWR | O_CREAT | O_TRUNC);
+		fdesc = open(output_filename, O_RDWR | O_CREAT | O_TRUNC, 0666);
 		if (fdesc < 0)
 			Elog("failed on open('%s'): %m", output_filename);
 	}
@@ -1307,13 +1307,23 @@ static void open_output_file(void)
 
 static void close_output_file(int rbatch_count, long total_nitems)
 {
+	Status	rv;
+
 	if (arrow_file_writer)
-		arrow_file_writer->Close();
+	{
+		rv = arrow_file_writer->Close();
+		if (!rv.ok())
+			Elog("failed on arrow::ipc::RecordBatchWriter::Close: %s",
+				 rv.ToString().c_str());
+	}
 #if HAS_PARQUET
 	if (parquet_file_writer)
 		parquet_file_writer->Close();
 #endif
-	arrow_out_stream->Close();
+	rv = arrow_out_stream->Close();
+	if (!rv.ok())
+		Elog("failed on arrow::ipc::io::FileOutputStream::Close: %s",
+			 rv.ToString().c_str());
 	/* report */
 	printf("tsv2arrow: wrote on '%s' total %d record-batches, %ld nitems\n",
 		   output_filename, rbatch_count, total_nitems);
@@ -1332,18 +1342,21 @@ static void write_out_record_batch(long nitems, int rbatch_count)
 	/* setup record batch */
 	for (auto elem = arrow_builders.begin(); elem != arrow_builders.end(); elem++)
 	{
-		(*elem)->Finish(&array);
+		rv = (*elem)->Finish(&array);
+		if (!rv.ok())
+			Elog("failed on arrow::ArrayBuilder::Finish: %s",
+				 rv.ToString().c_str());
 		arrow_arrays.push_back(array);
 		if (nrows < 0)
 			nrows = array->length();
-		else
-			assert(nrows == array->length());
+		else if (nrows != array->length())
+			Elog("Bug? number of rows mismatch across the buffers");
 	}
 	foffset_before = arrow_out_stream->Tell();
 #ifdef HAS_PARQUET
 	if (use_parquet)
 	{
-		parquet::RowGroupWriter *pq_rgroup = parquet_file_writer->AppendRowGroup(nrows);
+		parquet::RowGroupWriter *pq_rgroup = parquet_file_writer->AppendRowGroup();
 		for (auto elem = parquet_column_buffers.begin();
 				  elem != parquet_column_buffers.end();
 				  elem++)
