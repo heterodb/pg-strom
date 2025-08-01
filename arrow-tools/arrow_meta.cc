@@ -20,7 +20,7 @@
 
 // ================================================================
 //
-// dump_arrow_metadata
+// dump_arrow_metadata(arrow_file, filename)
 //
 // ================================================================
 static void
@@ -484,5 +484,343 @@ dump_arrow_metadata(std::shared_ptr<arrow::io::ReadableFile> arrow_file, const c
 	}
 }
 
+#ifdef HAS_PARQUET
+// ================================================================
+//
+// dump_arrow_metadata(parquet_file, filename)
+//
+// ================================================================
+static void
+__dump_parquet_column(const parquet::ColumnDescriptor *column)
+{
+	auto	ptype = column->physical_type();
+	auto	ctype = column->converted_type();
+//	auto	ltype = column->logical_type();
 
+	std::cout << "name=\"" << column->name()
+			  << "\", physical_type=";
+	switch (ptype)
+	{
+		case parquet::Type::BOOLEAN:
+			std::cout << "Boolean";
+			break;
+		case parquet::Type::INT32:
+			std::cout << "Int32";
+			break;
+		case parquet::Type::INT64:
+			std::cout << "Int64";
+			break;
+		case parquet::Type::INT96:
+			std::cout << "Int96";
+			break;
+		case parquet::Type::FLOAT:
+			std::cout << "Float";
+			break;			
+		case parquet::Type::DOUBLE:
+			std::cout << "Double";
+			break;
+		case parquet::Type::BYTE_ARRAY:
+			std::cout << "ByteArray";
+			break;
+		case parquet::Type::FIXED_LEN_BYTE_ARRAY:
+			std::cout << "FixedLenByteArray[" << column->type_length() << "]";
+			break;
+		default:
+			std::cout << "unknown";
+			break;
+	}
+	std::cout << ", converted_type=";
+	switch (ctype)
+	{
+		case parquet::ConvertedType::NONE:
+			std::cout << "NONE";
+			break;
+		case parquet::ConvertedType::UTF8:
+			std::cout << "Utf8";
+			break;
+		case parquet::ConvertedType::MAP:
+			std::cout << "Map";
+			break;
+		case parquet::ConvertedType::MAP_KEY_VALUE:
+			std::cout << "MapKeyValue";
+			break;
+		case parquet::ConvertedType::LIST:
+			std::cout << "List";
+			break;
+		case parquet::ConvertedType::ENUM:
+			std::cout << "Enum";
+			break;
+		case parquet::ConvertedType::DECIMAL:
+			std::cout << "Decimal("
+					  << column->type_precision() << ","
+					  << column->type_scale() << ")";
+			break;
+		case parquet::ConvertedType::DATE:
+			std::cout << "Date";
+			break;
+		case parquet::ConvertedType::TIME_MILLIS:
+			std::cout << "Time[ms]";
+			break;
+		case parquet::ConvertedType::TIME_MICROS:
+			std::cout << "Time[us]";
+			break;
+		case parquet::ConvertedType::TIMESTAMP_MILLIS:
+			std::cout << "Timestamp[ms]";
+			break;
+		case parquet::ConvertedType::TIMESTAMP_MICROS:
+			std::cout << "Timestamp[us]";
+			break;
+		case parquet::ConvertedType::UINT_8:
+			std::cout << "UInt8";
+			break;
+		case parquet::ConvertedType::UINT_16:
+			std::cout << "UInt16";
+			break;
+		case parquet::ConvertedType::UINT_32:
+			std::cout << "UInt32";
+			break;
+		case parquet::ConvertedType::UINT_64:
+			std::cout << "UInt64";
+			break;
+		case parquet::ConvertedType::INT_8:
+			std::cout << "Int8";
+			break;
+		case parquet::ConvertedType::INT_16:
+			std::cout << "Int16";
+			break;
+		case parquet::ConvertedType::INT_32:
+			std::cout << "Int32";
+			break;
+		case parquet::ConvertedType::INT_64:
+			std::cout << "Int64";
+			break;
+		case parquet::ConvertedType::JSON:
+			std::cout << "Json";
+			break;
+		case parquet::ConvertedType::BSON:
+			std::cout << "Bson";
+			break;
+		case parquet::ConvertedType::INTERVAL:
+			std::cout << "Internal";
+			break;
+		default:
+			std::cout << "unknown";
+			break;
+	}
+}
 
+void
+dump_parquet_metadata(std::shared_ptr<arrow::io::ReadableFile> parquet_file,
+					  const char *filename)
+{
+	auto	parquet_reader = parquet::ParquetFileReader::Open(parquet_file);
+	auto	parquet_meta = parquet_reader->metadata();
+	auto	parquet_schema = parquet_meta->schema();
+	auto	parquet_kv = parquet_meta->key_value_metadata();
+
+	// Print Global file-level metadata
+	std::cout << "[Parquet File]" << std::endl;
+	std::cout << "filename: " << filename << std::endl;
+	std::cout << "version: " << ParquetVersionToString(parquet_meta->version()) << std::endl;
+	std::cout << "created_by: " << parquet_meta->created_by() << std::endl;
+	std::cout << "num_columns: " << parquet_meta->num_columns() << std::endl;
+	std::cout << "num_total_rows: " << parquet_meta->num_rows() << std::endl;
+	std::cout << "num_row_groups: " << parquet_meta->num_row_groups() << std::endl;
+	// Schema Definition
+	std::cout << "[Schema]" << std::endl;
+	std::cout << "schema_name: " << parquet_schema->name() << std::endl;
+	for (int j=0; j < parquet_schema->num_columns(); j++)
+	{
+		auto	column = parquet_schema->Column(j);
+
+		std::cout << "column[" << (j+1) << "]: ";
+		__dump_parquet_column(column);
+		std::cout << std::endl;
+	}
+	// Key-Value Metadata
+	if (parquet_kv)
+	{
+		std::cout << "[Key-Values]" << std::endl;
+		for (int i=0; i < parquet_kv->size(); i++)
+		{
+			std::cout << parquet_kv->key(i) << ": "
+					  << parquet_kv->value(i) << std::endl;
+		}
+	}
+	// For each Row-Groups
+	for (int i=0; i < parquet_meta->num_row_groups(); i++)
+	{
+		auto	rg_meta = parquet_meta->RowGroup(i);
+		std::cout << "[Row Group-" << (i+1) << "]" << std::endl;
+		std::cout << "file_offset: " << rg_meta->file_offset() << std::endl;
+		std::cout << "num_rows: " << rg_meta->num_rows() << std::endl;
+		if (rg_meta->total_byte_size() > 0)
+			std::cout << "raw bytesize: " << rg_meta->total_byte_size() << std::endl;
+		std::cout << "can_decompress: " << (rg_meta->can_decompress() ? "True" : "False") << std::endl;
+		// Iterate over columns in the row group
+		for (int j=0; j < rg_meta->num_columns(); j++)
+		{
+			auto	col_meta = rg_meta->ColumnChunk(j);
+			auto	col_path = col_meta->path_in_schema();
+			auto	col_stat = col_meta->statistics();
+
+			std::cout << "column_chunk[" << (j+1) << "]: "
+					  << "data_page_offset=" << col_meta->data_page_offset();
+			if (col_meta->has_dictionary_page())
+				std::cout << ", dictionary_page_offset=" << col_meta->dictionary_page_offset();
+			if (col_meta->has_index_page())
+				std::cout << ", index_page_offset=" << col_meta->index_page_offset();
+			std::cout << ", total_compressed_size=" << col_meta->total_compressed_size()
+					  << ", total_uncompressed_size=" << col_meta->total_uncompressed_size()
+					  << ", can_decompress=" << (col_meta->can_decompress() ? "True" : "False")
+					  << ", encodings=[";
+			auto	col_encodings = col_meta->encodings();
+			for (auto cell = col_encodings.begin(); cell != col_encodings.end(); cell++)
+			{
+				auto	enc = (*cell);
+
+				if (cell != col_encodings.begin())
+					std::cout << ", ";
+				switch (enc)
+				{
+					case parquet::Encoding::PLAIN:
+						std::cout << "PLAIN";
+						break;
+					case parquet::Encoding::PLAIN_DICTIONARY:
+						std::cout << "PLAIN_DICTIONARY";
+						break;
+					case parquet::Encoding::RLE:
+						std::cout << "RLE";
+						break;
+					case parquet::Encoding::BIT_PACKED:
+						std::cout << "BIT_PACKED";
+						break;
+					case parquet::Encoding::DELTA_BINARY_PACKED:
+						std::cout << "DELTA_BINARY_PACKED";
+						break;
+					case parquet::Encoding::DELTA_LENGTH_BYTE_ARRAY:
+						std::cout << "DELTA_LENGTH_BYTE_ARRAY";
+						break;
+					case parquet::Encoding::DELTA_BYTE_ARRAY:
+						std::cout << "DELTA_BYTE_ARRAY";
+						break;
+					case parquet::Encoding::RLE_DICTIONARY:
+						std::cout << "RLE_DICTIONARY";
+						break;
+					case parquet::Encoding::BYTE_STREAM_SPLIT:
+						std::cout << "BYTE_STREAM_SPLIT";
+						break;
+					default:
+						std::cout << "UNKNOWN_ENCODING";
+						break;
+				}
+			}
+			std::cout << "]";
+			/* Compression::type */
+			std::cout << ", compression=";
+			switch (col_meta->compression())
+			{
+				case parquet::Compression::UNCOMPRESSED:
+					std::cout << "uncompressed";
+					break;
+				case parquet::Compression::SNAPPY:
+					std::cout << "snappy";
+					break;
+				case parquet::Compression::GZIP:
+					std::cout << "gzip";
+					break;
+				case parquet::Compression::BROTLI:
+					std::cout << "brotli";
+					break;
+				case parquet::Compression::ZSTD:
+					std::cout << "zstd";
+					break;
+				case parquet::Compression::LZ4:
+					std::cout << "lz4";
+					break;
+				case parquet::Compression::LZ4_FRAME:
+					std::cout << "lz4_frame";
+					break;
+				case parquet::Compression::LZO:
+					std::cout << "lzo";
+					break;
+				case parquet::Compression::BZ2:
+					std::cout << "bz2";
+					break;
+				case parquet::Compression::LZ4_HADOOP:
+					std::cout << "lz4_hadoop";
+					break;
+				default:
+					std::cout << "unknown";
+					break;
+			}
+			/* std::shared_ptr<schema::ColumnPath> */
+			std::cout << ", column_path=\"" << col_path->ToDotString() << "\"";
+
+			/* std::shared_ptr<Statistics> */
+			if (col_stat->HasNullCount())
+				std::cout << ", null_count=" << col_stat->null_count();
+			if (col_stat->HasDistinctCount())
+				std::cout << ", distinct_count=" << col_stat->distinct_count();
+			std::cout << ", num_values=" << col_stat->num_values();
+			if (col_stat->HasMinMax())
+			{
+				switch (col_stat->physical_type())
+				{
+					case parquet::Type::BOOLEAN: {
+						auto	__stat = std::dynamic_pointer_cast<parquet::BoolStatistics>(col_stat);
+						std::cout << ", min_value=" << __stat->min()
+								  << ", max_value=" << __stat->max();
+						break;
+					}
+					case parquet::Type::INT32: {
+						auto	__stat = std::dynamic_pointer_cast<parquet::Int32Statistics>(col_stat);
+						std::cout << ", min_value=" << __stat->min()
+								  << ", max_value=" << __stat->max();
+						break;
+					}
+					case parquet::Type::INT64: {
+						auto	__stat = std::dynamic_pointer_cast<parquet::Int64Statistics>(col_stat);
+						std::cout << ", min_value=" << __stat->min()
+								  << ", max_value=" << __stat->max();
+						break;
+					}
+					case parquet::Type::FLOAT: {
+						auto	__stat = std::dynamic_pointer_cast<parquet::FloatStatistics>(col_stat);
+						std::cout << ", min_value=" << __stat->min()
+								  << ", max_value=" << __stat->max();
+						break;
+					}
+					case parquet::Type::DOUBLE: {
+						auto	__stat = std::dynamic_pointer_cast<parquet::DoubleStatistics>(col_stat);
+						std::cout << ", min_value=" << __stat->min()
+								  << ", max_value=" << __stat->max();
+						break;
+					}
+#if 0
+					// needs special encoding logic
+					case parquet::Type::BYTE_ARRAY: {
+						auto	__stat = std::dynamic_pointer_cast<parquet::ByteArrayStatistics>(col_stat);
+						std::cout << ", min_value=" << __stat->min()
+								  << ", max_value=" << __stat->max();
+						break;
+					}
+					case parquet::Type::FIXED_LEN_BYTE_ARRAY: {
+						auto	__stat = std::dynamic_pointer_cast<parquet::FLBAStatistics>(col_stat);
+						std::cout << ", min_value=" << __stat->min()
+								  << ", max_value=" << __stat->max();
+						break;
+					}
+#endif
+					default: {
+						std::cout << ", min_value=" << col_stat->EncodeMin()
+								  << ", max_value=" << col_stat->EncodeMax();
+						break;
+					}
+				}
+			}
+			std::cout << std::endl;
+		}
+	}
+}
+#endif	/* HAS_PARQUET */

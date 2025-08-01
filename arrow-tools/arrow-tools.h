@@ -14,6 +14,7 @@
 #include <parquet/arrow/reader.h>	/* dnf install parquet-libs-devel */
 #include <parquet/file_reader.h>
 #include <parquet/schema.h>
+#include <parquet/statistics.h>
 #include <parquet/stream_writer.h>
 #endif
 
@@ -39,6 +40,9 @@
 
 
 #ifdef __cplusplus
+#include <iostream>
+#include <list>
+#include <typeinfo>
 //
 // Useful definitions
 //
@@ -49,7 +53,11 @@ typedef std::vector<cppString>				cppStringVec;
 // Routines only valid for C++
 //
 extern "C" void
-dump_arrow_metadata(std::shared_ptr<arrow::io::ReadableFile> arrow_file, const char *filename);
+dump_arrow_metadata(std::shared_ptr<arrow::io::ReadableFile> arrow_file,
+					const char *filename);
+extern "C" void
+dump_parquet_metadata(std::shared_ptr<arrow::io::ReadableFile> parquet_file,
+					  const char *filename);
 
 #endif
 #endif	/* _ARROW_TOOLS_H_ */

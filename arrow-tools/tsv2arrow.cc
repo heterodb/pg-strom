@@ -11,9 +11,6 @@
  * it under the terms of the PostgreSQL License.
  */
 #include "arrow-tools.h"
-#include <iostream>
-#include <list>
-#include <typeinfo>
 #include <ctype.h>
 #include <fcntl.h>
 #include <getopt.h>

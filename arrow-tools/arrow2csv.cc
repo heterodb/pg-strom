@@ -10,7 +10,6 @@
  * it under the terms of the PostgreSQL License.
  */
 #include "arrow-tools.h"
-#include <iostream>
 #include <fcntl.h>
 #include <getopt.h>
 #include <stdarg.h>
@@ -1117,7 +1116,10 @@ int main(int argc, char *argv[])
 #if HAS_PARQUET
 		if (file_is_parquet)
 		{
-			process_one_parquet_file(arrow_input_filp, filename);
+			if (only_metadata)
+				dump_parquet_metadata(arrow_input_filp, filename);
+			else
+				process_one_parquet_file(arrow_input_filp, filename);
 		}
 		else
 #endif
