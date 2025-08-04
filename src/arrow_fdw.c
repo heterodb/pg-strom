@@ -2102,18 +2102,16 @@ __buildRecordBatchStateOne(ArrowSchema *schema,
 static bool
 readArrowFile(const char *filename, ArrowFileInfo *af_info, bool missing_ok)
 {
-    File	filp = PathNameOpenFile(filename, O_RDONLY | PG_BINARY);
+	int		status = readArrowFileInfo(filename, af_info);
 
-	if (filp < 0)
+	if (status != 0)
 	{
-		if (missing_ok && errno == ENOENT)
+		if (missing_ok && status == ENOENT)
 			return false;
 		ereport(ERROR,
 				(errcode_for_file_access(),
-				 errmsg("could not open file \"%s\": %m", filename)));
+				 errmsg("could not open file \"%s\"", filename)));
 	}
-	readArrowFileDesc(FileGetRawDesc(filp), af_info);
-	FileClose(filp);
 	if (af_info->dictionaries != NULL)
 		elog(ERROR, "DictionaryBatch is not supported at '%s'", filename);
 	Assert(af_info->footer._num_dictionaries == 0);
@@ -5440,8 +5438,8 @@ ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 					if (strcmp(schema.fields[j].name,
 							   stemp->fields[k].name) == 0)
 					{
-						if (arrowFieldTypeIsEqual(&schema.fields[j],
-												  &stemp->fields[k]))
+						if (equalArrowNode(&schema.fields[j].type.node,
+										   &stemp->fields[k].type.node))
 						{
 							found = true;
 							break;
@@ -5450,7 +5448,6 @@ ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 							 schema.fields[j].name, fname);
 					}
 				}
-
 				if (!found)
 					elog(ERROR, "field '%s' was not found in the file '%s'",
 						 schema.fields[j].name, fname);
