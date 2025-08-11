@@ -67,21 +67,6 @@ PGSTROM_FLAGS += -DWITH_FATBIN=1
 endif
 
 #
-# Definition of PG-Strom Extension
-#
-MODULE_big = pg_strom
-MODULEDIR  = pg_strom
-DATA = $(STROM_SQL) ../LICENSE Makefile.cuda \
-       $(CUDA_SRCS) $(CUDA_HEADERS) $(STROM_HEADERS)
-OBJS = $(STROM_OBJS)
-
-EXTRA_CLEAN = $(CUDA_OBJS) $(GENERATED-HEADERS) \
-              $(shell ls -d pgstrom-gpucode-V*-*.fatbin 2>/dev/null)
-EXTENSION = pg_strom
-PG_CPPFLAGS := $(PGSTROM_FLAGS) -I $(CUDA_IPATH)
-SHLIB_LINK := -L $(CUDA_LPATH) -lcuda
-
-#
 # libarrow / libparquet
 #
 HAS_LIBARROW = $(shell pkgconf --exists arrow>/dev/null 2>&1   && echo -n yes)
@@ -95,6 +80,21 @@ else
 SHLIB_LINK += $(shell pkgconf --libs arrow)
 endif
 endif
+
+#
+# Definition of PG-Strom Extension
+#
+MODULE_big = pg_strom
+MODULEDIR  = pg_strom
+DATA = $(STROM_SQL) ../LICENSE Makefile.cuda \
+       $(CUDA_SRCS) $(CUDA_HEADERS) $(STROM_HEADERS)
+OBJS = $(STROM_OBJS)
+
+EXTRA_CLEAN = $(CUDA_OBJS) $(GENERATED-HEADERS) \
+              $(shell ls -d pgstrom-gpucode-V*-*.fatbin 2>/dev/null)
+EXTENSION = pg_strom
+PG_CPPFLAGS := $(PGSTROM_FLAGS) -I $(CUDA_IPATH)
+SHLIB_LINK += -L $(CUDA_LPATH) -lcuda
 
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)

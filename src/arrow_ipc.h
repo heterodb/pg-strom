@@ -256,7 +256,7 @@ extern size_t	setupArrowRecordBatchIOV(SQLtable *table);
 extern void		__initArrowNode(ArrowNode *node, ArrowNodeTag tag);
 #define initArrowNode(PTR,NAME)					\
 	__initArrowNode((ArrowNode *)(PTR),ArrowNodeTag__##NAME)
-extern char	   *dumpArrowNode(ArrowNode *node);
+extern char	   *dumpArrowNode(const ArrowNode *node);
 extern void		copyArrowNode(ArrowNode *dest, const ArrowNode *src);
 extern void		readArrowFileDesc(int fdesc, ArrowFileInfo *af_info);
 extern bool		arrowFieldTypeIsEqual(ArrowField *a, ArrowField *b);

@@ -28,6 +28,10 @@ typedef enum
 	ArrowMetadataVersion__V3 = 2,		/* not supported */
 	ArrowMetadataVersion__V4 = 3,
 	ArrowMetadataVersion__V5 = 4,
+	/* ------ Parquet File Version ------ */
+	ArrowMetadataVersion__Parquet_V1_0,
+	ArrowMetadataVersion__Parquet_V2_4,
+	ArrowMetadataVersion__Parquet_V2_6,
 } ArrowMetadataVersion;
 
 static inline const char *
@@ -35,13 +39,24 @@ ArrowMetadataVersionAsCString(ArrowMetadataVersion code)
 {
 	switch (code)
 	{
-		case ArrowMetadataVersion__V1:	return "V1";
-		case ArrowMetadataVersion__V2:	return "V2";
-		case ArrowMetadataVersion__V3:	return "V3";
-		case ArrowMetadataVersion__V4:	return "V4";
-		case ArrowMetadataVersion__V5:	return "V5";
+		case ArrowMetadataVersion__V1:	return "Arrow V1";
+		case ArrowMetadataVersion__V2:	return "Arrow V2";
+		case ArrowMetadataVersion__V3:	return "Arrow V3";
+		case ArrowMetadataVersion__V4:	return "Arrow V4";
+		case ArrowMetadataVersion__V5:	return "Arrow V5";
+		case ArrowMetadataVersion__Parquet_V1_0: return "Parquet v1.0";
+		case ArrowMetadataVersion__Parquet_V2_4: return "Parquet v2.4";
+		case ArrowMetadataVersion__Parquet_V2_6: return "Parquet v2.6";
 		default:						return "???";
 	}
+}
+
+static inline bool
+ArrowMetadataVersionIsParquet(ArrowMetadataVersion version)
+{
+	return (version == ArrowMetadataVersion__Parquet_V1_0 ||
+			version == ArrowMetadataVersion__Parquet_V2_4 ||
+			version == ArrowMetadataVersion__Parquet_V2_6);
 }
 
 /*
@@ -342,7 +357,7 @@ struct ArrowNode
 	ArrowNodeTag	tag;
 	const char	   *tagName;
 	void		  (*dumpArrowNode)(struct SQLbuffer *buf,
-								   struct ArrowNode *node);
+								   const struct ArrowNode *node);
 	void		  (*copyArrowNode)(struct ArrowNode *dest,
 								   const struct ArrowNode *source);
 };
@@ -549,6 +564,11 @@ typedef struct		ArrowField
 	/* vector of user defined metadata */
 	ArrowKeyValue  *custom_metadata;
 	int				_num_custom_metadata;
+#ifdef HAS_PARQUET
+	/* valid only parquet format (used for dumpArrowNode in JSON) */
+	const char	   *parquet_extra_attrs;
+	int				_parquet_extra_attrs_len;
+#endif
 } ArrowField;
 
 /*
@@ -559,6 +579,20 @@ typedef struct		ArrowFieldNode
 	ArrowNode		node;
 	uint64_t		length;
 	uint64_t		null_count;
+	/*
+	 * NOTE: stat_min_value and stat_max_value are not fields defined in Apache Arrow.
+	 * They are intended to set the statistical values embedded in Parquet files or
+	 * when min_values and max_values are set for the field.
+	 */
+	const char	   *stat_min_value;
+	int				_stat_min_value_len;
+	const char	   *stat_max_value;
+	int				_stat_max_value_len;
+#ifdef HAS_PARQUET
+	/* valid only parquet format (used for dumpArrowNode in JSON) */
+	const char	   *parquet_extra_attrs;
+	int				_parquet_extra_attrs_len;
+#endif
 } ArrowFieldNode;
 
 /*
@@ -711,10 +745,11 @@ typedef struct
 {
 	const char	   *filename;
 	struct stat		stat_buf;
-	bool			file_is_parquet;
 	ArrowFooter		footer;
 	ArrowMessage   *dictionaries;	/* array of ArrowDictionaryBatch */
+	int				_num_dictionaries;
 	ArrowMessage   *recordBatches;	/* array of ArrowRecordBatch */
+	int				_num_recordBatches;
 } ArrowFileInfo;
 
 /*
@@ -726,7 +761,7 @@ typedef struct
 #define __EXTERN	extern
 #endif
 
-__EXTERN char  *dumpArrowNode(ArrowNode *node);
+__EXTERN char  *dumpArrowNode(const ArrowNode *node);
 __EXTERN void	copyArrowNode(ArrowNode *dest, const ArrowNode *src);
 __EXTERN bool	equalArrowNode(const ArrowNode *a, const ArrowNode *b);
 __EXTERN int	readArrowFileInfo(const char *filename, ArrowFileInfo *af_info);

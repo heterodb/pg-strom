@@ -25,13 +25,13 @@ static void		sql_buffer_printf(SQLbuffer *buf, const char *fmt, ...)
  * Dump support of ArrowNode
  */
 static void
-__dumpArrowNode(SQLbuffer *buf, ArrowNode *node)
+__dumpArrowNode(SQLbuffer *buf, const ArrowNode *node)
 {
 	node->dumpArrowNode(buf, node);
 }
 
 static void
-__dumpArrowNodeSimple(SQLbuffer *buf, ArrowNode *node)
+__dumpArrowNodeSimple(SQLbuffer *buf, const ArrowNode *node)
 {
 	sql_buffer_printf(buf, "{%s}", node->tagName);
 }
@@ -501,7 +501,7 @@ __dumpArrowBodyCompression(SQLbuffer *buf, ArrowNode *node)
 }
 
 char *
-dumpArrowNode(ArrowNode *node)
+dumpArrowNode(const ArrowNode *node)
 {
 	SQLbuffer	buf;
 
@@ -1107,7 +1107,7 @@ arrowFieldTypeIsEqual(ArrowField *a, ArrowField *b)
  *
  * ------------------------------------------------
  */
-typedef void (*dumpArrowNode_f)(SQLbuffer *buf, ArrowNode *node);
+typedef void (*dumpArrowNode_f)(SQLbuffer *buf, const ArrowNode *node);
 typedef void (*copyArrowNode_f)(ArrowNode *dest, const ArrowNode *src);
 
 #define __INIT_ARROW_NODE(PTR,TYPENAME,NAME)				\

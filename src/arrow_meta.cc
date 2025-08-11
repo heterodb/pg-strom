@@ -14,6 +14,12 @@
 #include <arrow/io/api.h>
 #include <arrow/ipc/api.h>
 #include <arrow/ipc/reader.h>
+#ifdef HAS_PARQUET
+#include <parquet/arrow/schema.h>
+#include <parquet/metadata.h>
+#include <parquet/statistics.h>
+#include <parquet/file_reader.h>
+#endif
 #include <fcntl.h>
 #include <sstream>
 #include <string>
@@ -24,8 +30,10 @@
 #include "flatbuffers/Schema_generated.h"		/* copied from arrow */
 #include "flatbuffers/SparseTensor_generated.h"	/* copied from arrow */
 #include "flatbuffers/Tensor_generated.h"		/* copied from arrow */
-#define ARROW_SIGNATURE		"ARROW1"
-#define PARQUET_SIGNATURE	"PAR1"
+#define ARROW_SIGNATURE			"ARROW1"
+#define ARROW_SIGNATURE_SZ		(sizeof(ARROW_SIGNATURE)-1)
+#define PARQUET_SIGNATURE		"PAR1"
+#define PARQUET_SIGNATURE_SZ	(sizeof(PARQUET_SIGNATURE)-1)
 
 /*
  * Error Reporting
@@ -215,6 +223,8 @@ __dumpArrowTypeTimestamp(std::ostringstream &json, const ArrowTypeTimestamp *nod
 	const char *unit = ArrowTimeUnitAsCString(node->unit);
 	json << "\"Timestamp\""
 		 << ", \"unit\" : \"" << unit << "\"";
+	if (node->timezone)
+		json << ", \"timezone\" : \"" << __escape_json(node->timezone) << "\"";
 }
 static inline void
 __dumpArrowTypeInterval(std::ostringstream &json, const ArrowTypeInterval *node)
@@ -310,6 +320,10 @@ __dumpArrowField(std::ostringstream &json, const ArrowField *node)
 		}
 		json << " ]";
 	}
+#if HAS_PARQUET
+	if (node->parquet_extra_attrs)
+		json << ", " << node->parquet_extra_attrs;
+#endif
 }
 static inline void
 __dumpArrowFieldNode(std::ostringstream &json, const ArrowFieldNode *node)
@@ -317,6 +331,14 @@ __dumpArrowFieldNode(std::ostringstream &json, const ArrowFieldNode *node)
 	json << "\"FieldNode\""
 		 << ", \"length\" : " << node->length
 		 << ", \"null_count\" : " << node->null_count;
+	if (node->stat_min_value)
+		json << ", \"stat_min_value\" : " << __escape_json(node->stat_min_value);
+	if (node->stat_max_value)
+		json << ", \"stat_max_value\" : " << __escape_json(node->stat_max_value);
+#ifdef HAS_PARQUET
+	if (node->parquet_extra_attrs)
+		json << ", " << node->parquet_extra_attrs;
+#endif
 }
 static inline void
 __dumpArrowBuffer(std::ostringstream &json, const ArrowBuffer *node)
@@ -486,32 +508,80 @@ __dumpArrowNode(std::ostringstream &json, const ArrowNode *node)
 		case ArrowNodeTag__LargeBinary:
 		case ArrowNodeTag__LargeUtf8:
 		case ArrowNodeTag__LargeList:
-			json << "\"" << node->tagName << "\"";
+			json << "\"" << __escape_json(node->tagName) << "\"";
 			break;		/* nothing to special */
-		case ArrowNodeTag__Int:break;
-		case ArrowNodeTag__FloatingPoint:break;
-		case ArrowNodeTag__Decimal:break;
-		case ArrowNodeTag__Date:break;
-		case ArrowNodeTag__Time:break;
-		case ArrowNodeTag__Timestamp:break;
-		case ArrowNodeTag__Interval:break;
-		case ArrowNodeTag__Union:break;
-		case ArrowNodeTag__FixedSizeBinary:break;
-		case ArrowNodeTag__FixedSizeList:break;
-		case ArrowNodeTag__Map:break;
-		case ArrowNodeTag__Duration:break;
-		case ArrowNodeTag__KeyValue:break;
-		case ArrowNodeTag__DictionaryEncoding:break;
-		case ArrowNodeTag__Field:break;
-		case ArrowNodeTag__FieldNode:break;
-		case ArrowNodeTag__Buffer:break;
-		case ArrowNodeTag__Schema:break;
-		case ArrowNodeTag__RecordBatch:break;
-		case ArrowNodeTag__DictionaryBatch:break;
-		case ArrowNodeTag__Message:break;
-		case ArrowNodeTag__Block:break;
-		case ArrowNodeTag__Footer:break;
-		case ArrowNodeTag__BodyCompression:break;
+		case ArrowNodeTag__Int:
+			__dumpArrowTypeInt(json, (const ArrowTypeInt *)node);
+			break;
+		case ArrowNodeTag__FloatingPoint:
+			__dumpArrowTypeFloatingPoint(json, (const ArrowTypeFloatingPoint *)node);
+			break;
+		case ArrowNodeTag__Decimal:
+			__dumpArrowTypeDecimal(json, (const ArrowTypeDecimal *)node);
+			break;
+		case ArrowNodeTag__Date:
+			__dumpArrowTypeDate(json, (const ArrowTypeDate *)node);
+			break;
+		case ArrowNodeTag__Time:
+			__dumpArrowTypeTime(json, (const ArrowTypeTime *)node);
+			break;
+		case ArrowNodeTag__Timestamp:
+			__dumpArrowTypeTimestamp(json, (const ArrowTypeTimestamp *)node);
+			break;
+		case ArrowNodeTag__Interval:
+			__dumpArrowTypeInterval(json, (const ArrowTypeInterval *)node);
+			break;
+		case ArrowNodeTag__Union:
+			__dumpArrowTypeUnion(json, (const ArrowTypeUnion *)node);
+			break;
+		case ArrowNodeTag__FixedSizeBinary:
+			__dumpArrowTypeFixedSizeBinary(json, (const ArrowTypeFixedSizeBinary *)node);
+			break;
+		case ArrowNodeTag__FixedSizeList:
+			__dumpArrowTypeFixedSizeList(json, (const ArrowTypeFixedSizeList *)node);
+			break;
+		case ArrowNodeTag__Map:
+			__dumpArrowTypeMap(json, (const ArrowTypeMap *)node);
+			break;
+		case ArrowNodeTag__Duration:
+			__dumpArrowTypeDuration(json, (const ArrowTypeDuration *)node);
+			break;
+		case ArrowNodeTag__KeyValue:
+			__dumpArrowKeyValue(json, (const ArrowKeyValue *)node);
+			break;
+		case ArrowNodeTag__DictionaryEncoding:
+			__dumpArrowDictionaryEncoding(json, (const ArrowDictionaryEncoding *)node);
+			break;
+		case ArrowNodeTag__Field:
+			__dumpArrowField(json, (const ArrowField *)node);
+			break;
+		case ArrowNodeTag__FieldNode:
+			__dumpArrowFieldNode(json, (const ArrowFieldNode *)node);
+			break;
+		case ArrowNodeTag__Buffer:
+			__dumpArrowBuffer(json, (const ArrowBuffer *)node);
+			break;
+		case ArrowNodeTag__Schema:
+			__dumpArrowSchema(json, (const ArrowSchema *)node);
+			break;
+		case ArrowNodeTag__RecordBatch:
+			__dumpArrowRecordBatch(json, (const ArrowRecordBatch *)node);
+			break;
+		case ArrowNodeTag__DictionaryBatch:
+			__dumpArrowDictionaryBatch(json, (const ArrowDictionaryBatch *)node);
+			break;
+		case ArrowNodeTag__Message:
+			__dumpArrowMessage(json, (const ArrowMessage *)node);
+			break;
+		case ArrowNodeTag__Block:
+			__dumpArrowBlock(json, (const ArrowBlock *)node);
+			break;
+		case ArrowNodeTag__Footer:
+			__dumpArrowFooter(json, (const ArrowFooter *)node);
+			break;
+		case ArrowNodeTag__BodyCompression:
+			__dumpArrowBodyCompression(json, (const ArrowBodyCompression *)node);
+			break;
 		default:
 			Elog("unknown ArrowNodeTag (%d)", (int)node->tag);
 	}
@@ -723,6 +793,9 @@ __copyArrowField(ArrowField *dest, const ArrowField *src)
 	}
 	COPY_VECTOR(children, ArrowField);
 	COPY_VECTOR(custom_metadata, ArrowKeyValue);
+#ifdef HAS_PARQUET
+	COPY_CSTRING(parquet_extra_attrs);
+#endif
 }
 
 static inline void
@@ -730,6 +803,11 @@ __copyArrowFieldNode(ArrowFieldNode *dest, const ArrowFieldNode *src)
 {
 	COPY_SCALAR(length);
 	COPY_SCALAR(null_count);
+	COPY_CSTRING(stat_min_value);
+	COPY_CSTRING(stat_max_value);
+#ifdef HAS_PARQUET
+	COPY_CSTRING(parquet_extra_attrs);
+#endif
 }
 
 static inline void
@@ -1482,12 +1560,13 @@ readArrowBlock(ArrowBlock *node,
 
 static void
 readArrowKeyValue(ArrowKeyValue *node,
-				  const org::apache::arrow::flatbuf::KeyValue *kv)
+				  const std::string &key,
+				  const std::string &value)
 {
 	INIT_ARROW_NODE(node, KeyValue);
-	node->key = __pstrdup(kv->key());
+	node->key = __pstrdup(key.c_str());
 	node->_key_len = std::strlen(node->key);
-	node->value = __pstrdup(kv->value());
+	node->value = __pstrdup(value.c_str());
 	node->_value_len = std::strlen(node->value);
 }
 
@@ -1854,7 +1933,12 @@ readArrowField(ArrowField *node,
 		node->custom_metadata = (ArrowKeyValue *)
 			__palloc(sizeof(ArrowKeyValue) * node->_num_custom_metadata);
 		for (int i=0; i < node->_num_custom_metadata; i++)
-			readArrowKeyValue(&node->custom_metadata[i], (*__custom_metadata)[i]);
+		{
+			auto	__kv = (*__custom_metadata)[i];
+			readArrowKeyValue(&node->custom_metadata[i],
+							  __kv->key()->str(),
+							  __kv->value()->str());
+		}
 	}
 }
 
@@ -1893,7 +1977,12 @@ readArrowSchemaMessage(ArrowSchema *node,
 		node->custom_metadata = (ArrowKeyValue *)
 			__palloc(sizeof(ArrowKeyValue) * node->_num_custom_metadata);
 		for (int i=0; i < node->_num_custom_metadata; i++)
-			readArrowKeyValue(&node->custom_metadata[i], (*__custom_metadata)[i]);
+		{
+			auto	__kv = (*__custom_metadata)[i];
+			readArrowKeyValue(&node->custom_metadata[i],
+							  __kv->key()->str(),
+							  __kv->value()->str());
+		}
 	}
 
 	auto	__features = schema->features();
@@ -2014,6 +2103,7 @@ readArrowMessageBlock(ArrowMessage *node,
 	auto	fb_base = buffer->data() + sizeof(uint32_t);	/* Continuation token (0xffffffff) */
 	auto	message = org::apache::arrow::flatbuf::GetSizePrefixedMessage(fb_base);
 
+	INIT_ARROW_NODE(node, Message);
 	switch (message->header_type())
 	{
 		case org::apache::arrow::flatbuf::MessageHeader::Schema: {
@@ -2105,8 +2195,12 @@ readArrowFooter(ArrowFooter *node,
 		node->custom_metadata = (ArrowKeyValue *)
 			__palloc(sizeof(ArrowKeyValue) * node->_num_custom_metadata);
 		for (uint32_t i=0; i < __custom_metadata->size(); i++)
+		{
+			auto	__kv = (*__custom_metadata)[i];
 			readArrowKeyValue(&node->custom_metadata[i],
-							  (*__custom_metadata)[i]);
+							  __kv->key()->str(),
+							  __kv->value()->str());
+		}
 		node->_num_custom_metadata = __custom_metadata->size();
 	}
 }
@@ -2120,7 +2214,7 @@ __readArrowFileMetadata(std::shared_ptr<arrow::io::ReadableFile> rfilp,
 {
 	
 	auto	file_sz = rfilp->GetSize().ValueOrDie();
-	auto	tail_sz = sizeof(uint32_t) + sizeof(ARROW_SIGNATURE)-1;
+	auto	tail_sz = sizeof(uint32_t) + ARROW_SIGNATURE_SZ;
 	int32_t	footer_sz;
 
 	/* validate arrow file tail */
@@ -2133,7 +2227,7 @@ __readArrowFileMetadata(std::shared_ptr<arrow::io::ReadableFile> rfilp,
 
 		if (memcmp((char *)buffer->data() + sizeof(uint32_t),
 				   ARROW_SIGNATURE,
-				   sizeof(ARROW_SIGNATURE)-1) != 0)
+				   ARROW_SIGNATURE_SZ) != 0)
 			Elog("arrow: signature check failed");
 		footer_sz = *((int32_t *)buffer->data());
 	}
@@ -2161,6 +2255,7 @@ __readArrowFileMetadata(std::shared_ptr<arrow::io::ReadableFile> rfilp,
 				readArrowMessageBlock(&af_info->dictionaries[i],
 									  rfilp, block);
 			}
+			af_info->_num_dictionaries = __dictionaries->size();
 		}
 		/* extract RecordBatch message */
 		auto	__record_batches = footer->recordBatches();
@@ -2174,21 +2269,709 @@ __readArrowFileMetadata(std::shared_ptr<arrow::io::ReadableFile> rfilp,
 				readArrowMessageBlock(&af_info->recordBatches[i],
 									  rfilp, block);
 			}
+			af_info->_num_recordBatches = __record_batches->size();
 		}
-		/* this is Apache Arrow file */
-		af_info->file_is_parquet = false;
 	}
 }
 
 #ifdef HAS_PARQUET
+// ============================================================
+//
+// Routines to parse Parquet File metadata
+//
+// ============================================================
+
+static inline ArrowDateUnit
+__transformArrowDateUnit(arrow::DateUnit unit)
+{
+	switch (unit)
+	{
+		case arrow::DateUnit::DAY:
+			return ArrowDateUnit__Day;
+		case arrow::DateUnit::MILLI:
+			return ArrowDateUnit__MilliSecond;
+		default:
+			Elog("Unknown DateUnit (%d)", (int)unit);
+	}
+}
+
+static inline ArrowTimeUnit
+__transformArrowTimeUnit(arrow::TimeUnit::type unit)
+{
+	switch (unit)
+	{
+		case arrow::TimeUnit::type::SECOND:
+			return ArrowTimeUnit__Second;
+		case arrow::TimeUnit::type::MILLI:
+			return ArrowTimeUnit__MilliSecond;
+		case arrow::TimeUnit::type::MICRO:
+			return ArrowTimeUnit__MicroSecond;
+		case arrow::TimeUnit::type::NANO:
+			return ArrowTimeUnit__NanoSecond;
+		default:
+			Elog("Unknown TimeUnit (%d)", (int)unit);
+	}
+}
+
+/*
+ * __readParquetFieldMetadata
+ */
+static void
+__readParquetFieldMetadata(ArrowField *node,
+						   std::shared_ptr<arrow::Field> field,
+						   const parquet::ColumnDescriptor *cdesc)
+{
+	INIT_ARROW_NODE(node, Field);
+	node->name = __pstrdup(field->name().c_str());
+	node->_name_len = std::strlen(node->name);
+	node->nullable = field->nullable();
+
+	auto	__type = field->type();
+	switch (__type->id())
+	{
+		case arrow::Type::type::NA:
+			INIT_ARROW_TYPE_NODE(&node->type, Null);
+			break;
+		case arrow::Type::type::BOOL:
+			INIT_ARROW_TYPE_NODE(&node->type, Bool);
+			break;
+		case arrow::Type::type::UINT8:
+			INIT_ARROW_TYPE_NODE(&node->type, Int);
+			node->type.Int.bitWidth  = 8;
+			node->type.Int.is_signed = false;
+			break;
+		case arrow::Type::type::INT8:
+			INIT_ARROW_TYPE_NODE(&node->type, Int);
+			node->type.Int.bitWidth  = 8;
+			node->type.Int.is_signed = true;
+			break;
+		case arrow::Type::type::UINT16:
+			INIT_ARROW_TYPE_NODE(&node->type, Int);
+			node->type.Int.bitWidth  = 16;
+			node->type.Int.is_signed = false;
+			break;
+		case arrow::Type::type::INT16:
+			INIT_ARROW_TYPE_NODE(&node->type, Int);
+			node->type.Int.bitWidth  = 16;
+			node->type.Int.is_signed = true;
+			break;
+		case arrow::Type::type::UINT32:
+			INIT_ARROW_TYPE_NODE(&node->type, Int);
+			node->type.Int.bitWidth  = 32;
+			node->type.Int.is_signed = false;
+			break;
+		case arrow::Type::type::INT32:
+			INIT_ARROW_TYPE_NODE(&node->type, Int);
+			node->type.Int.bitWidth  = 32;
+			node->type.Int.is_signed = true;
+			break;
+		case arrow::Type::type::UINT64:
+			INIT_ARROW_TYPE_NODE(&node->type, Int);
+			node->type.Int.bitWidth  = 64;
+			node->type.Int.is_signed = false;
+			break;
+		case arrow::Type::type::INT64:
+			INIT_ARROW_TYPE_NODE(&node->type, Int);
+			node->type.Int.bitWidth  = 64;
+			node->type.Int.is_signed = true;
+			break;
+		case arrow::Type::type::HALF_FLOAT:
+			INIT_ARROW_TYPE_NODE(&node->type, FloatingPoint);
+			node->type.FloatingPoint.precision = ArrowPrecision__Half;
+			break;
+		case arrow::Type::type::FLOAT:
+			INIT_ARROW_TYPE_NODE(&node->type, FloatingPoint);
+			node->type.FloatingPoint.precision = ArrowPrecision__Single;
+			break;
+		case arrow::Type::type::DOUBLE:
+			INIT_ARROW_TYPE_NODE(&node->type, FloatingPoint);
+			node->type.FloatingPoint.precision = ArrowPrecision__Double;
+			break;
+		case arrow::Type::type::DECIMAL128:
+		case arrow::Type::type::DECIMAL256: {
+			const auto d_type = arrow::internal::checked_pointer_cast<arrow::DecimalType>(__type);
+			INIT_ARROW_TYPE_NODE(&node->type, Decimal);
+			node->type.Decimal.precision = d_type->precision();
+			node->type.Decimal.scale = d_type->scale();
+			node->type.Decimal.bitWidth = (__type->id() == arrow::Type::type::DECIMAL128 ? 128 : 256);
+			break;
+		}
+		case arrow::Type::type::STRING:
+			INIT_ARROW_TYPE_NODE(&node->type, Utf8);
+			break;
+		case arrow::Type::type::BINARY:
+			INIT_ARROW_TYPE_NODE(&node->type, Binary);
+			break;
+		case arrow::Type::type::FIXED_SIZE_BINARY: {
+			const auto f_type = arrow::internal::checked_pointer_cast<arrow::FixedSizeBinaryType>(__type);
+			INIT_ARROW_TYPE_NODE(&node->type, FixedSizeBinary);
+			node->type.FixedSizeBinary.byteWidth
+				= f_type->byte_width();
+			break;
+		}
+		case arrow::Type::type::DATE32:
+		case arrow::Type::type::DATE64: {
+			const auto d_type = arrow::internal::checked_pointer_cast<arrow::DateType>(__type);
+			INIT_ARROW_TYPE_NODE(&node->type, Date);
+			node->type.Date.unit = __transformArrowDateUnit(d_type->unit());
+			break;
+		}
+		case arrow::Type::type::TIMESTAMP: {
+			const auto ts_type = arrow::internal::checked_pointer_cast<arrow::TimestampType>(__type);
+			const auto ts_tz = ts_type->timezone();
+			INIT_ARROW_TYPE_NODE(&node->type, Timestamp);
+			node->type.Timestamp.unit = __transformArrowTimeUnit(ts_type->unit());
+			if (ts_tz.size() > 0)
+			{
+				node->type.Timestamp.timezone = __pstrdup(ts_tz.c_str());
+				node->type.Timestamp._timezone_len = std::strlen(node->type.Timestamp.timezone);
+			}
+			break;
+		}
+		case arrow::Type::type::TIME32:
+		case arrow::Type::type::TIME64: {
+			const auto tm_type = arrow::internal::checked_pointer_cast<arrow::TimestampType>(__type);
+			INIT_ARROW_TYPE_NODE(&node->type, Time);
+			node->type.Time.unit = __transformArrowTimeUnit(tm_type->unit());
+			node->type.Time.bitWidth = (__type->id() == arrow::Type::type::TIME32 ? 32 : 64);
+			break;
+		}
+		case arrow::Type::type::INTERVAL_MONTHS:
+			INIT_ARROW_TYPE_NODE(&node->type, Interval);
+			node->type.Interval.unit = ArrowIntervalUnit__Year_Month;
+			break;
+		case arrow::Type::type::INTERVAL_DAY_TIME:
+			INIT_ARROW_TYPE_NODE(&node->type, Interval);
+			node->type.Interval.unit = ArrowIntervalUnit__Day_Time;
+			break;
+		case arrow::Type::type::INTERVAL_MONTH_DAY_NANO:
+			INIT_ARROW_TYPE_NODE(&node->type, Interval);
+			node->type.Interval.unit = ArrowIntervalUnit__Month_Day_Nano;
+			break;
+		case arrow::Type::type::LIST:
+			INIT_ARROW_TYPE_NODE(&node->type, List);
+			break;
+		case arrow::Type::type::STRUCT:
+			INIT_ARROW_TYPE_NODE(&node->type, Struct);
+			break;
+		case arrow::Type::type::SPARSE_UNION:
+		case arrow::Type::type::DENSE_UNION: {
+			const auto un_type = arrow::internal::checked_pointer_cast<arrow::UnionType>(__type);
+			INIT_ARROW_TYPE_NODE(&node->type, Union);
+			node->type.Union.mode = (__type->id() == arrow::Type::type::SPARSE_UNION
+									 ? ArrowUnionMode__Sparse
+									 : ArrowUnionMode__Dense);
+			auto	__type_codes = un_type->type_codes();
+			if (__type_codes.size() > 0)
+			{
+				node->type.Union._num_typeIds = __type_codes.size();
+				node->type.Union.typeIds = (int32_t *)
+					__palloc(sizeof(int32_t) * node->type.Union._num_typeIds);
+				for (int i=0; i < node->type.Union._num_typeIds; i++)
+					node->type.Union.typeIds[i] = __type_codes[i];
+			}
+			break;
+		}
+		case arrow::Type::type::MAP: {
+			const auto map_type = arrow::internal::checked_pointer_cast<arrow::MapType>(__type);
+			INIT_ARROW_TYPE_NODE(&node->type, Map);
+			node->type.Map.keysSorted = map_type->keys_sorted();
+			break;
+		}
+		case arrow::Type::type::FIXED_SIZE_LIST: {
+			const auto fl_type = arrow::internal::checked_pointer_cast<arrow::FixedSizeListType>(__type);
+			INIT_ARROW_TYPE_NODE(&node->type, FixedSizeList);
+			node->type.FixedSizeList.listSize = fl_type->list_size();
+			break;
+		}
+		case arrow::Type::type::DURATION: {
+			const auto du_type = arrow::internal::checked_pointer_cast<arrow::DurationType>(__type);
+			INIT_ARROW_TYPE_NODE(&node->type, Duration);
+			node->type.Duration.unit = __transformArrowTimeUnit(du_type->unit());
+			break;
+		}
+		case arrow::Type::type::LARGE_STRING:
+			INIT_ARROW_TYPE_NODE(&node->type, LargeUtf8);
+			break;
+		case arrow::Type::type::LARGE_BINARY:
+			INIT_ARROW_TYPE_NODE(&node->type, LargeBinary);
+			break;
+		case arrow::Type::type::LARGE_LIST:
+			INIT_ARROW_TYPE_NODE(&node->type, LargeList);
+			break;
+		default:
+			Elog("unknown arrow type mapping (id=%d)", (int)__type->id());
+	}
+	/* subfields (List/Struct) */
+	if (__type->num_fields() > 0)
+	{
+		node->_num_children = __type->num_fields();
+		node->children = (ArrowField *)
+			__palloc(sizeof(ArrowField) * node->_num_children);
+		for (int i=0; i < node->_num_children; i++)
+		{
+			__readParquetFieldMetadata(&node->children[i],
+									   __type->field(i),
+									   NULL);
+		}
+	}
+
+	/* custom metadata */
+	auto	__custom_metadata = field->metadata();
+	if (__custom_metadata && __custom_metadata->size() > 0)
+	{
+		node->_num_custom_metadata = __custom_metadata->size();
+		node->custom_metadata = (ArrowKeyValue *)
+			__palloc(sizeof(ArrowKeyValue) * node->_num_custom_metadata);
+		for (int i=0; i < node->_num_custom_metadata; i++)
+		{
+			readArrowKeyValue(&node->custom_metadata[i],
+							  __custom_metadata->key(i),
+							  __custom_metadata->value(i));
+		}
+	}
+	/* add extra stuff of parquet */
+	if (cdesc)
+	{
+		std::ostringstream json;
+		std::string temp;
+		char	   *extra_attrs;
+
+		json << "\"physical_type\" : ";
+		switch (cdesc->physical_type())
+		{
+			case parquet::Type::BOOLEAN:
+				json << "\"BOOLEAN\"";
+				break;
+			case parquet::Type::INT32:
+				json << "\"INT32\"";
+				break;
+			case parquet::Type::INT64:
+				json << "\"INT64\"";
+				break;
+			case parquet::Type::INT96:
+				json << "\"INT96\"";
+				break;
+			case parquet::Type::FLOAT:
+				json << "\"FLOAT\"";
+				break;
+			case parquet::Type::DOUBLE:
+				json << "\"DOUBLE\"";
+				break;
+			case parquet::Type::BYTE_ARRAY:
+				json << "\"BYTE_ARRAY\"";
+				break;
+			case parquet::Type::FIXED_LEN_BYTE_ARRAY:
+				json << "\"FIXED_LEN_BYTE_ARRAY(" << cdesc->type_length() << ")\"";
+				break;
+			default:
+				json << "\"???\"";
+				break;
+		}
+
+		json << ", \"converted_type\" : ";
+		switch (cdesc->converted_type())
+		{
+			case parquet::ConvertedType::type::NONE:
+				json << "\"NONE\"";
+				break;
+			case parquet::ConvertedType::type::UTF8:
+				json << "\"UTF8\"";
+				break;
+			case parquet::ConvertedType::type::MAP:
+				json << "\"MAP\"";
+				break;
+			case parquet::ConvertedType::type::MAP_KEY_VALUE:
+				json << "\"MAP_KEY_VALUE\"";
+				break;
+			case parquet::ConvertedType::type::LIST:
+				json << "\"LIST\"";
+				break;
+			case parquet::ConvertedType::type::ENUM:
+				json << "\"ENUM\"";
+				break;
+			case parquet::ConvertedType::type::DECIMAL:
+				json << "\"DECIMAL("
+					 << cdesc->type_precision()
+					 << ","
+					 << cdesc->type_scale() << ")\"";
+				break;
+			case parquet::ConvertedType::type::DATE:
+				json << "\"DATE\"";
+				break;
+			case parquet::ConvertedType::type::TIME_MILLIS:
+				json << "\"TIME[ms]\"";
+				break;
+			case parquet::ConvertedType::type::TIME_MICROS:
+				json << "\"TIME[us]\"";
+				break;
+			case parquet::ConvertedType::type::TIMESTAMP_MILLIS:
+				json << "\"TIMESTAMP[ms]\"";
+				break;
+			case parquet::ConvertedType::type::TIMESTAMP_MICROS:
+				json << "\"TIMESTAMP[us]\"";
+				break;
+			case parquet::ConvertedType::type::UINT_8:
+				json << "\"UINT_8\"";
+				break;
+			case parquet::ConvertedType::type::UINT_16:
+				json << "\"UINT_16\"";
+				break;
+			case parquet::ConvertedType::type::UINT_32:
+				json << "\"UINT_32\"";
+				break;
+			case parquet::ConvertedType::type::UINT_64:
+				json << "\"UINT_64\"";
+				break;
+			case parquet::ConvertedType::type::INT_8:
+				json << "\"INT_8\"";
+				break;
+			case parquet::ConvertedType::type::INT_16:
+				json << "\"INT_16\"";
+				break;
+			case parquet::ConvertedType::type::INT_32:
+				json << "\"INT_32\"";
+				break;
+			case parquet::ConvertedType::type::INT_64:
+				json << "\"INT_64\"";
+				break;
+			case parquet::ConvertedType::type::JSON:
+				json << "\"JSON\"";
+				break;
+			case parquet::ConvertedType::type::BSON:
+				json << "\"BSON\"";
+				break;
+			case parquet::ConvertedType::type::INTERVAL:
+				json << "\"INTERVAL\"";
+				break;
+			default:
+				json << "\"???\"";
+				break;
+		}
+
+		auto l_type = cdesc->logical_type();
+		if (l_type)
+			json << ", \"logical_type\" : \"" << l_type->ToString() <<"\"";
+
+		json << ", \"max_definition_level\" : " << cdesc->max_definition_level()
+			 << ", \"max_repetition_level\" : " << cdesc->max_repetition_level();
+
+		temp = json.str();
+		extra_attrs = (char *)__palloc(temp.size() + 1);
+		memcpy(extra_attrs, temp.data(), temp.size());
+		extra_attrs[temp.size()] = '\0';
+		node->parquet_extra_attrs = extra_attrs;
+		node->_parquet_extra_attrs_len = std::strlen(extra_attrs);
+	}
+}
+
+/*
+ * __readParquetSchemaMetadata
+ */
+static void
+__readParquetSchemaMetadata(ArrowSchema *node,
+							const parquet::SchemaDescriptor *parquet_schema)
+{
+	std::shared_ptr<arrow::Schema> arrow_schema;
+
+	auto	status = parquet::arrow::FromParquetSchema(parquet_schema,
+													   &arrow_schema);
+	if (!status.ok())
+		Elog("failed on parquet::FromParquetSchema: %s",
+			 status.ToString().c_str());
+
+	INIT_ARROW_NODE(node, Schema);
+	switch (arrow_schema->endianness())
+	{
+		case arrow::Endianness::Little:
+			node->endianness = ArrowEndianness__Little;
+			break;
+		case arrow::Endianness::Big:
+			node->endianness = ArrowEndianness__Big;
+			break;
+		default:
+			Elog("unknown Endianness (%d)", (int)arrow_schema->endianness());
+			break;
+	}
+	if (arrow_schema->num_fields() > 0)
+	{
+		node->_num_fields = arrow_schema->num_fields();
+		node->fields = (ArrowField *)
+			__palloc(sizeof(ArrowField) * node->_num_fields);
+		for (int j=0; j < node->_num_fields; j++)
+		{
+			__readParquetFieldMetadata(&node->fields[j],
+									   arrow_schema->field(j),
+									   parquet_schema->Column(j));
+		}
+	}
+	auto	__custom_metadata = arrow_schema->metadata();
+	if (__custom_metadata && __custom_metadata->size() > 0)
+	{
+		node->_num_custom_metadata = __custom_metadata->size();
+		node->custom_metadata = (ArrowKeyValue *)
+            __palloc(sizeof(ArrowKeyValue) * node->_num_custom_metadata);
+		for (int i=0; i < node->_num_custom_metadata; i++)
+		{
+			readArrowKeyValue(&node->custom_metadata[i],
+							  __custom_metadata->key(i),
+							  __custom_metadata->value(i));
+		}
+	}
+}
+
+/*
+ * __readParquetMinMaxStats
+ */
+static void
+__readParquetMinMaxStats(ArrowFieldNode *field,
+						 std::shared_ptr<parquet::Statistics> stats)
+{
+	/* NULL-count */
+	if (stats->HasNullCount())
+		field->null_count = stats->null_count();
+	if (stats->HasMinMax())
+	{
+		field->stat_min_value = __pstrdup(stats->EncodeMin().c_str());
+		field->_stat_min_value_len = std::strlen(field->stat_min_value);
+		field->stat_max_value = __pstrdup(stats->EncodeMax().c_str());
+		field->_stat_max_value_len = std::strlen(field->stat_max_value);
+	}
+}
+
+/*
+ * __parquetEncodingAsCString
+ */
+static inline const char *
+__parquetEncodingAsCString(parquet::Encoding::type code)
+{
+	switch (code)
+	{
+		case parquet::Encoding::type::PLAIN:
+			return "PLAIN";
+		case parquet::Encoding::type::PLAIN_DICTIONARY:
+			return "PLAIN_DICTIONARY";
+		case parquet::Encoding::type::RLE:
+			return "RLE";
+		case parquet::Encoding::type::BIT_PACKED:
+			return "BIT_PACKED";
+		case parquet::Encoding::type::DELTA_BINARY_PACKED:
+			return "DELTA_BINARY_PACKED";
+		case parquet::Encoding::type::DELTA_LENGTH_BYTE_ARRAY:
+			return "DELTA_LENGTH_BYTE_ARRAY";
+		case parquet::Encoding::type::DELTA_BYTE_ARRAY:
+			return "DELTA_BYTE_ARRAY";
+		case parquet::Encoding::type::RLE_DICTIONARY:
+			return "RLE_DICTIONARY";
+		case parquet::Encoding::type::BYTE_STREAM_SPLIT:
+			return "BYTE_STREAM_SPLIT";
+		default:
+			return "unknown";
+	}
+}
+
+/*
+ * __parquetPageTypeAsCString
+ */
+static inline const char *
+__parquetPageTypeAsCString(parquet::PageType::type code)
+{
+	switch (code)
+	{
+		case parquet::PageType::type::DATA_PAGE:
+			return "DATA_PAGE";
+		case parquet::PageType::type::INDEX_PAGE:
+			return "INDEX_PAGE";
+		case parquet::PageType::type::DICTIONARY_PAGE:
+			return "DICTIONARY_PAGE";
+		case parquet::PageType::type::DATA_PAGE_V2:
+			return "DATA_PAGE_V2";
+		default:
+			return "unknown";
+	}
+}
+
+/*
+ * __readParquetRowGroupMetadata
+ */
+static void
+__readParquetRowGroupMetadata(ArrowMessage *rbatch_message,
+							  ArrowBlock   *rbatch_block,
+							  std::unique_ptr<parquet::RowGroupMetaData> rg_meta,
+							  ArrowMetadataVersion metadata_version,
+							  int64_t next_rowgroup_offset)
+{
+	int64_t		bodyLength = 0;
+
+	/*
+	 * RowGroup is similar to RecordBatch Message in Arrow
+	 */
+	INIT_ARROW_NODE(rbatch_message, Message);
+	rbatch_message->version = metadata_version;
+	rbatch_message->bodyLength = (next_rowgroup_offset - rg_meta->file_offset());
+
+	/*
+	 * ColumnChunkMetaData is tranformed as if FieldNodes/Buffers
+	 */
+	ArrowRecordBatch   *rbatch = &rbatch_message->body.recordBatch;
+
+	INIT_ARROW_NODE(rbatch, RecordBatch);
+	rbatch->length = rg_meta->num_rows();
+	rbatch->_num_nodes = rg_meta->num_columns();
+	rbatch->nodes = (ArrowFieldNode *)
+		__palloc(sizeof(ArrowFieldNode) * rbatch->_num_nodes);
+	rbatch->_num_nodes = rg_meta->num_columns();
+	rbatch->buffers = (ArrowBuffer *)
+		__palloc(sizeof(ArrowBuffer) * rbatch->_num_nodes);
+	for (int j=0; j < rg_meta->num_columns(); j++)
+	{
+		auto	col_meta = rg_meta->ColumnChunk(j);
+		auto	field = &rbatch->nodes[j];
+		auto	buffer = &rbatch->buffers[j];
+		std::ostringstream json;
+		std::string temp;
+
+		INIT_ARROW_NODE(field, FieldNode);
+		field->length = col_meta->num_values();
+		if (col_meta->is_stats_set())
+			__readParquetMinMaxStats(field, col_meta->statistics());
+		/*
+		 * Some additional Parquet specific attrobutes for dump only
+		 */
+		json << "\"totalUncompressedSize\" : " << col_meta->total_uncompressed_size();
+		if (col_meta->has_dictionary_page())
+			json << ", \"dictionaryPageOffset\" : " << col_meta->dictionary_page_offset();
+		if (col_meta->has_index_page())
+			json << ", \"indexPageOffset\" : " << col_meta->index_page_offset();
+		auto	encodings = col_meta->encodings();
+		if (!encodings.empty())
+		{
+			json << ", \"encodings\" : [";
+			for (auto cell = encodings.begin(); cell != encodings.end(); cell++)
+			{
+				json << (cell != encodings.begin() ? ", " : " ")
+					 << "\"" <<__parquetEncodingAsCString(*cell) << "\"";
+			}
+			json << " ]";
+		}
+
+		auto	encoding_stats = col_meta->encoding_stats();
+		if (!encoding_stats.empty())
+		{
+			json << ", \"encodingStats\" : [";
+			for (auto cell = encoding_stats.begin(); cell != encoding_stats.end(); cell++)
+			{
+				auto	est = (*cell);
+
+				json << (cell != encoding_stats.begin() ? ", " : " ");
+				json << "{ \"page_type\" : "
+					 << "\"" << __parquetPageTypeAsCString(est.page_type) << "\""
+					 << ", \"encoding\" : "
+					 << "\"" << __parquetEncodingAsCString(est.encoding) << "\""
+					 << ", \"count\" : " << est.count << " }";
+			}
+			json << " ]";
+		}
+		temp = json.str();
+		field->parquet_extra_attrs = __pstrdup(temp.c_str());
+
+		INIT_ARROW_NODE(buffer, Buffer);
+		buffer->offset = col_meta->data_page_offset();
+		buffer->length = col_meta->total_compressed_size();
+
+		bodyLength = buffer->offset + buffer->length;
+	}
+
+	/*
+	 * Block (whole Row-Group)
+	 */
+	INIT_ARROW_NODE(rbatch_block, Block);
+	rbatch_block->offset = rg_meta->file_offset();
+	rbatch_block->metaDataLength = (next_rowgroup_offset - bodyLength);
+	rbatch_block->bodyLength = bodyLength;
+}
+
 /*
  * __readParquetFileMetadata
  */
 static void
-__readParquetFileMetadata(std::shared_ptr<arrow::io::ReadableFile> rfile,
+__readParquetFileMetadata(std::shared_ptr<arrow::io::ReadableFile> rfilp,
 						  ArrowFileInfo *af_info)
 {
+	ArrowFooter *footer = &af_info->footer;
+	auto	parquet_reader = parquet::ParquetFileReader::Open(rfilp);
+	auto	file_meta = parquet_reader->metadata();
+	auto	file_size = rfilp->GetSize().ValueOrDie();
 
+	INIT_ARROW_NODE(footer, Footer);
+	/* Parquet file version */
+	switch (file_meta->version())
+	{
+		case parquet::ParquetVersion::PARQUET_1_0:
+			footer->version = ArrowMetadataVersion__Parquet_V1_0;
+			break;
+		case parquet::ParquetVersion::PARQUET_2_4:
+			footer->version = ArrowMetadataVersion__Parquet_V2_4;
+			break;
+		case parquet::ParquetVersion::PARQUET_2_6:
+			footer->version = ArrowMetadataVersion__Parquet_V2_6;
+			break;
+		default:
+			Elog("unknown Parquet version code (%d)", (int)file_meta->version());
+	}
+
+	/*
+	 * Read Schema definition
+	 */
+	__readParquetSchemaMetadata(&footer->schema, file_meta->schema());
+
+	/*
+	 * For each Row-Groups
+	 */
+	if (file_meta->num_row_groups() > 0)
+	{
+		auto	ngroups = file_meta->num_row_groups();
+		int64_t	meta_file_offset = (file_size - (PARQUET_SIGNATURE_SZ
+												 + sizeof(uint32_t)
+												 + file_meta->size()));
+		af_info->recordBatches = (ArrowMessage *)
+			__palloc(sizeof(ArrowMessage) * ngroups);
+		footer->recordBatches = (ArrowBlock *)
+			__palloc(sizeof(ArrowBlock) * ngroups);
+		for (int i=0; i < ngroups; i++)
+		{
+			int64_t		next_rowgroup_offset = (i+1 < ngroups
+												? file_meta->RowGroup(i+1)->file_offset()
+												: meta_file_offset);
+			__readParquetRowGroupMetadata(&af_info->recordBatches[i],
+										  &footer->recordBatches[i],
+										  file_meta->RowGroup(i),
+										  footer->version,
+										  next_rowgroup_offset);
+		}
+		af_info->_num_recordBatches = ngroups;
+		footer->_num_recordBatches = ngroups;
+	}
+	/* key-value metadata */
+	auto	file_key_value = file_meta->key_value_metadata();
+	if (file_key_value)
+	{
+		int		nitems = file_key_value->size();
+		ArrowKeyValue  *custom_metadata = (ArrowKeyValue *)
+			__palloc(sizeof(ArrowKeyValue) * nitems);
+		for (int i=0; i < nitems; i++)
+		{
+			ArrowKeyValue *node = &custom_metadata[i];
+
+			INIT_ARROW_NODE(node, KeyValue);
+			node->key = __pstrdup(file_key_value->key(i).c_str());
+			node->_key_len = std::strlen(node->key);
+			node->value = __pstrdup(file_key_value->value(i).c_str());
+			node->_value_len = std::strlen(node->value);
+		}
+		af_info->footer._num_custom_metadata = nitems;
+		af_info->footer.custom_metadata = custom_metadata;
+	}
 }
 #endif
 
@@ -2207,13 +2990,13 @@ __readArrowFileInfo(int fdesc, ArrowFileInfo *af_info)
 			 rv.status().ToString().c_str());
 	/* std::shared_ptr<arrow::io::ReadableFile> */
 	auto rfilp = rv.ValueOrDie();
-	/* check file format - arrow or parquet */
+	/* Quick check of the file format. */
 	if (rfilp->ReadAt(0, 6, magic) != 6)
 		Elog("failed on arrow::io::ReadableFile::ReadAt");
-	if (std::memcmp(magic, ARROW_SIGNATURE, sizeof(ARROW_SIGNATURE)-1) == 0)
+	if (std::memcmp(magic, ARROW_SIGNATURE, ARROW_SIGNATURE_SZ) == 0)
 		__readArrowFileMetadata(rfilp, af_info);
 #if HAS_PARQUET
-	else if (std::memcmp(magic, PARQUET_SIGNATURE, sizeof(PARQUET_SIGNATURE)-1) == 0)
+	else if (std::memcmp(magic, PARQUET_SIGNATURE, PARQUET_SIGNATURE_SZ) == 0)
 		__readParquetFileMetadata(rfilp, af_info);
 #endif
 	else

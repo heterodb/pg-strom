@@ -16,11 +16,10 @@
 #include <stdio.h>
 #include <unistd.h>
 #include "float2.h"
+#include "arrow_defs.h"
 
 using namespace arrow;
 
-typedef std::string				cppString;
-typedef std::vector<cppString>	cppStringVec;
 typedef std::shared_ptr<io::ReadableFile>	arrowReadableFile;
 
 static const char	   *output_filename = NULL;
@@ -34,7 +33,7 @@ static long				skip_limit = -1;
 static const char	   *with_create_table = NULL;
 static const char	   *with_tablespace = NULL;
 static const char	   *with_partition_of = NULL;
-static cppStringVec		input_filenames;
+static std::vector<std::string> input_filenames;
 static int				verbose = 0;
 
 static void
@@ -1097,53 +1096,59 @@ int main(int argc, char *argv[])
 	/* process for each input files */
 	for (auto cell = input_filenames.begin(); cell != input_filenames.end(); cell++)
 	{
-		Result<arrowReadableFile>rv;
 		arrowReadableFile arrow_input_filp;
-		Status		status;
 		const char *filename = (*cell).c_str();
-		int			fdesc;
-		bool		file_is_parquet	__attribute__((unused)) = false;
-		char		magic[10];
 
-		fdesc = open(filename, O_RDONLY);
-		if (fdesc < 0)
-			Elog("failed on open('%s'): %m", filename);
-		/* determine the file type */
-		if (pread(fdesc, magic, 6, 0) != 6)
-			Elog("failed on pread('%s'): %m", filename);
-		if (memcmp(magic, "ARROW1", 6) == 0)
-			file_is_parquet = false;
-#if HAS_PARQUET
-		else if (memcmp(magic, "PAR1", 4) == 0)
-			file_is_parquet = true;
-#endif
-		else
-			Elog("input file '%s' is neither Arrow nor Parquet", filename);
-		/* open the file stream */
-		rv = io::ReadableFile::Open(fdesc);
-		if (!rv.ok())
-			Elog("failed on arrow::io::FileOutputStream::Open('%s'): %s",
-				 filename, rv.status().ToString().c_str());
-		arrow_input_filp = rv.ValueOrDie();
-		/* process one Arrow or Parquet file */
-#if HAS_PARQUET
-		if (file_is_parquet)
+		/* metadata only */
+		if (only_metadata)
 		{
-			if (only_metadata)
-				dump_parquet_metadata(arrow_input_filp, filename);
-			else
-				process_one_parquet_file(arrow_input_filp, filename);
+			ArrowFileInfo af_info;
+			char   *json;
+
+			readArrowFileInfo(filename, &af_info);
+			json = dumpArrowNode((ArrowNode *)&af_info.footer);
+			printf("[Metadata]\n%s\n", json);
+			for (int k=0; k < af_info._num_dictionaries; k++)
+			{
+				json = dumpArrowNode((ArrowNode *)&af_info.dictionaries[k]);
+				printf("[Dictionary Batch-%d]\n%s\n", k, json);
+			}
+			for (int k=0; k < af_info._num_recordBatches; k++)
+			{
+				json = dumpArrowNode((ArrowNode *)&af_info.recordBatches[k]);
+				printf("[Record Batch-%d]\n%s\n", k, json);
+			}
+			continue;
 		}
-		else
-#endif
+		/* open the file and fetch magic string */
 		{
-			if (only_metadata)
-				dump_arrow_metadata(arrow_input_filp, filename);
-			else
+			int		fdesc = open(filename, O_RDONLY);
+			if (fdesc < 0)
+				Elog("failed on open('%s'): %m", filename);
+			auto	rv = io::ReadableFile::Open(fdesc);
+			if (!rv.ok())
+				Elog("failed on arrow::io::FileOutputStream::Open('%s'): %s",
+					 filename, rv.status().ToString().c_str());
+			arrow_input_filp = rv.ValueOrDie();
+		}
+		/* determine the file type */
+		{
+			auto	rv = arrow_input_filp->ReadAt(0, 6);
+			if (!rv.ok())
+				Elog("failed on arrow::io::FileOutputStream::ReadAt('%s'): %s",
+					 filename, rv.status().ToString().c_str());
+			auto	buffer = rv.ValueOrDie();
+			if (memcmp(buffer->data(), "ARROW1", 6) == 0)
 				process_one_arrow_file(arrow_input_filp, filename);
+#if HAS_PARQUET
+			else if (memcmp(buffer->data(), "PAR1", 4) == 0)
+				process_one_parquet_file(arrow_input_filp, filename);
+#endif
+			else
+				Elog("input file '%s' is neither Arrow nor Parquet", filename);
 		}
 		/* close the file stream */
-		status = arrow_input_filp->Close();
+		auto	status = arrow_input_filp->Close();
 		if (!status.ok())
 			Elog("failed on arrow::io::ReadableFile::Close: %s",
 				 status.ToString().c_str());
