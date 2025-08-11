@@ -136,6 +136,7 @@ __escape_json(const char *str)
 {
 	std::string	res;
 
+	res += "\"";
 	for (const char *pos = str; *pos != '\0'; pos++)
 	{
 		switch (*pos)
@@ -175,6 +176,7 @@ __escape_json(const char *str)
 				break;
 		}
 	}
+	res += "\"";
 	return res;
 }
 
@@ -224,7 +226,7 @@ __dumpArrowTypeTimestamp(std::ostringstream &json, const ArrowTypeTimestamp *nod
 	json << "\"Timestamp\""
 		 << ", \"unit\" : \"" << unit << "\"";
 	if (node->timezone)
-		json << ", \"timezone\" : \"" << __escape_json(node->timezone) << "\"";
+		json << ", \"timezone\" : " << __escape_json(node->timezone);
 }
 static inline void
 __dumpArrowTypeInterval(std::ostringstream &json, const ArrowTypeInterval *node)
@@ -276,8 +278,8 @@ static inline void
 __dumpArrowKeyValue(std::ostringstream &json, const ArrowKeyValue *node)
 {
 	json << "\"KeyValue\""
-		 << ", \"key\" : \"" << __escape_json(node->key) << "\""
-		 << ", \"value\" : \""<< __escape_json(node->value) << "\"";
+		 << ", \"key\" : " << __escape_json(node->key)
+		 << ", \"value\" : "<< __escape_json(node->value);
 }
 static inline void
 __dumpArrowDictionaryEncoding(std::ostringstream &json, const ArrowDictionaryEncoding *node)
@@ -291,7 +293,7 @@ static inline void
 __dumpArrowField(std::ostringstream &json, const ArrowField *node)
 {
 	json << "\"Field\""
-		 << ", \"name\" : \"" << __escape_json(node->name) << "\""
+		 << ", \"name\" : " << __escape_json(node->name)
 		 << ", \"nullable\" : " << (node->nullable ? "true" : "false")
 		 << ", \"type\" : ";
 	__dumpArrowNode(json, &node->type.node);
@@ -508,7 +510,7 @@ __dumpArrowNode(std::ostringstream &json, const ArrowNode *node)
 		case ArrowNodeTag__LargeBinary:
 		case ArrowNodeTag__LargeUtf8:
 		case ArrowNodeTag__LargeList:
-			json << "\"" << __escape_json(node->tagName) << "\"";
+			json << __escape_json(node->tagName);
 			break;		/* nothing to special */
 		case ArrowNodeTag__Int:
 			__dumpArrowTypeInt(json, (const ArrowTypeInt *)node);
@@ -2241,8 +2243,10 @@ __readArrowFileMetadata(std::shared_ptr<arrow::io::ReadableFile> rfilp,
 				 rv.status().ToString().c_str());
 		auto	buffer = rv.ValueOrDie();
 		auto	footer = org::apache::arrow::flatbuf::GetFooter(buffer->data());
+
 		/* extract Footer */
 		readArrowFooter(&af_info->footer, footer);
+
 		/* extract DictionaryBatch message*/
 		auto	__dictionaries = footer->dictionaries();
 		if (__dictionaries && __dictionaries->size() > 0)
@@ -2270,6 +2274,56 @@ __readArrowFileMetadata(std::shared_ptr<arrow::io::ReadableFile> rfilp,
 									  rfilp, block);
 			}
 			af_info->_num_recordBatches = __record_batches->size();
+		}
+		/*
+		 * extract min/max statistics embedded by pg2arrow
+		 * (not a standard feature)
+		 */
+		const auto schema = &af_info->footer.schema;
+		for (int j=0; j < schema->_num_fields; j++)
+		{
+			const ArrowField *field = &schema->fields[j];
+			const char *min_values = NULL;
+			const char *max_values = NULL;
+
+			for (int k=0; k < field->_num_custom_metadata; k++)
+			{
+				const ArrowKeyValue *kv = &field->custom_metadata[k];
+
+				if (std::strcmp(kv->key, "min_values") == 0)
+					min_values = kv->value;
+				else if (std::strcmp(kv->key, "max_values") == 0)
+					max_values = kv->value;
+			}
+			if (min_values && max_values)
+			{
+				char   *min_buffer = (char *)alloca(std::strlen(min_values)+1);
+				char   *max_buffer = (char *)alloca(std::strlen(max_values)+1);
+				char   *tok1, *pos1;	/* for min values */
+				char   *tok2, *pos2;	/* for max values */
+				int		rb_index;
+
+				strcpy(min_buffer, min_values);
+				strcpy(max_buffer, max_values);
+				for (tok1 = strtok_r(min_buffer, ",", &pos1),
+					 tok2 = strtok_r(max_buffer, ",", &pos2),
+					 rb_index = 0;
+					 tok1 != NULL && tok2 != NULL &&
+					 rb_index < af_info->_num_recordBatches;
+					 tok1 = strtok_r(NULL, ",", &pos1),
+					 tok2 = strtok_r(NULL, ",", &pos2),
+					 rb_index++)
+				{
+					auto rbatch = &af_info->recordBatches[rb_index].body.recordBatch;
+					assert(ArrowNodeIs(rbatch, RecordBatch));
+					auto fnode = &rbatch->nodes[j];
+
+					fnode->stat_min_value = __pstrdup(tok1);
+					fnode->_stat_min_value_len = std::strlen(fnode->stat_min_value);
+					fnode->stat_max_value = __pstrdup(tok2);
+					fnode->_stat_max_value_len = std::strlen(fnode->stat_max_value);
+				}
+			}
 		}
 	}
 }
