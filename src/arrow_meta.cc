@@ -129,7 +129,9 @@ inline char *__pstrdup(const flatbuffers::String *str)
 //
 // ============================================================
 static void
-__dumpArrowNode(std::ostringstream &json, const ArrowNode *node);
+__dumpArrowNode(std::ostringstream &json,
+				const ArrowNode *node,
+				std::string NewLine);
 
 static inline std::string
 __escape_json(const char *str)
@@ -180,14 +182,21 @@ __escape_json(const char *str)
 	return res;
 }
 
+#define __SPACES(JSON_KEY)		std::string(std::strlen(JSON_KEY)+7,' ')
+#define __ARRAY_INDENT			std::string("  ")
+
 static inline void
-__dumpArrowTypeInt(std::ostringstream &json, const ArrowTypeInt *node)
+__dumpArrowTypeInt(std::ostringstream &json,
+				   const ArrowTypeInt *node,
+				   std::string NewLine)
 {
 	const char *tag = (node->is_signed ? "Int" : "UInt");
 	json << "\"" << tag << node->bitWidth  << "\"";
 }
 static inline void
-__dumpArrowTypeFloatingPoint(std::ostringstream &json, const ArrowTypeFloatingPoint *node)
+__dumpArrowTypeFloatingPoint(std::ostringstream &json,
+							 const ArrowTypeFloatingPoint *node,
+							 std::string NewLine)
 {
 	const char *suffix = (node->precision == ArrowPrecision__Double ? "64" :
 						  node->precision == ArrowPrecision__Single ? "32" :
@@ -195,53 +204,64 @@ __dumpArrowTypeFloatingPoint(std::ostringstream &json, const ArrowTypeFloatingPo
 	json << "\"" << suffix << "\"";
 }
 static inline void
-__dumpArrowTypeDecimal(std::ostringstream &json, const ArrowTypeDecimal *node)
+__dumpArrowTypeDecimal(std::ostringstream &json,
+					   const ArrowTypeDecimal *node,
+					   std::string NewLine)
 {
-	json << "\"Decimal" << node->bitWidth << "\""
-		 << ", \"precision\" : " << node->precision
-		 << ", \"scale\" : " << node->scale;
+	json << "\"Decimal" << node->bitWidth << "\", "
+		 << "\"precision\" : " << node->precision << ", "
+		 << "\"scale\" : " << node->scale;
 }
 static inline void
-__dumpArrowTypeDate(std::ostringstream &json, const ArrowTypeDate *node)
+__dumpArrowTypeDate(std::ostringstream &json,
+					const ArrowTypeDate *node,
+					std::string NewLine)
 {
 	const char *unit = ArrowDateUnitAsCString(node->unit);
 	const char *suffix = (node->unit == ArrowDateUnit__Day ? "32" : "64");
 
-	json << "\"Date" << suffix << "\""
-		 << ", \"unit\" : \"" << unit << "\"";
+	json << "\"Date" << suffix << "\", "
+		 << "\"unit\" : \"" << unit << "\"";
 }
 static inline void
-__dumpArrowTypeTime(std::ostringstream &json, const ArrowTypeTime *node)
+__dumpArrowTypeTime(std::ostringstream &json,
+					const ArrowTypeTime *node,
+					std::string NewLine)
 {
 	const char *unit = ArrowTimeUnitAsCString(node->unit);
 	const char *suffix = (node->unit == ArrowTimeUnit__Second ||
 						  node->unit == ArrowTimeUnit__MilliSecond) ? "32" : "64";
-	json << "\"Time" << suffix << "\""
-		 << ", \"unit\" : \"" << unit << "\"";
+	json << "\"Time" << suffix << "\", "
+		 << "\"unit\" : \"" << unit << "\"";
 }
 static inline void
-__dumpArrowTypeTimestamp(std::ostringstream &json, const ArrowTypeTimestamp *node)
+__dumpArrowTypeTimestamp(std::ostringstream &json,
+						 const ArrowTypeTimestamp *node,
+						 std::string NewLine)
 {
 	const char *unit = ArrowTimeUnitAsCString(node->unit);
-	json << "\"Timestamp\""
-		 << ", \"unit\" : \"" << unit << "\"";
+	json << "\"Timestamp\", "
+		 << "\"unit\" : \"" << unit << "\"";
 	if (node->timezone)
 		json << ", \"timezone\" : " << __escape_json(node->timezone);
 }
 static inline void
-__dumpArrowTypeInterval(std::ostringstream &json, const ArrowTypeInterval *node)
+__dumpArrowTypeInterval(std::ostringstream &json,
+						const ArrowTypeInterval *node,
+						std::string NewLine)
 {
 	const char *unit = ArrowIntervalUnitAsCString(node->unit);
-	json << "\"Interval\""
-		 << ", \"unit\" : \"" << unit << "\"";
+	json << "\"Interval\", \"unit\" : \"" << unit << "\"";
 }
 static inline void
-__dumpArrowTypeUnion(std::ostringstream &json, const ArrowTypeUnion *node)
+__dumpArrowTypeUnion(std::ostringstream &json,
+					 const ArrowTypeUnion *node,
+					 std::string NewLine)
 {
 	const char *mode = ArrowUnionModeAsCString(node->mode);
-	json << "\"Union\""
-		 << ", \"mode\" : \""<< mode << "\""
-		 << ", \"typeIds\" : [";
+	json << "\"Union\", "
+		 << "\"mode\" : \""<< mode << "\", "
+		 << "\"typeIds\" : [";
 	for (int i=0; i < node->_num_typeIds; i++)
 	{
 		if (i > 0)
@@ -251,252 +271,402 @@ __dumpArrowTypeUnion(std::ostringstream &json, const ArrowTypeUnion *node)
 	json << "]";
 }
 static inline void
-__dumpArrowTypeFixedSizeBinary(std::ostringstream &json, const ArrowTypeFixedSizeBinary *node)
+__dumpArrowTypeFixedSizeBinary(std::ostringstream &json,
+							   const ArrowTypeFixedSizeBinary *node,
+							   std::string NewLine)
 {
-	json << "\"FixedSizeBinary\", \"byteWidth\" : " << node->byteWidth;
+	json << "\"FixedSizeBinary\", "
+		 << "\"byteWidth\" : " << node->byteWidth;
 }
 static inline void
-__dumpArrowTypeFixedSizeList(std::ostringstream &json, const ArrowTypeFixedSizeList *node)
+__dumpArrowTypeFixedSizeList(std::ostringstream &json,
+							 const ArrowTypeFixedSizeList *node,
+							 std::string NewLine)
 {
-	json << "\"FixedSizeList\""
-		 << ", \"listSize\" : " << node->listSize;
+	json << "\"FixedSizeList\", "
+		 << "\"listSize\" : " << node->listSize;
 }
 static inline void
-__dumpArrowTypeMap(std::ostringstream &json, const ArrowTypeMap *node)
+__dumpArrowTypeMap(std::ostringstream &json,
+				   const ArrowTypeMap *node,
+				   std::string NewLine)
 {
-	json << "\"Map\""
-		 << ", keysSorted : " << (node->keysSorted ? "true" : "false");
+	json << "\"Map\", "
+		 << "\"keysSorted\" : " << (node->keysSorted ? "true" : "false");
 }
 static inline void
-__dumpArrowTypeDuration(std::ostringstream &json, const ArrowTypeDuration *node)
+__dumpArrowTypeDuration(std::ostringstream &json,
+						const ArrowTypeDuration *node,
+						std::string NewLine)
 {
 	const char *unit = ArrowTimeUnitAsCString(node->unit);
-	json << "\"Duration\""
-		 << ", \"unit\" : " << unit;
+	json << "\"Duration\", "
+		 << "\"unit\" : " << __escape_json(unit);
 }
 static inline void
-__dumpArrowKeyValue(std::ostringstream &json, const ArrowKeyValue *node)
+__dumpArrowKeyValue(std::ostringstream &json,
+					const ArrowKeyValue *node,
+					std::string NewLine)
 {
-	json << "\"KeyValue\""
-		 << ", \"key\" : " << __escape_json(node->key)
-		 << ", \"value\" : "<< __escape_json(node->value);
+	if (node->_key_len + node->_value_len <= 64)
+	{
+		json << "\"KeyValue\", "
+			 << "\"key\" : " << __escape_json(node->key) << ", "
+			 << "\"value\" : "<< __escape_json(node->value);
+	}
+	else
+	{
+		json << "\"KeyValue\"," << NewLine
+			 << "\"key\" : " << __escape_json(node->key) << "," << NewLine
+			 << "\"value\" : "<< __escape_json(node->value);
+	}
 }
 static inline void
-__dumpArrowDictionaryEncoding(std::ostringstream &json, const ArrowDictionaryEncoding *node)
+__dumpArrowDictionaryEncoding(std::ostringstream &json,
+							  const ArrowDictionaryEncoding *node,
+							  std::string NewLine)
 {
-	json << "\"DictionaryEncoding\", \"id\" : " << node->id
+	json << "\"DictionaryEncoding\"," << NewLine
+		 << "\"id\" : " << node->id << "," << NewLine
 		 << ", \"indexType\" : ";
-	__dumpArrowNode(json, &node->indexType.node);
-	json << ", \"isOrdered\" : " << (node->isOrdered ? "true" : "false");
+	__dumpArrowNode(json, &node->indexType.node, NewLine);
+	json << "," << NewLine
+		 <<"\"isOrdered\" : " << (node->isOrdered ? "true" : "false");
 }
 static inline void
-__dumpArrowField(std::ostringstream &json, const ArrowField *node)
+__dumpArrowField(std::ostringstream &json,
+				 const ArrowField *node,
+				 std::string NewLine)
 {
-	json << "\"Field\""
-		 << ", \"name\" : " << __escape_json(node->name)
-		 << ", \"nullable\" : " << (node->nullable ? "true" : "false")
-		 << ", \"type\" : ";
-	__dumpArrowNode(json, &node->type.node);
+	bool	multiline = (node->dictionary ||
+						 node->_num_children > 0 ||
+						 node->_num_custom_metadata > 0);
+#ifdef HAS_PARQUET
+	if (node->parquet_extra_attrs)
+		multiline = true;
+#endif
+	json << "\"Field\"," << (multiline ? NewLine : " ")
+		 << "\"name\" : " << __escape_json(node->name) << "," << (multiline ? NewLine : " ")
+		 << "\"type\" : ";
+	__dumpArrowNode(json, &node->type.node,
+					NewLine + __SPACES("type"));
+	json << "," << (multiline ? NewLine : " ")
+		 << "\"nullable\" : " << (node->nullable ? "true" : "false");
 	if (node->dictionary)
 	{
-		json << ", \"dictionary\" : ";
-		__dumpArrowNode(json, (ArrowNode *)node->dictionary);
+		json << "," << (multiline ? NewLine : " ")
+			 << "\"dictionary\" : ";
+		__dumpArrowNode(json, (ArrowNode *)node->dictionary,
+						NewLine + __SPACES("dictionary"));
 	}
 	if (node->children && node->_num_children > 0)
 	{
-		json << ", \"children\" : [";
+		auto	__NewLine = NewLine + __SPACES("children");
+		json << "," << NewLine << "\"children\" : [";
 		for (int i=0; i < node->_num_children; i++)
 		{
-			json << (i > 0 ? ", " : " ");
-			__dumpArrowNode(json, &node->children[i].node);
+			if (i == 0)
+				json << " ";
+			else
+				json << "," << (multiline ? __NewLine : " ");
+			__dumpArrowNode(json, &node->children[i].node,
+							__NewLine + __ARRAY_INDENT);
 		}
 		json << " ]";
 	}
 	if (node->custom_metadata && node->_num_custom_metadata > 0)
 	{
-		json << ", \"custom_metadata\" : [";
+		auto	__NewLine = NewLine + __SPACES("custom_metadata");
+		json << "," << NewLine << "\"custom_metadata\" : [";
 		for (int i=0; i < node->_num_custom_metadata; i++)
 		{
-			json << (i > 0 ? ", " : " ");
-			__dumpArrowNode(json, &node->custom_metadata[i].node);
+			if (i == 0)
+				json << " ";
+			else
+				json << "," << (multiline ? __NewLine : " ");
+			__dumpArrowNode(json, &node->custom_metadata[i].node,
+							__NewLine + __ARRAY_INDENT);
 		}
 		json << " ]";
 	}
 #if HAS_PARQUET
 	if (node->parquet_extra_attrs)
-		json << ", " << node->parquet_extra_attrs;
+	{
+		char   *buffer = (char *)alloca(node->_parquet_extra_attrs_len + 1);
+		char   *tok, *pos;
+
+		strcpy(buffer, node->parquet_extra_attrs);
+		for (tok = strtok_r(buffer, "\t", &pos);
+			 tok != NULL;
+			 tok = strtok_r(NULL, "\t", &pos))
+		{
+			json << "," << NewLine << tok;
+		}
+	}
 #endif
 }
 static inline void
-__dumpArrowFieldNode(std::ostringstream &json, const ArrowFieldNode *node)
+__dumpArrowFieldNode(std::ostringstream &json,
+					 const ArrowFieldNode *node,
+					 std::string NewLine)
 {
-	json << "\"FieldNode\""
-		 << ", \"length\" : " << node->length
-		 << ", \"null_count\" : " << node->null_count;
-	if (node->stat_min_value)
-		json << ", \"stat_min_value\" : " << __escape_json(node->stat_min_value);
-	if (node->stat_max_value)
-		json << ", \"stat_max_value\" : " << __escape_json(node->stat_max_value);
+	bool	multiline = (node->_stat_min_value_len +
+						 node->_stat_max_value_len > 48);
 #ifdef HAS_PARQUET
 	if (node->parquet_extra_attrs)
-		json << ", " << node->parquet_extra_attrs;
+		multiline = true;
+#endif
+	json << "\"FieldNode\", " << (multiline ? NewLine : " ")
+		 << "\"length\" : " << node->length << "," << (multiline ? NewLine : " ")
+		 << "\"null_count\" : " << node->null_count;
+	if (node->stat_min_value)
+	{
+		json << "," << (multiline ? NewLine : " ")
+			 << "\"stat_min_value\" : " << __escape_json(node->stat_min_value);
+	}
+	if (node->stat_max_value)
+	{
+		json << "," << (multiline ? NewLine : " ")
+			 << "\"stat_max_value\" : " << __escape_json(node->stat_max_value);
+	}
+#ifdef HAS_PARQUET
+	if (node->parquet_extra_attrs)
+	{
+		char   *buffer = (char *)alloca(node->_parquet_extra_attrs_len);
+		char   *tok, *pos;
+
+		strcpy(buffer, node->parquet_extra_attrs);
+		for (tok = strtok_r(buffer, "\t", &pos);
+			 tok != NULL;
+			 tok = strtok_r(NULL, "\t", &pos))
+		{
+			json << "," << NewLine << tok;
+		}
+	}
 #endif
 }
 static inline void
-__dumpArrowBuffer(std::ostringstream &json, const ArrowBuffer *node)
+__dumpArrowBuffer(std::ostringstream &json,
+				  const ArrowBuffer *node,
+				  std::string NewLine)
 {
-	json << "\"Buffer\""
-		 << ", \"offset\" : " << node->offset
-		 << ", \"length\" : " << node->length;
+	json << "\"Buffer\", "
+		 << "\"offset\" : " << node->offset << ", "
+		 << "\"length\" : " << node->length;
 }
 static inline void
-__dumpArrowSchema(std::ostringstream &json, const ArrowSchema *node)
+__dumpArrowSchema(std::ostringstream &json,
+				  const ArrowSchema *node,
+				  std::string NewLine)
 {
 	const char *endian = ArrowEndiannessAsCString(node->endianness);
-	json << "\"Schema\""
-		 << ", \"endianness\" : \""<< endian << "\"";
+	json << "\"Schema\"," << NewLine
+		 << "\"endianness\" : \""<< endian << "\"";
 	if (node->fields && node->_num_fields > 0)
 	{
-		json << ", \"fields\" : [";
+		auto	__NewLine = NewLine + __SPACES("fields");
+		json << "," << NewLine
+			 << "\"fields\" : [";
 		for (int i=0; i < node->_num_fields; i++)
 		{
-			json << (i > 0 ? ", " : " ");
-			__dumpArrowNode(json, &node->fields[i].node);
+			if (i == 0)
+				json << " ";
+			else
+				json << "," << __NewLine;
+			__dumpArrowNode(json, &node->fields[i].node,
+							__NewLine + __ARRAY_INDENT);
 		}
 		json << " ]";
 	}
 	if (node->custom_metadata && node->_num_custom_metadata > 0)
 	{
-		json << ", \"custom_metadata\" : [";
+		auto	__NewLine = NewLine + __SPACES("custom_metadata");
+		json << "," << NewLine
+			 << "\"custom_metadata\" : [";
 		for (int i=0; i < node->_num_custom_metadata; i++)
 		{
-			json << (i > 0 ? ", " : "");
-			__dumpArrowNode(json, &node->custom_metadata[i].node);
+			if (i == 0)
+				json << " ";
+			else
+				json << "," << __NewLine;
+			__dumpArrowNode(json, &node->custom_metadata[i].node,
+							__NewLine + __ARRAY_INDENT);
 		}
 		json << " ]";
 	}
 	if (node->features && node->_num_features > 0)
 	{
-		json << ", \"features\" : [";
+		json << "," << NewLine
+			 << "\"features\" : [";
 		for (int i=0; i < node->_num_features; i++)
 		{
 			const char *feature = ArrowFeatureAsCString(node->features[i]);
 
-			json << (i > 0 ? ", " : " ");
+			json << (i==0 ? " " : ", ");
 			json << "\"" << feature << "\"";
 		}
 		json << " ]";
 	}
 }
 static inline void
-__dumpArrowRecordBatch(std::ostringstream &json, const ArrowRecordBatch *node)
+__dumpArrowRecordBatch(std::ostringstream &json,
+					   const ArrowRecordBatch *node,
+					   std::string NewLine)
 {
-	json << "\"ArrowRecordBatch\""
-		 << ", \"length\" : " << node->length;
+	json << "\"ArrowRecordBatch\"," << NewLine
+		 << "\"length\" : " << node->length;
 	if (node->nodes && node->_num_nodes > 0)
 	{
-		json << ", \"nodes\" : [";
+		auto	__NewLine = NewLine + __SPACES("nodes");
+		json << "," << NewLine
+			 << "\"nodes\" : [";
 		for (int i=0; i < node->_num_nodes; i++)
 		{
-			json << (i > 0 ? ", " : " ");
-			__dumpArrowNode(json, &node->nodes[i].node);
+			if (i == 0)
+				json << " ";
+			else
+				json << "," << __NewLine;
+			__dumpArrowNode(json, &node->nodes[i].node,
+							__NewLine + __ARRAY_INDENT);
 		}
 		json << " ]";
 	}
 	if (node->buffers && node->_num_buffers > 0)
 	{
-		json << ", \"buffers\" : [";
+		auto	__NewLine = NewLine + __SPACES("buffers");
+
+		json << "," << NewLine
+			 << "\"buffers\" : [";
 		for (int i=0; i < node->_num_buffers; i++)
 		{
-			json << (i > 0 ? ", " : " ");
-			__dumpArrowNode(json, &node->buffers[i].node);
+			if (i == 0)
+				json << " ";
+			else
+				json << "," << __NewLine;
+			__dumpArrowNode(json, &node->buffers[i].node,
+							__NewLine + __ARRAY_INDENT);
 		}
 		json << " ]";
 	}
 	if (node->compression)
 	{
-		json << ", \"compression\" : ";
-		__dumpArrowNode(json, (const ArrowNode *)node->compression);
+		json << "," << NewLine
+			 << "\"compression\" : ";
+		__dumpArrowNode(json, (const ArrowNode *)node->compression,
+						NewLine + __SPACES("compression"));
 	}
 }
 static inline void
-__dumpArrowDictionaryBatch(std::ostringstream &json, const ArrowDictionaryBatch *node)
+__dumpArrowDictionaryBatch(std::ostringstream &json,
+						   const ArrowDictionaryBatch *node,
+						   std::string NewLine)
 {
-	json << "\"DictionaryBatch\""
-		 << ", \"id\" : " << node->id
-		 << ", \"data\" : ";
-	__dumpArrowNode(json, &node->data.node);
-	json << ", \"isDelta\" : " << (node->isDelta ? "true" : "false");
+	json << "\"DictionaryBatch\"," << NewLine
+		 << "\"id\" : " << node->id << NewLine
+		 << "\"data\" : ";
+	__dumpArrowNode(json, &node->data.node,
+					NewLine + __SPACES("data"));
+	json << "," << NewLine
+		 << "\"isDelta\" : " << (node->isDelta ? "true" : "false");
 }
 static inline void
-__dumpArrowMessage(std::ostringstream &json, const ArrowMessage *node)
+__dumpArrowMessage(std::ostringstream &json,
+				   const ArrowMessage *node,
+				   std::string NewLine)
 {
 	const char *version = ArrowMetadataVersionAsCString(node->version);
-	json << "\"Message\""
-		 << ", \"version\" : \"" << version << "\""
-		 << ", \"body\" : ";
-	__dumpArrowNode(json, &node->body.node);
-	json << ", \"bodyLength\" : " << node->bodyLength;
+	json << "\"Message\"," << NewLine
+		 << "\"version\" : \"" << version << "\"," << NewLine
+		 << "\"body\" : ";
+	__dumpArrowNode(json, &node->body.node,
+					NewLine + __SPACES("body"));
+	json << "," << NewLine
+		 <<"\"bodyLength\" : " << node->bodyLength;
 }
 static inline void
-__dumpArrowBlock(std::ostringstream &json, const ArrowBlock *node)
+__dumpArrowBlock(std::ostringstream &json,
+				 const ArrowBlock *node,
+				 std::string NewLine)
 {
-	json << "\"Block\""
-		 << ", \"offset\" : " << node->offset
-		 << ", \"metaDataLength\" : " << node->metaDataLength
-		 << ", \"bodyLength\" : " << node->bodyLength;
+	json << "\"Block\", "
+		 << "\"offset\" : " << node->offset << ", "
+		 << "\"metaDataLength\" : " << node->metaDataLength << ", "
+		 << "\"bodyLength\" : " << node->bodyLength;
 }
 static inline void
-__dumpArrowFooter(std::ostringstream &json, const ArrowFooter *node)
+__dumpArrowFooter(std::ostringstream &json,
+				  const ArrowFooter *node,
+				  std::string NewLine)
 {
 	const char *version = ArrowMetadataVersionAsCString(node->version);
-	json << "\"Footer\""
-		 << ", \"version\" : \"" << version << "\""
-		 << ", \"schema\" : ";
-	__dumpArrowNode(json, &node->schema.node);
+	json << "\"Footer\"," << NewLine
+		 << "\"version\" : \"" << version << "\"," << NewLine
+		 << "\"schema\" : ";
+	__dumpArrowNode(json, &node->schema.node,
+					NewLine + __SPACES("schema"));
 	if (node->dictionaries && node->_num_dictionaries > 0)
 	{
-		json << ", \"dictionaries\" : [";
+		auto	__NewLine = NewLine + __SPACES("dictionaries  ");
+		json << "," << NewLine
+			 << "\"dictionaries\" : [";
 		for (int i=0; i < node->_num_dictionaries; i++)
 		{
-			json << (i > 0 ? ", " : " ");
-			__dumpArrowNode(json, &node->dictionaries[i].node);
+			if (i == 0)
+				json << " ";
+			else
+				json << "," << __NewLine;
+			__dumpArrowNode(json, &node->dictionaries[i].node,
+							__NewLine);
 		}
 		json << " ]";
 	}
 	if (node->recordBatches && node->_num_recordBatches > 0)
 	{
-		json << ", \"recordBatches\" : [";
+		auto	__NewLine = NewLine + __SPACES("recordBatches");
+		json << "," << NewLine
+			 << "\"recordBatches\" : [";
 		for (int i=0; i < node->_num_recordBatches; i++)
 		{
-			json << (i > 0 ? ", " : " ");
-			__dumpArrowNode(json, &node->recordBatches[i].node);
+			if (i == 0)
+				json << " ";
+			else
+				json << "," << __NewLine;
+			__dumpArrowNode(json, &node->recordBatches[i].node,
+							__NewLine);
 		}
 		json << " ]";
 	}
 	if (node->custom_metadata && node->_num_custom_metadata > 0)
 	{
-		json << ", \"custom_metadata\" : [";
+		auto	__NewLine = NewLine + __SPACES("custom_metadata  ");
+		json << "," << NewLine
+			 <<"\"custom_metadata\" : [";
 		for (int i=0; i < node->_num_custom_metadata; i++)
 		{
-			json << (i > 0 ? "," : "");
-			__dumpArrowNode(json, &node->custom_metadata[i].node);
+			if (i == 0)
+				json << " ";
+			else
+				json << "," << __NewLine;
+			__dumpArrowNode(json, &node->custom_metadata[i].node,
+							__NewLine);
 		}
 		json << " ]";
 	}
 }
 static inline void
-__dumpArrowBodyCompression(std::ostringstream &json, const ArrowBodyCompression *node)
+__dumpArrowBodyCompression(std::ostringstream &json,
+						   const ArrowBodyCompression *node,
+						   std::string NewLine)
 {
 	const char *codec = ArrowCompressionTypeAsCString(node->codec);
 	const char *method = ArrowBodyCompressionMethodAsCString(node->method);
-	json << "\"BodyCompression\""
-		 << ", \"codec\" : \"" << codec << "\""
-		 << ", \"method\" : \"" << method << "\"";
+	json << "\"BodyCompression\"," << NewLine
+		 << "\"codec\" : \"" << codec << "\"," << NewLine
+		 << "\"method\" : \"" << method << "\"";
 }
 
 static void
-__dumpArrowNode(std::ostringstream &json, const ArrowNode *node)
+__dumpArrowNode(std::ostringstream &json, const ArrowNode *node, std::string NewLine)
 {
 	json << "{ \"tag\" : ";
 	switch (node->tag)
@@ -513,76 +683,76 @@ __dumpArrowNode(std::ostringstream &json, const ArrowNode *node)
 			json << __escape_json(node->tagName);
 			break;		/* nothing to special */
 		case ArrowNodeTag__Int:
-			__dumpArrowTypeInt(json, (const ArrowTypeInt *)node);
+			__dumpArrowTypeInt(json, (const ArrowTypeInt *)node, NewLine);
 			break;
 		case ArrowNodeTag__FloatingPoint:
-			__dumpArrowTypeFloatingPoint(json, (const ArrowTypeFloatingPoint *)node);
+			__dumpArrowTypeFloatingPoint(json, (const ArrowTypeFloatingPoint *)node, NewLine);
 			break;
 		case ArrowNodeTag__Decimal:
-			__dumpArrowTypeDecimal(json, (const ArrowTypeDecimal *)node);
+			__dumpArrowTypeDecimal(json, (const ArrowTypeDecimal *)node, NewLine);
 			break;
 		case ArrowNodeTag__Date:
-			__dumpArrowTypeDate(json, (const ArrowTypeDate *)node);
+			__dumpArrowTypeDate(json, (const ArrowTypeDate *)node, NewLine);
 			break;
 		case ArrowNodeTag__Time:
-			__dumpArrowTypeTime(json, (const ArrowTypeTime *)node);
+			__dumpArrowTypeTime(json, (const ArrowTypeTime *)node, NewLine);
 			break;
 		case ArrowNodeTag__Timestamp:
-			__dumpArrowTypeTimestamp(json, (const ArrowTypeTimestamp *)node);
+			__dumpArrowTypeTimestamp(json, (const ArrowTypeTimestamp *)node, NewLine);
 			break;
 		case ArrowNodeTag__Interval:
-			__dumpArrowTypeInterval(json, (const ArrowTypeInterval *)node);
+			__dumpArrowTypeInterval(json, (const ArrowTypeInterval *)node, NewLine);
 			break;
 		case ArrowNodeTag__Union:
-			__dumpArrowTypeUnion(json, (const ArrowTypeUnion *)node);
+			__dumpArrowTypeUnion(json, (const ArrowTypeUnion *)node, NewLine);
 			break;
 		case ArrowNodeTag__FixedSizeBinary:
-			__dumpArrowTypeFixedSizeBinary(json, (const ArrowTypeFixedSizeBinary *)node);
+			__dumpArrowTypeFixedSizeBinary(json, (const ArrowTypeFixedSizeBinary *)node, NewLine);
 			break;
 		case ArrowNodeTag__FixedSizeList:
-			__dumpArrowTypeFixedSizeList(json, (const ArrowTypeFixedSizeList *)node);
+			__dumpArrowTypeFixedSizeList(json, (const ArrowTypeFixedSizeList *)node, NewLine);
 			break;
 		case ArrowNodeTag__Map:
-			__dumpArrowTypeMap(json, (const ArrowTypeMap *)node);
+			__dumpArrowTypeMap(json, (const ArrowTypeMap *)node, NewLine);
 			break;
 		case ArrowNodeTag__Duration:
-			__dumpArrowTypeDuration(json, (const ArrowTypeDuration *)node);
+			__dumpArrowTypeDuration(json, (const ArrowTypeDuration *)node, NewLine);
 			break;
 		case ArrowNodeTag__KeyValue:
-			__dumpArrowKeyValue(json, (const ArrowKeyValue *)node);
+			__dumpArrowKeyValue(json, (const ArrowKeyValue *)node, NewLine);
 			break;
 		case ArrowNodeTag__DictionaryEncoding:
-			__dumpArrowDictionaryEncoding(json, (const ArrowDictionaryEncoding *)node);
+			__dumpArrowDictionaryEncoding(json, (const ArrowDictionaryEncoding *)node, NewLine);
 			break;
 		case ArrowNodeTag__Field:
-			__dumpArrowField(json, (const ArrowField *)node);
+			__dumpArrowField(json, (const ArrowField *)node, NewLine);
 			break;
 		case ArrowNodeTag__FieldNode:
-			__dumpArrowFieldNode(json, (const ArrowFieldNode *)node);
+			__dumpArrowFieldNode(json, (const ArrowFieldNode *)node, NewLine);
 			break;
 		case ArrowNodeTag__Buffer:
-			__dumpArrowBuffer(json, (const ArrowBuffer *)node);
+			__dumpArrowBuffer(json, (const ArrowBuffer *)node, NewLine);
 			break;
 		case ArrowNodeTag__Schema:
-			__dumpArrowSchema(json, (const ArrowSchema *)node);
+			__dumpArrowSchema(json, (const ArrowSchema *)node, NewLine);
 			break;
 		case ArrowNodeTag__RecordBatch:
-			__dumpArrowRecordBatch(json, (const ArrowRecordBatch *)node);
+			__dumpArrowRecordBatch(json, (const ArrowRecordBatch *)node, NewLine);
 			break;
 		case ArrowNodeTag__DictionaryBatch:
-			__dumpArrowDictionaryBatch(json, (const ArrowDictionaryBatch *)node);
+			__dumpArrowDictionaryBatch(json, (const ArrowDictionaryBatch *)node, NewLine);
 			break;
 		case ArrowNodeTag__Message:
-			__dumpArrowMessage(json, (const ArrowMessage *)node);
+			__dumpArrowMessage(json, (const ArrowMessage *)node, NewLine);
 			break;
 		case ArrowNodeTag__Block:
-			__dumpArrowBlock(json, (const ArrowBlock *)node);
+			__dumpArrowBlock(json, (const ArrowBlock *)node, NewLine);
 			break;
 		case ArrowNodeTag__Footer:
-			__dumpArrowFooter(json, (const ArrowFooter *)node);
+			__dumpArrowFooter(json, (const ArrowFooter *)node, NewLine);
 			break;
 		case ArrowNodeTag__BodyCompression:
-			__dumpArrowBodyCompression(json, (const ArrowBodyCompression *)node);
+			__dumpArrowBodyCompression(json, (const ArrowBodyCompression *)node, NewLine);
 			break;
 		default:
 			Elog("unknown ArrowNodeTag (%d)", (int)node->tag);
@@ -599,7 +769,7 @@ dumpArrowNode(const ArrowNode *node)
 		std::ostringstream json;
 		std::string temp;
 
-		__dumpArrowNode(json, node);
+		__dumpArrowNode(json, node, std::string("\n  "));
 		temp = json.str();
 		result = (char *)__palloc(temp.size() + 1);
 		memcpy(result, temp.data(), temp.size());
@@ -622,6 +792,7 @@ dumpArrowNode(const ArrowNode *node)
 	}
 	return result;
 }
+#undef __SPACES
 
 // ============================================================
 //
@@ -2623,7 +2794,7 @@ __readParquetFieldMetadata(ArrowField *node,
 				break;
 		}
 
-		json << ", \"converted_type\" : ";
+		json << "\t\"converted_type\" : ";
 		switch (cdesc->converted_type())
 		{
 			case parquet::ConvertedType::type::NONE:
@@ -2705,10 +2876,10 @@ __readParquetFieldMetadata(ArrowField *node,
 
 		auto l_type = cdesc->logical_type();
 		if (l_type)
-			json << ", \"logical_type\" : \"" << l_type->ToString() <<"\"";
+			json << "\t\"logical_type\" : \"" << l_type->ToString() <<"\"";
 
-		json << ", \"max_definition_level\" : " << cdesc->max_definition_level()
-			 << ", \"max_repetition_level\" : " << cdesc->max_repetition_level();
+		json << "\t\"max_definition_level\" : " << cdesc->max_definition_level()
+			 << "\t\"max_repetition_level\" : " << cdesc->max_repetition_level();
 
 		temp = json.str();
 		extra_attrs = (char *)__palloc(temp.size() + 1);
@@ -2894,13 +3065,13 @@ __readParquetRowGroupMetadata(ArrowMessage *rbatch_message,
 		 */
 		json << "\"totalUncompressedSize\" : " << col_meta->total_uncompressed_size();
 		if (col_meta->has_dictionary_page())
-			json << ", \"dictionaryPageOffset\" : " << col_meta->dictionary_page_offset();
+			json << "\t\"dictionaryPageOffset\" : " << col_meta->dictionary_page_offset();
 		if (col_meta->has_index_page())
-			json << ", \"indexPageOffset\" : " << col_meta->index_page_offset();
+			json << "\t\"indexPageOffset\" : " << col_meta->index_page_offset();
 		auto	encodings = col_meta->encodings();
 		if (!encodings.empty())
 		{
-			json << ", \"encodings\" : [";
+			json << "\t\"encodings\" : [";
 			for (auto cell = encodings.begin(); cell != encodings.end(); cell++)
 			{
 				json << (cell != encodings.begin() ? ", " : " ")
@@ -2912,7 +3083,7 @@ __readParquetRowGroupMetadata(ArrowMessage *rbatch_message,
 		auto	encoding_stats = col_meta->encoding_stats();
 		if (!encoding_stats.empty())
 		{
-			json << ", \"encodingStats\" : [";
+			json << "\t\"encodingStats\" : [";
 			for (auto cell = encoding_stats.begin(); cell != encoding_stats.end(); cell++)
 			{
 				auto	est = (*cell);
@@ -2928,6 +3099,7 @@ __readParquetRowGroupMetadata(ArrowMessage *rbatch_message,
 		}
 		temp = json.str();
 		field->parquet_extra_attrs = __pstrdup(temp.c_str());
+		field->_parquet_extra_attrs_len = std::strlen(field->parquet_extra_attrs);
 
 		INIT_ARROW_NODE(buffer, Buffer);
 		buffer->offset = col_meta->data_page_offset();
