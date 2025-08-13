@@ -14,6 +14,7 @@
 #include <arrow/io/api.h>
 #include <arrow/ipc/api.h>
 #include <arrow/ipc/reader.h>
+#include <arrow/util/decimal.h>
 #ifdef HAS_PARQUET
 #include <parquet/arrow/schema.h>
 #include <parquet/metadata.h>
@@ -2952,16 +2953,66 @@ static void
 __readParquetMinMaxStats(ArrowFieldNode *field,
 						 std::shared_ptr<parquet::Statistics> stats)
 {
-	/* NULL-count */
-	if (stats->HasNullCount())
-		field->null_count = stats->null_count();
-	if (stats->HasMinMax())
+	std::string	min_datum;
+	std::string	max_datum;
+
+	switch (stats->physical_type())
 	{
-		field->stat_min_value = __pstrdup(stats->EncodeMin().c_str());
-		field->_stat_min_value_len = std::strlen(field->stat_min_value);
-		field->stat_max_value = __pstrdup(stats->EncodeMax().c_str());
-		field->_stat_max_value_len = std::strlen(field->stat_max_value);
+		case parquet::Type::BOOLEAN: {
+			auto __stat = std::dynamic_pointer_cast<const parquet::BoolStatistics>(stats);
+			min_datum = (__stat->min() ? "true" : "false");
+			max_datum = (__stat->max() ? "true" : "false");
+			break;
+		}
+		case parquet::Type::INT32: {
+			auto __stat = std::dynamic_pointer_cast<const parquet::Int32Statistics>(stats);
+			min_datum = std::to_string(__stat->min());
+			max_datum = std::to_string(__stat->max());
+			break;
+		}
+		case parquet::Type::INT64: {
+			auto __stat = std::dynamic_pointer_cast<const parquet::Int64Statistics>(stats);
+			min_datum = std::to_string(__stat->min());
+			max_datum = std::to_string(__stat->max());
+			break;
+		}
+		case parquet::Type::FLOAT: {
+			auto __stat = std::dynamic_pointer_cast<const parquet::FloatStatistics>(stats);
+			min_datum = std::to_string(__stat->min());
+			max_datum = std::to_string(__stat->max());
+			break;
+		}
+		case parquet::Type::DOUBLE: {
+			auto __stat = std::dynamic_pointer_cast<const parquet::DoubleStatistics>(stats);
+			min_datum = std::to_string(__stat->min());
+			max_datum = std::to_string(__stat->max());
+			break;
+		}
+		case parquet::Type::FIXED_LEN_BYTE_ARRAY: {
+			auto __stat = std::dynamic_pointer_cast<const parquet::FLBAStatistics>(stats);
+			auto cdescr = __stat->descr();
+
+			assert(cdescr->physical_type() == stats->physical_type());
+			if (cdescr->converted_type() == parquet::ConvertedType::type::DECIMAL)
+			{
+				/* only Decimal128 */
+				auto	min_rv = arrow::Decimal128::FromBigEndian(__stat->min().ptr, cdescr->type_length());
+				auto	max_rv = arrow::Decimal128::FromBigEndian(__stat->max().ptr, cdescr->type_length());
+				if (!min_rv.ok() || !max_rv.ok())
+					return;
+				min_datum = min_rv.ValueOrDie().ToString(cdescr->type_scale());
+				max_datum = max_rv.ValueOrDie().ToString(cdescr->type_scale());
+				break;
+			}
+			return;
+		}
+		default:
+			return;		/* not supported */
 	}
+	field->stat_min_value = __pstrdup(min_datum.c_str());
+	field->_stat_min_value_len = min_datum.size();
+	field->stat_max_value = __pstrdup(max_datum.c_str());
+	field->_stat_max_value_len = max_datum.size();
 }
 
 /*
@@ -3059,7 +3110,14 @@ __readParquetRowGroupMetadata(ArrowMessage *rbatch_message,
 		INIT_ARROW_NODE(field, FieldNode);
 		field->length = col_meta->num_values();
 		if (col_meta->is_stats_set())
-			__readParquetMinMaxStats(field, col_meta->statistics());
+		{
+			const auto  stats = col_meta->statistics();
+
+			if (stats->HasNullCount())
+				field->null_count = stats->null_count();
+			if (stats->HasMinMax())
+				__readParquetMinMaxStats(field, stats);
+		}
 		/*
 		 * Some additional Parquet specific attrobutes for dump only
 		 */
