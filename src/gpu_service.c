@@ -34,6 +34,7 @@ struct gpuContext
 	int				cuda_dindex;
 	gpumask_t		cuda_dmask;		/* = (1UL<<cuda_dindex) */
 	CUdevice		cuda_device;
+	CUmemLocation	cuda_mlocation;
 	CUcontext		cuda_context;
 	CUmodule		cuda_module;
 	HTAB		   *cuda_type_htab;
@@ -130,7 +131,10 @@ static __thread gpuContext		*GpuWorkerCurrentContext = NULL;
 #define MY_DINDEX_PER_THREAD	(GpuWorkerCurrentContext->cuda_dindex)
 #define MY_DEVICE_PER_THREAD	(GpuWorkerCurrentContext->cuda_device)
 #define MY_CONTEXT_PER_THREAD	(GpuWorkerCurrentContext->cuda_context)
-#define MY_STREAM_PER_THREAD	CU_STREAM_PER_THREAD 
+#define MY_STREAM_PER_THREAD	CU_STREAM_PER_THREAD
+#define MY_MEMLOCATION_PER_THREAD (GpuWorkerCurrentContext->cuda_mlocation)
+static CUmemLocation		host_mlocation = {CU_DEVICE_CPU, CU_MEM_LOCATION_TYPE_HOST};
+static CUmemLocation		invalid_mlocation = {-1,CU_MEM_LOCATION_TYPE_INVALID};
 static volatile int			gpuserv_bgworker_got_signal = 0;
 static gpuContext		   *gpuserv_gpucontext_array;
 static dlist_head			gpuserv_gpucontext_list;
@@ -1356,8 +1360,7 @@ gpuMemoryPoolInit(gpuContext *gcontext,
  * gpuMemoryPrefetchKDS
  */
 static CUresult
-gpuMemoryPrefetchKDS(kern_data_store *kds,
-					 CUdevice dst_device)
+gpuMemoryPrefetchKDS(kern_data_store *kds, CUmemLocation mloc)
 {
 	CUresult	rc;
 
@@ -1368,7 +1371,7 @@ gpuMemoryPrefetchKDS(kern_data_store *kds,
 								(KDS_HEAD_LENGTH(kds) +
 								 sizeof(uint64_t) * kds->hash_nslots +
 								 sizeof(uint64_t) * kds->nitems),
-								dst_device,
+								mloc, 0,
 								MY_STREAM_PER_THREAD);
 		if (rc != CUDA_SUCCESS)
 			return rc;
@@ -1377,7 +1380,7 @@ gpuMemoryPrefetchKDS(kern_data_store *kds,
 								+ kds->length
 								- kds->usage,
 								kds->usage,
-								dst_device,
+								mloc, 0,
 								MY_STREAM_PER_THREAD);
 		if (rc != CUDA_SUCCESS)
 			return rc;
@@ -1386,7 +1389,7 @@ gpuMemoryPrefetchKDS(kern_data_store *kds,
 	{
 		rc = cuMemPrefetchAsync((CUdeviceptr)kds,
 								kds->length,
-								dst_device,
+								mloc, 0,
 								MY_STREAM_PER_THREAD);
 	}
 	return rc;
@@ -1856,7 +1859,7 @@ __setupGpuJoinPinnedInnerBufferPartitioned(gpuClient *gclient,
 				int		block_sz;
 
 				rc = gpuMemoryPrefetchKDS((kern_data_store *)m_kds_src,
-										  gcontext_curr->cuda_device);
+										  gcontext_curr->cuda_mlocation);
 				if (rc != CUDA_SUCCESS)
 				{
 					gpuClientELog(gclient, "failed on gpuMemoryPrefetchKDS: %s",
@@ -1900,7 +1903,8 @@ __setupGpuJoinPinnedInnerBufferPartitioned(gpuClient *gclient,
 			}
 			else
 			{
-				rc = gpuMemoryPrefetchKDS((kern_data_store *)m_kds_src, CU_DEVICE_CPU);
+				rc = gpuMemoryPrefetchKDS((kern_data_store *)m_kds_src,
+										  host_mlocation);
 				if (rc != CUDA_SUCCESS)
 				{
 					gpuClientELog(gclient, "failed on gpuMemoryPrefetchKDS: %s",
@@ -1999,7 +2003,7 @@ __setupGpuJoinPinnedInnerBufferReconstruct(gpuClient *gclient,
 			continue;
 		/* prefetch the source buffer */
 		rc = gpuMemoryPrefetchKDS((kern_data_store *)m_kds_src,
-								  gcontext->cuda_device);
+								  gcontext->cuda_mlocation);
 		if (rc != CUDA_SUCCESS)
 		{
 			gpuClientELog(gclient, "failed on gpuMemoryPrefetchKDS: %s",
@@ -2055,9 +2059,11 @@ __setupGpuJoinPinnedInnerBufferReconstruct(gpuClient *gclient,
 		gq_src->gpus[i].m_kds_final = 0UL;
 		gq_src->gpus[i].m_kds_final_length = 0UL;
 	}
-	/* assign read-only attribute */
+	/* assign read-only attribute; note that CU_MEM_ADVISE_SET_READ_MOSTLY ignores
+	 * CUmemLocation argument. */
 	rc = cuMemAdvise(m_kds_in, kds_head->length,
-					 CU_MEM_ADVISE_SET_READ_MOSTLY, -1);
+					 CU_MEM_ADVISE_SET_READ_MOSTLY,
+					 invalid_mlocation);
 	if (rc != CUDA_SUCCESS)
 	{
 		gpuClientELog(gclient, "failed on cuMemAdvise(SET_READ_MOSTLY): %s",
@@ -2322,12 +2328,13 @@ __setupGpuQueryJoinInnerBuffer(gpuClient *gclient,
 	 * So, we expect the CUDA unified memory system distributes the read-only
 	 * portion for each devices on the demand.
 	 * cuMemAdvise() allows to give driver a hint for this purpose.
+	 * Note that CU_MEM_ADVISE_SET_READ_MOSTLY ignores the CUmemLocation.
 	 */
 	assert(h_kmrels->ojmap_sz < h_kmrels->length);
 	rc = cuMemAdvise((CUdeviceptr)m_kmrels,
 					 h_kmrels->length - h_kmrels->ojmap_sz,
 					 CU_MEM_ADVISE_SET_READ_MOSTLY,
-					 -1);	/* 4th argument should be ignored */
+					 invalid_mlocation);
 	if (rc != CUDA_SUCCESS)
 		__gsInfo("failed on cuMemAdvise (%p-%p; CU_MEM_ADVISE_SET_READ_MOSTLY): %s",
 				 (char *)m_kmrels,
@@ -2398,7 +2405,8 @@ __setupGpuQueryFinalResultsBuffer(gpuClient *gclient,
 		/* prefetch to the device */
 		(void)cuMemPrefetchAsync(m_kds_final,
 								 KDS_HEAD_LENGTH(kds_final_head),
-								 __gcontext->cuda_device,
+								 __gcontext->cuda_mlocation,
+								 0,
 								 MY_STREAM_PER_THREAD);
 		gq_buf->gpus[__dindex].m_kds_final = m_kds_final;
 		gq_buf->gpus[__dindex].m_kds_final_length = kds_final_head->length;
@@ -2509,7 +2517,8 @@ __expandGpuQueryScanJoinBuffer(gpuClient *gclient,
 
 		rc = cuMemPrefetchAsync((CUdeviceptr)kds_dst_old,
 								kds_dst_old->length,
-								CU_DEVICE_CPU,
+								host_mlocation,
+								0,
 								MY_STREAM_PER_THREAD);
 		if (rc != CUDA_SUCCESS)
 		{
@@ -3561,7 +3570,8 @@ gpuservMigrationKdsBuffer(gpuClient *gclient,
 		/* kds_src is already on the managed memory */
 		rc = cuMemPrefetchAsync(s_chunk->m_devptr,
 								chunk_sz,
-								gcontext_dst->cuda_device,
+								gcontext_dst->cuda_mlocation,
+								0,
 								MY_STREAM_PER_THREAD);
 		if (rc != CUDA_SUCCESS)
 		{
@@ -3723,7 +3733,8 @@ again:
 									(KDS_HEAD_LENGTH(kds_in) +
 									 sizeof(uint64_t) * kds_in->hash_nslots +
 									 sizeof(uint64_t) * kds_in->nitems),
-									__gcontext->cuda_device,
+									__gcontext->cuda_mlocation,
+									0,
 									MY_STREAM_PER_THREAD);
 			if (rc != CUDA_SUCCESS)
 			{
@@ -3737,7 +3748,8 @@ again:
 									+ kds_in->length
 									- kds_in->usage,
 									kds_in->usage,
-									__gcontext->cuda_device,
+									__gcontext->cuda_mlocation,
+									0,
 									MY_STREAM_PER_THREAD);
 			if (rc != CUDA_SUCCESS)
 			{
@@ -3751,7 +3763,7 @@ again:
 				rc = cuMemAdvise((CUdeviceptr)kds_in,
 								 kds_in->length,
 								 CU_MEM_ADVISE_SET_READ_MOSTLY,
-								 -1);
+								 invalid_mlocation);
 				if (rc != CUDA_SUCCESS)
 				{
 					pthreadRWLockUnlock(&gq_buf->m_kds_rwlock);
@@ -3917,7 +3929,7 @@ resume_kernel:
 				gpuClientWriteBackPartial(gclient, kds_dst);
 			else
 			{
-				(void)gpuMemoryPrefetchKDS(kds_dst, CU_DEVICE_CPU);
+				(void)gpuMemoryPrefetchKDS(kds_dst, host_mlocation);
 				selectIntoWriteOutHeapNormal(gclient,
 											 &gq_buf->si_state,
 											 kds_dst);
@@ -4080,7 +4092,7 @@ gpuservHandleGpuTaskExec(gpuContext *gcontext,
 	}
 	else if (kds_src->format == KDS_FORMAT_ROW)
 	{
-		rc = gpuMemoryPrefetchKDS(kds_src, MY_DEVICE_PER_THREAD);
+		rc = gpuMemoryPrefetchKDS(kds_src, MY_MEMLOCATION_PER_THREAD);
 		if (rc != CUDA_SUCCESS)
 		{
 			gpuClientELog(gclient, "failed on gpuMemoryPrefetchKDS: %s",
@@ -4106,7 +4118,7 @@ gpuservHandleGpuTaskExec(gpuContext *gcontext,
 		else
 		{
 			Assert(kds_src->block_nloaded == kds_src->nitems);
-			rc = gpuMemoryPrefetchKDS(kds_src, MY_DEVICE_PER_THREAD);
+			rc = gpuMemoryPrefetchKDS(kds_src, MY_MEMLOCATION_PER_THREAD);
 			if (rc != CUDA_SUCCESS)
 			{
 				gpuClientELog(gclient, "failed on gpuMemoryPrefetchKDS: %s",
@@ -4120,7 +4132,7 @@ gpuservHandleGpuTaskExec(gpuContext *gcontext,
 	{
 		if (kds_src_iovec->nr_chunks == 0)
 		{
-			rc = gpuMemoryPrefetchKDS(kds_src, MY_DEVICE_PER_THREAD);
+			rc = gpuMemoryPrefetchKDS(kds_src, MY_MEMLOCATION_PER_THREAD);
 			if (rc != CUDA_SUCCESS)
 			{
 				gpuClientELog(gclient, "failed on gpuMemoryPrefetchKDS: %s",
@@ -4262,7 +4274,7 @@ gpuservHandleGpuTaskExec(gpuContext *gcontext,
 		gpuContextSwitchTo(__gcontext_saved);
 		if (d_chunk && (gclient->xpu_task_flags & DEVTASK__SELECT_INTO_DIRECT) != 0)
 		{
-			(void)gpuMemoryPrefetchKDS(kds_dst, CU_DEVICE_CPU);
+			(void)gpuMemoryPrefetchKDS(kds_dst, host_mlocation);
 			if (!selectIntoWriteOutHeapNormal(gclient,
 											  &gq_buf->si_state,
 											  kds_dst))
@@ -4625,7 +4637,7 @@ gpuservMergeGpuJoinFinalBufferOne(gpuClient *gclient,
 			int		__grid_sz = Min(grid_sz, (__kds->nitems + block_sz - 1) / block_sz);
 			void   *kern_args[4];
 
-			(void)gpuMemoryPrefetchKDS(__kds, gcontext->cuda_device);
+			(void)gpuMemoryPrefetchKDS(__kds, gcontext->cuda_mlocation);
 			kern_args[0] = &kds_final;
 			kern_args[1] = &__kds;
 			rc = cuLaunchKernel(gcontext->cufn_gpusort_consolidate_buffer,
@@ -4732,7 +4744,7 @@ __mergeGpuJoinFinalBufferMTWorker(void *data)
 				kgtask->partition_divisor = con->kds_final_nchunks;
 				kgtask->partition_reminder = k;
 
-				(void)gpuMemoryPrefetchKDS(kds_src, gcontext->cuda_device);
+				(void)gpuMemoryPrefetchKDS(kds_src, gcontext->cuda_mlocation);
 				kern_args[0] = &gclient->__session[MY_DINDEX_PER_THREAD]->m_devptr;
 				kern_args[1] = &kgtask;
 				kern_args[2] = &kds_dst;
@@ -4764,7 +4776,7 @@ __mergeGpuJoinFinalBufferMTWorker(void *data)
 			else
 			{
 				/* reconstruction on CPU memory */
-				(void)gpuMemoryPrefetchKDS(kds_src, CU_DEVICE_CPU);
+				(void)gpuMemoryPrefetchKDS(kds_src, host_mlocation);
 				for (uint32_t index=0; index < kds_src->nitems; index++)
 				{
 					const kern_tupitem *titem_src = KDS_GET_TUPITEM(kds_src, index);
@@ -5357,7 +5369,7 @@ __sortingFinalBufferMTWorker(void *data)
 	__sortingFinalBufferMTContext *con = data;
 
 	(void)gpuMemoryPrefetchKDS(con->kds_final,
-							   con->gcontext->cuda_device);
+							   con->gcontext->cuda_mlocation);
 	if (gpuservSortingFinalBuffer(con->gclient,
 								  con->gcontext,
 								  con->kds_final))
@@ -5550,7 +5562,7 @@ __gpuservHandleGpuPreAggFinal(gpuClient *gclient,
 		else
 		{
 			/* send back to the PostgreSQL backend process */
-			(void)gpuMemoryPrefetchKDS(kds_prime, CU_DEVICE_CPU);
+			(void)gpuMemoryPrefetchKDS(kds_prime, host_mlocation);
 			gpuClientWriteBackPartial(gclient, kds_prime);
 		}
 	}
@@ -5664,7 +5676,7 @@ __gpuservHandleGpuScanJoinFinal(gpuClient *gclient,
 			kern_data_store *kds_final = kds_final_array[k+j];
 
 			/* send back to the PostgreSQL backend process */
-			(void)gpuMemoryPrefetchKDS(kds_final, CU_DEVICE_CPU);
+			(void)gpuMemoryPrefetchKDS(kds_final, host_mlocation);
 			gpuClientWriteBackPartial(gclient, kds_final);
 
 			releaseGpuQueryBufferOne(gq_buf, (CUdeviceptr)kds_final);
@@ -6444,6 +6456,8 @@ gpuservSetupGpuContext(int cuda_dindex)
 	rc = cuDeviceGet(&gcontext->cuda_device, dattrs->DEV_ID);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuDeviceGet: %s", cuStrError(rc));
+	gcontext->cuda_mlocation.id = gcontext->cuda_device;
+	gcontext->cuda_mlocation.type = CU_MEM_LOCATION_TYPE_DEVICE;
 
 	rc = cuDevicePrimaryCtxRetain(&gcontext->cuda_context,
 								  gcontext->cuda_device);
