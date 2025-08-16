@@ -100,7 +100,7 @@ typedef Node *(*tree_mutator_callback) (Node *node, void *context);
  * - cuMemAdvise
  */
 #if CUDA_VERSION < 13000
-#define cuMemPrefetchAsync(a,b,c,d)		cuMemPrefetchAsync_v2((a),(b),(c),(d))
+#define cuMemPrefetchAsync(a,b,c,d,e)	cuMemPrefetchAsync_v2((a),(b),(c),(d),(e))
 #define cuMemAdvise(a,b,c,d)			cuMemAdvise_v2((a),(b),(c),(d))
 #endif
 
