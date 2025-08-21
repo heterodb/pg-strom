@@ -328,6 +328,9 @@ typedef struct
 	int			window_orderby_nkeys;	/* GPU-Sort + Rank() - # of ordering keys */
 	/* pinned inner buffer stuff */
 	List	   *projection_hashkeys;
+	/* select into direct mode */
+	Oid			select_into_relid;		/* SELECT INTO direct destination relation */
+	List	   *select_into_proj;		/* SELECT INTO direct projection if any */
 	/* inner relations */
 	int			sibling_param_id;
 	int			num_rels;
@@ -373,10 +376,15 @@ typedef struct
 	uint32_t			ss_length;			/* length of the SharedState */
 	/* pg-strom's unique plan-id */
 	uint64_t			query_plan_id;
+	/* xact */
+	TransactionId		pgsql_curr_xid;		/* xid of the query */
+	CommandId			pgsql_curr_cid;		/* cid of the query*/
 	/* scan */
 	pg_atomic_uint64	scan_block_count;	/* scan counter */
 	uint32_t			scan_block_nums;	/* = HeapScanDesc::rs_numblocks */
 	uint32_t			scan_block_start;	/* = HeapScanDesc::rs_startblock */
+	pg_atomic_uint64	scan_repeat_sync_control; /* sync variable when repeat_id is
+												   * incremented to the next loop. */
 	/* control variables to detect the last plan-node at parallel execution */
 	pg_atomic_uint32	parallel_task_control;
 	/* statistics */
@@ -390,6 +398,10 @@ typedef struct
 	pg_atomic_uint64	final_nitems;		/* # of tuples in final buffer if any */
 	pg_atomic_uint64	final_usage;		/* usage bytes of final buffer if any */
 	pg_atomic_uint64	final_total;		/* total usage of final buffer if any */
+	pg_atomic_uint32	final_sorting_msec;			/* usec of GPU-sorting */
+	pg_atomic_uint32	final_reconstruction_msec;	/* usec of final buffer reconstruction */
+	pg_atomic_uint32	join_reconstruction_msec;	/* usec of inner buffer reconstruction */
+	pg_atomic_uint32	select_into_nblocks; /* # of blocks written by SELECT INTO direct */
 	pg_atomic_uint32	pinned_buffer_divisor; /* # of pinned-inner-buffer partitions */
 	/* for parallel-scan */
 	uint32_t			parallel_scan_desc_offset;
@@ -482,7 +494,6 @@ struct pgstromTaskState
 	bool				scan_done;
 	bool				final_done;
 	uint32_t			num_scan_repeats;
-
 	/* base relation scan, if any */
 	TupleTableSlot	   *base_slot;
 	ExprState		   *base_quals;	/* equivalent to device quals */
@@ -768,9 +779,24 @@ typedef struct gpuContext	gpuContext;
 typedef struct gpuClient	gpuClient;
 
 extern bool		isGpuServWorkerThread(void);
+extern void		__gpuClientELog(gpuClient *gclient,
+								int errcode,
+								const char *filename, int lineno,
+								const char *funcname,
+								const char *fmt, ...)	pg_attribute_printf(6,7);
+
+#define gpuClientELog(gclient,fmt,...)						\
+	__gpuClientELog((gclient), ERRCODE_DEVICE_ERROR,		\
+					__FILE__, __LINE__, __FUNCTION__,		\
+					(fmt), ##__VA_ARGS__)
+#define gpuClientFatal(gclient,fmt,...)						\
+	__gpuClientELog((gclient), ERRCODE_DEVICE_FATAL,		\
+					__FILE__, __LINE__, __FUNCTION__,		\
+					(fmt), ##__VA_ARGS__)
+
 extern void		gpuservLoggerReport(const char *fmt, ...)
 					pg_attribute_printf(1, 2);
-#define __gsLogCxt(LABEL,fmt,...)							\
+#define __gsLogLabel(LABEL,fmt,...)							\
 	gpuservLoggerReport("%s|LOG|%s|%d|%s|" fmt "\n",		\
 						LABEL,								\
 						__basename(__FILE__),				\
@@ -782,7 +808,7 @@ extern void		gpuservLoggerReport(const char *fmt, ...)
 	do {													\
 		int		__errno_saved = errno;						\
 		if (isGpuServWorkerThread())						\
-			__gsLogCxt("[error]",fmt,##__VA_ARGS__);		\
+			__gsLogLabel("[error]",fmt,##__VA_ARGS__);		\
 		else												\
 			ereport(LOG,									\
 					(errhidestmt(true),						\
@@ -798,7 +824,7 @@ extern void		gpuservLoggerReport(const char *fmt, ...)
 		if (heterodbExtraEreportLevel() >= 1)				\
 		{													\
 			if (isGpuServWorkerThread())					\
-				__gsLogCxt("[info]",fmt,##__VA_ARGS__);		\
+				__gsLogLabel("[info]",fmt,##__VA_ARGS__);	\
 			else											\
 				ereport(LOG,								\
 						(errhidestmt(true),					\
@@ -814,7 +840,7 @@ extern void		gpuservLoggerReport(const char *fmt, ...)
 		if (heterodbExtraEreportLevel() >= 2)				\
 		{													\
 			if (isGpuServWorkerThread())					\
-				__gsLogCxt("[debug]",fmt,##__VA_ARGS__);	\
+				__gsLogLabel("[debug]",fmt,##__VA_ARGS__);	\
 			else											\
 				ereport(LOG,								\
 						(errhidestmt(true),					\
@@ -828,6 +854,8 @@ extern void		gpuservLoggerReport(const char *fmt, ...)
 extern int		pgstrom_max_async_tasks(void);
 extern bool		gpuserv_ready_accept(void);
 extern const char *cuStrError(CUresult rc);
+extern uint32_t	gpuClientGetTaskFlags(const gpuClient *gclient);
+extern const kern_session_info *gpuClientGetSessionInfo(const gpuClient *gclient);
 extern bool		gpuServiceGoingTerminate(void);
 extern void		gpuservBgWorkerMain(Datum arg);
 extern void		pgstrom_init_gpu_service(void);
@@ -894,6 +922,7 @@ extern void		pgstrom_init_dpu_scan(void);
 extern bool		pgstrom_is_gpujoin_path(const Path *path);
 extern bool		pgstrom_is_gpujoin_plan(const Plan *plan);
 extern bool		pgstrom_is_gpujoin_state(const PlanState *ps);
+extern size_t	pgstrom_pinned_inner_buffer_partition_size(void);
 extern pgstromPlanInfo *try_fetch_xpujoin_planinfo(const Path *path);
 extern void		try_add_sorted_gpujoin_path(PlannerInfo *root,
 											RelOptInfo *join_rel,
@@ -934,6 +963,8 @@ extern void		xpupreagg_add_custompath(PlannerInfo *root,
 										 void *extra,
 										 uint32_t task_kind,
 										 const CustomPathMethods *methods);
+extern bool		tryAddSelectIntoDirectProjection(pgstromTaskState *pts,
+												 List **p_select_into_proj);
 extern bool		ExecFallbackCpuPreAgg(pgstromTaskState *pts,
 									  int depth,
 									  uint64_t l_state,
@@ -980,7 +1011,41 @@ extern bool		kds_arrow_fetch_tuple(TupleTableSlot *slot,
 									  kern_data_store *kds,
 									  size_t index,
 									  const Bitmapset *referenced);
-extern void pgstrom_init_arrow_fdw(void);
+extern void		pgstrom_init_arrow_fdw(void);
+
+/*
+ * select_into.c
+ */
+
+/*
+ * NOTE: This field is embedded in the gpuQueryBuffer; can be accessed by
+ *       multiple CPU threads concurrently.
+ */
+typedef struct
+{
+	pthread_mutex_t		kds_heap_lock;	/* lock for kds_heap and segment_no */
+	kern_data_store	   *kds_heap;		/* per-segment buffer */
+	uint32_t			kds_heap_segno;	/* current segment number */
+	uint64_t			nblocks_written;/* statistics */
+	pthread_mutex_t		dpage_lock;
+	PageHeaderData	   *dpage;			/* row-by-row buffer */
+	const char		   *base_name;
+} selectIntoState;
+
+extern bool		__initSelectIntoState(selectIntoState *si_state,
+									  const kern_session_info *session);
+extern void		__cleanupSelectIntoState(selectIntoState *si_state);
+
+extern bool		selectIntoWriteOutHeapNormal(gpuClient *gclient,
+											 selectIntoState *si_state,
+											 kern_data_store *kds_dst);
+extern long		selectIntoWriteOutHeapFinal(gpuClient *gclient,
+											kern_session_info *session,
+											selectIntoState *si_state,
+											kern_data_store *kds_dst);
+extern long		selectIntoFinalFlushBuffer(gpuClient *gclient,
+										   selectIntoState *si_state);
+extern void		pgstrom_init_select_into(void);
 
 /*
  * fallback.c
@@ -1096,9 +1161,11 @@ extern void		pgstrom_remember_op_leafs(PlannerInfo *root,
 										  bool be_parallel);
 extern pgstromOuterPathLeafInfo *pgstrom_find_op_normal(PlannerInfo *root,
 														RelOptInfo *outer_rel,
+														uint32_t xpu_task_flags,
 														bool be_parallel);
 extern List	   *pgstrom_find_op_leafs(PlannerInfo *root,
 									  RelOptInfo *outer_rel,
+									  uint32_t xpu_task_flags,
 									  bool be_parallel,
 									  bool *p_identical_inners);
 extern bool		pgstrom_is_dummy_path(const Path *path);

@@ -33,11 +33,11 @@ static char	   *dump_arrow_filename = NULL;
 static char	   *schema_arrow_filename = NULL;
 static char	   *schema_arrow_tablename = NULL;
 static char	   *stat_embedded_columns = NULL;
+static char	   *flatten_composite_columns = NULL;
 static int		num_worker_threads = 0;
 static char	   *parallel_dist_keys = NULL;
 static int		shows_progress = 0;
 static userConfigOption *sqldb_session_configs = NULL;
-static nestLoopOption *sqldb_nestloop_options = NULL;
 
 /*
  * Per-worker state variables
@@ -49,21 +49,6 @@ static pthread_t	   *worker_threads;
 static SQLtable		  **worker_tables;
 static const char	  **worker_dist_keys = NULL;
 static pthread_mutex_t	main_table_mutex = PTHREAD_MUTEX_INITIALIZER;
-
-/*
- * __trim
- */
-static inline char *
-__trim(char *token)
-{
-	char   *tail = token + strlen(token) - 1;
-
-	while (*token == ' ' || *token == '\t')
-		token++;
-	while (tail >= token && (*tail == ' ' || *tail == '\t'))
-		*tail-- = '\0';
-	return token;
-}
 
 /*
  * loadArrowDictionaryBatches
@@ -342,6 +327,145 @@ setup_output_file(SQLtable *table, const char *output_filename)
 	/* write out header stuff */
 	arrowFileWrite(table, "ARROW1\0\0", 8);
 	writeArrowSchema(table);
+}
+
+/*
+ * check_append_file_compatibility
+ */
+static bool
+__check_append_field_compatibility(SQLfield *column,
+								   ArrowField *field,
+								   const char *arrow_filename,
+								   const char *parent_field_name)
+{
+	char   *namebuf;
+
+	if (strcmp(column->field_name, field->name) != 0)
+	{
+		fprintf(stderr, "field name mismatch, so column '%s' was replaced by '%s'\n",
+				column->field_name,
+				field->name);
+		column->field_name = pstrdup(field->name);
+	}
+	/* field name for error message */
+	if (parent_field_name)
+	{
+		namebuf = alloca(strlen(column->field_name) +
+						 strlen(parent_field_name) + 10);
+		sprintf(namebuf, "%s.%s", parent_field_name, column->field_name);
+	}
+	else
+	{
+		namebuf = column->field_name;
+	}
+
+#define ELOG_MISMATCH													\
+	Elog("field type mismatch (query: %s, arrow file: %s in '%s' of '%s')",	\
+		 arrowNodeName(&column->arrow_type.node),						\
+		 arrowNodeName(&field->type.node),								\
+		 namebuf, arrow_filename)
+
+	if (column->arrow_type.node.tag != field->type.node.tag)
+		ELOG_MISMATCH;
+
+	switch (column->arrow_type.node.tag)
+	{
+		case ArrowNodeTag__Null:
+		case ArrowNodeTag__Bool:
+		case ArrowNodeTag__Binary:
+		case ArrowNodeTag__LargeBinary:
+		case ArrowNodeTag__Utf8:
+		case ArrowNodeTag__LargeUtf8:
+		case ArrowNodeTag__List:
+		case ArrowNodeTag__LargeList:
+		case ArrowNodeTag__Struct:
+			break;
+		case ArrowNodeTag__Int:
+			if (column->arrow_type.Int.bitWidth != field->type.Int.bitWidth ||
+				((column->arrow_type.Int.is_signed && !field->type.Int.is_signed) ||
+				 (!column->arrow_type.Int.is_signed && field->type.Int.is_signed)))
+				ELOG_MISMATCH;
+			break;
+		case ArrowNodeTag__FloatingPoint:
+			if (column->arrow_type.FloatingPoint.precision != field->type.FloatingPoint.precision)
+				ELOG_MISMATCH;
+			break;
+		case ArrowNodeTag__Decimal:
+			if (column->arrow_type.Decimal.precision != field->type.Decimal.precision ||
+				column->arrow_type.Decimal.scale     != field->type.Decimal.scale ||
+				column->arrow_type.Decimal.bitWidth  != field->type.Decimal.bitWidth)
+				ELOG_MISMATCH;
+			break;
+		case ArrowNodeTag__Date:
+			if (column->arrow_type.Date.unit != field->type.Date.unit)
+				ELOG_MISMATCH;
+			break;
+		case ArrowNodeTag__Time:
+			if (column->arrow_type.Time.unit     != field->type.Time.unit ||
+				column->arrow_type.Time.bitWidth != field->type.Time.bitWidth)
+				ELOG_MISMATCH;
+			break;
+		case ArrowNodeTag__Timestamp:
+			if (column->arrow_type.Timestamp.unit != field->type.Timestamp.unit ||
+				((!column->arrow_type.Timestamp.timezone && field->type.Timestamp.timezone) ||
+				 (column->arrow_type.Timestamp.timezone && !field->type.Timestamp.timezone) ||
+				 (column->arrow_type.Timestamp.timezone && field->type.Timestamp.timezone &&
+				  strcmp(column->arrow_type.Timestamp.timezone, field->type.Timestamp.timezone) != 0)))
+				ELOG_MISMATCH;
+			break;
+		case ArrowNodeTag__Interval:
+			if (column->arrow_type.Interval.unit != field->type.Interval.unit)
+				ELOG_MISMATCH;
+			break;
+		case ArrowNodeTag__FixedSizeBinary:
+			if (column->arrow_type.FixedSizeBinary.byteWidth != field->type.FixedSizeBinary.byteWidth)
+				ELOG_MISMATCH;
+			break;
+		case ArrowNodeTag__FixedSizeList:
+			if (column->arrow_type.FixedSizeList.listSize != field->type.FixedSizeList.listSize)
+				ELOG_MISMATCH;
+			break;
+		default:
+			Elog("unexpected or unsupported field type (query: %s, arrow file: %s in '%s' of '%s')",
+				 arrowNodeName(&column->arrow_type.node),
+				 arrowNodeName(&field->type.node),
+				 namebuf, arrow_filename);
+	}
+	if (column->nfields != field->_num_children)
+		Elog("number of sub-fields mismatch (query: %s[%d], arrow file: %s[%d] in '%s' of '%s')",
+			 arrowNodeName(&column->arrow_type.node), column->nfields,
+			 arrowNodeName(&field->type.node), field->_num_children,
+			 namebuf, arrow_filename);
+	for (int i=0; i < column->nfields; i++)
+	{
+		if (!__check_append_field_compatibility(&column->subfields[i],
+												&field->children[i],
+												arrow_filename, namebuf))
+			return false;
+	}
+	return true;
+}
+
+static bool
+check_append_file_compatibility(SQLtable *table,
+								ArrowFileInfo *af_info)
+{
+	if (table->nfields != af_info->footer.schema._num_fields)
+		Elog("number of the fields mismatch (query: %d fields, arrow file: %d in '%s'",
+			 table->nfields,
+			 af_info->footer.schema._num_fields,
+			 af_info->filename);
+	for (int j=0; j < table->nfields; j++)
+	{
+		SQLfield   *column = &table->columns[j];
+		ArrowField *field = &af_info->footer.schema.fields[j];
+
+		if (!__check_append_field_compatibility(column, field,
+												af_info->filename, NULL))
+			return false;
+	}
+	return true;
+#undef ELOG_MISMATCH
 }
 
 static int
@@ -654,68 +778,6 @@ read_sql_command_from_file(const char *filename)
 	return buffer;
 }
 
-#ifdef __PG2ARROW__
-static nestLoopOption *
-parseNestLoopOption(const char *command, bool outer_join)
-{
-	nestLoopOption *nlopt = palloc0(offsetof(nestLoopOption, pnames[10]));
-	const char *pos;
-	const char *end;
-	const char *sub_command;
-	char	   *dest;
-
-	if (strncmp(command, "file://", 7) == 0)
-		command = read_sql_command_from_file(command + 7);
-
-	sub_command = dest = palloc0(strlen(command) + 100);
-
-	for (pos = command; *pos != '\0'; pos++)
-	{
-		if (*pos == '\\')
-		{
-			pos++;
-			*dest++ = *pos;
-			if (*pos == '\0')
-				Elog("syntax error in: %s", command);
-		}
-		else if (*pos != '$')
-		{
-			*dest++ = *pos;
-		}
-		else
-		{
-			char	   *pname, *c;
-			size_t		sz;
-
-			pos++;
-			if (*pos != '(')
-				Elog("syntax error in: %s", command);
-			end = strchr(pos, ')');
-			if (!end)
-				Elog("syntax error in: %s", command);
-			pname = strndup(pos+1, end - (pos + 1));
-			for (c = pname; *c != '\0'; c++)
-			{
-				if (!isalnum(*c) && *c != '_')
-					Elog("--nestloop: field reference name should be '[0-9a-zA-Z_]+'");
-			}
-			sz = offsetof(nestLoopOption, pnames[nlopt->n_params + 1]);
-			nlopt = repalloc(nlopt, sz);
-			nlopt->pnames[nlopt->n_params++] = pname;
-
-			dest += sprintf(dest, "$%d", nlopt->n_params);
-			pos = end;
-		}
-	}
-	*dest = '\0';
-
-	nlopt->sub_command = sub_command;
-	nlopt->outer_join = outer_join;
-
-	return nlopt;
-}
-#endif	/* __PG2ARROW__ */
-
 int
 parseParallelDistKeys(const char *parallel_dist_keys, const char *delim)
 {
@@ -845,10 +907,6 @@ usage(void)
 		  "                        PARALLEL_KEYS.\n"
 		  "      (-n and -k are exclusive, either of them can be give if parallel dump.\n"
 		  "       It is user's responsibility to avoid data duplication.)\n"
-#ifdef __PG2ARROW__
-		  "      --inner-join=SUB_COMMAND\n"
-		  "      --outer-join=SUB_COMMAND\n"
-#endif
 		  "  -o, --output=FILENAME result file in Apache Arrow format\n"
 		  "      --append=FILENAME result Apache Arrow file to be appended\n"
 		  "      (--output and --append are exclusive. If neither of them\n"
@@ -856,6 +914,10 @@ usage(void)
 		  "  -S, --stat[=COLUMNS] embeds min/max statistics for each record batch\n"
 		  "                       COLUMNS is a comma-separated list of the target\n"
 		  "                       columns if partially enabled.\n"
+#ifdef __PG2ARROW__
+		  "      --flatten[=COLUMNS]    Enables to expand RECORD values into flatten\n"
+		  "                       element values.\n"
+#endif
 		  "\n"
 		  "Arrow format options:\n"
 		  "  -s, --segment-size=SIZE size of record batch for each\n"
@@ -908,8 +970,7 @@ parse_options(int argc, char * const argv[])
 		{"dump",         required_argument, NULL, 1001},
 		{"progress",     no_argument,       NULL, 1002},
 		{"set",          required_argument, NULL, 1003},
-		{"inner-join",   required_argument, NULL, 1004},
-		{"outer-join",   required_argument, NULL, 1005},
+		{"flatten",      optional_argument, NULL, 1004},
 		{"schema",       required_argument, NULL, 1006},
 		{"schema-name",  required_argument, NULL, 1007},
 		{"stat",         optional_argument, NULL, 'S'},
@@ -921,7 +982,6 @@ parse_options(int argc, char * const argv[])
 	int			c;
 	int			password_prompt = 0;
 	userConfigOption *last_user_config = NULL;
-	nestLoopOption *last_nest_loop __attribute__((unused)) = NULL;
 
 	while ((c = getopt_long(argc, argv,
 							"d:c:t:o:s:h:p:u:"
@@ -1101,19 +1161,15 @@ parse_options(int argc, char * const argv[])
 				}
 				break;
 #ifdef __PG2ARROW__
-			case 1004:		/* --inner-join */
-			case 1005:		/* --outer-join */
-				{
-					nestLoopOption *nlopt = parseNestLoopOption(optarg, c == 1005);
-
-					if (last_nest_loop)
-						last_nest_loop->next = nlopt;
-					else
-						sqldb_nestloop_options = nlopt;
-					last_nest_loop = nlopt;
-				}
+			case 1004:		/* --flatten */
+				if (flatten_composite_columns)
+					Elog("--flatten option was supplied twice");
+				else if (optarg)
+					flatten_composite_columns = optarg;
+				else
+					flatten_composite_columns = "*";	/* any RECORD values */
 				break;
-#endif	/* __PG2ARROW__ */
+#endif
 			case 1006:		/* --schema */
 				if (dump_arrow_filename)
 					Elog("--dump and --schema are exclusive");
@@ -1127,14 +1183,12 @@ parse_options(int argc, char * const argv[])
 				schema_arrow_tablename = optarg;
 				break;
 			case 'S':		/* --stat */
-				{
-					if (stat_embedded_columns)
-						Elog("--stat option was supplied twice");
-					if (optarg)
-						stat_embedded_columns = optarg;
-					else
-						stat_embedded_columns = "*";
-				}
+				if (stat_embedded_columns)
+					Elog("--stat option was supplied twice");
+				if (optarg)
+					stat_embedded_columns = optarg;
+				else
+					stat_embedded_columns = "*";
 				break;
 			case 9999:		/* --help */
 			default:
@@ -1455,15 +1509,14 @@ worker_main(void *__worker_id)
 									  sqldb_username,
 									  sqldb_password,
 									  sqldb_database,
-									  sqldb_session_configs,
-									  sqldb_nestloop_options);
+									  sqldb_session_configs);
 	worker_command = sqldb_command_apply_worker_id(sqldb_command, worker_id);
 	if (shows_progress)
 		printf("worker:%lu SQL=[%s]\n", worker_id, worker_command);
 	data_table = sqldb_begin_query(sqldb_conn,
 								   worker_command,
-								   NULL,
-								   main_table->sql_dict_list);
+								   main_table->sql_dict_list,
+								   flatten_composite_columns);
 	if (!data_table)
 		Elog("Empty results by the query: %s", worker_command);
 	data_table->segment_sz = batch_segment_sz;
@@ -1526,8 +1579,7 @@ int main(int argc, char * const argv[])
 									  sqldb_username,
 									  sqldb_password,
 									  sqldb_database,
-									  sqldb_session_configs,
-									  sqldb_nestloop_options);
+									  sqldb_session_configs);
 	/* read the original arrow file, if --append mode */
 	if (append_filename)
 	{
@@ -1535,6 +1587,7 @@ int main(int argc, char * const argv[])
 		if (append_fdesc < 0)
 			Elog("failed on open('%s'): %m", append_filename);
 		readArrowFileDesc(append_fdesc, &af_info);
+		af_info.filename = append_filename;
 		sql_dict_list = loadArrowDictionaryBatches(append_fdesc, &af_info);
 	}
 	/* build simple table-scan query command */
@@ -1554,10 +1607,12 @@ int main(int argc, char * const argv[])
 		printf("worker:0 SQL=[%s]\n", main_command);
 	table = sqldb_begin_query(sqldb_conn,
 							  main_command,
-							  append_filename ? &af_info : NULL,
-							  sql_dict_list);
+							  sql_dict_list,
+							  flatten_composite_columns);
 	if (!table)
 		Elog("Empty results by the query: %s", sqldb_command);
+	if (append_filename)
+		check_append_file_compatibility(table, &af_info);
 	table->segment_sz = batch_segment_sz;
 	/* enables embedded min/max statistics, if any */
 	enable_embedded_stats(table);

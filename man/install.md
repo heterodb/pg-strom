@@ -1306,7 +1306,7 @@ $ sudo make PG_CONFIG=/path/to/pgsql/bin/pg_config install
 これを避けるため、Ubuntu Linuxを利用する場合は`/etc/postgresql/PGVERSION/main/environment`に以下の内容を追記してください。
 }
 @en{
-However, if you use a packaged PostgreSQL and start it via systemctl, the PATH environment variable will be cleared (probably for security reasons).
+However, if you use a packaged PostgreSQL and start it by systemctl command, the PATH environment variable will be cleared (probably for security reasons).
 As a result, the script launched to build the GPU binary on the first startup will not work properly.
 To avoid this, if you are using Ubuntu Linux, add the following line to `/etc/postgresql/main/PGVERSION/environment`.
 }

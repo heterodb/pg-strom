@@ -176,6 +176,8 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 	privs = lappend(privs, makeInteger(pp_info->window_partby_nkeys));
 	privs = lappend(privs, makeInteger(pp_info->window_orderby_nkeys));
 	exprs = lappend(exprs, pp_info->projection_hashkeys);
+	privs = lappend(privs, makeInteger(pp_info->select_into_relid));
+	privs = lappend(privs, pp_info->select_into_proj);
 	/* inner relations */
 	privs = lappend(privs, makeInteger(pp_info->sibling_param_id));
 	privs = lappend(privs, makeInteger(pp_info->num_rels));
@@ -294,6 +296,8 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	pp_data.window_partby_nkeys = intVal(list_nth(privs, pindex++));
 	pp_data.window_orderby_nkeys = intVal(list_nth(privs, pindex++));
 	pp_data.projection_hashkeys = list_nth(exprs, eindex++);
+	pp_data.select_into_relid = intVal(list_nth(privs, pindex++));
+	pp_data.select_into_proj = list_nth(privs, pindex++);
 	/* inner relations */
 	pp_data.sibling_param_id = intVal(list_nth(privs, pindex++));
 	pp_data.num_rels = intVal(list_nth(privs, pindex++));

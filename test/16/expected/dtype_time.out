@@ -73,12 +73,12 @@ SELECT id, d1::timestamp v1, d2::timestamptz v2, t1::timetz v3,
   INTO test01g
   FROM rt_datetime
  WHERE id > 0;
-                                                                                                                                    QUERY PLAN                                                                                                                                    
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                      QUERY PLAN                                                                                                                                                                      
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_time_temp.rt_datetime
    Output: id, ((d1)::timestamp without time zone), ((d2)::timestamp with time zone), (t1)::time with time zone, ((ts1)::date), ((ts2)::time without time zone), ((ts1)::timestamp with time zone), ((tsz1)::date), ((tsz1)::time without time zone), (tsz2)::time with time zone
-   GPU Projection: id, (d1)::timestamp without time zone, (d2)::timestamp with time zone, t1, (ts1)::date, (ts2)::time without time zone, (ts1)::timestamp with time zone, (tsz1)::date, (tsz1)::time without time zone, tsz2
-   GPU Scan Quals: (id > 0) [rows: 3000 -> 3000]
+   GPU Projection: rt_datetime.id, (rt_datetime.d1)::timestamp without time zone, (rt_datetime.d2)::timestamp with time zone, rt_datetime.t1, (rt_datetime.ts1)::date, (rt_datetime.ts2)::time without time zone, (rt_datetime.ts1)::timestamp with time zone, (rt_datetime.tsz1)::date, (rt_datetime.tsz1)::time without time zone, rt_datetime.tsz2
+   GPU Scan Quals: (rt_datetime.id > 0)
 (4 rows)
 
 SELECT id, d1::timestamp v1, d2::timestamptz v2, t1::timetz v3,
@@ -114,12 +114,12 @@ SELECT id, d1::timestamp v1, d2::timestamptz v2, t1::timetz v3,
   INTO test02g
   FROM rt_datetime
  WHERE id > 0;
-                                                                                                                                    QUERY PLAN                                                                                                                                    
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                      QUERY PLAN                                                                                                                                                                      
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_time_temp.rt_datetime
    Output: id, ((d1)::timestamp without time zone), ((d2)::timestamp with time zone), (t1)::time with time zone, ((ts1)::date), ((ts2)::time without time zone), ((ts1)::timestamp with time zone), ((tsz1)::date), ((tsz1)::time without time zone), (tsz2)::time with time zone
-   GPU Projection: id, (d1)::timestamp without time zone, (d2)::timestamp with time zone, t1, (ts1)::date, (ts2)::time without time zone, (ts1)::timestamp with time zone, (tsz1)::date, (tsz1)::time without time zone, tsz2
-   GPU Scan Quals: (id > 0) [rows: 3000 -> 3000]
+   GPU Projection: rt_datetime.id, (rt_datetime.d1)::timestamp without time zone, (rt_datetime.d2)::timestamp with time zone, rt_datetime.t1, (rt_datetime.ts1)::date, (rt_datetime.ts2)::time without time zone, (rt_datetime.ts1)::timestamp with time zone, (rt_datetime.tsz1)::date, (rt_datetime.tsz1)::time without time zone, rt_datetime.tsz2
+   GPU Scan Quals: (rt_datetime.id > 0)
 (4 rows)
 
 SELECT id, d1::timestamp v1, d2::timestamptz v2, t1::timetz v3,
@@ -153,12 +153,12 @@ SELECT id, d1 + ival v1, d2 - ival v2, d1 - d2 v3,
   INTO test10g
   FROM rt_datetime
  WHERE id > 0;
-                                               QUERY PLAN                                               
---------------------------------------------------------------------------------------------------------
+                                                                                                                     QUERY PLAN                                                                                                                     
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_time_temp.rt_datetime
    Output: id, ((d1 + ival)), ((d2 - ival)), ((d1 - d2)), ((d1 + t1)), (d2 + tz1), timestamptz(d1, tz2)
-   GPU Projection: id, (d1 + ival), (d2 - ival), (d1 - d2), (d1 + t1), d2, tz1, d1, tz2
-   GPU Scan Quals: (id > 0) [rows: 3000 -> 3000]
+   GPU Projection: rt_datetime.id, (rt_datetime.d1 + rt_datetime.ival), (rt_datetime.d2 - rt_datetime.ival), (rt_datetime.d1 - rt_datetime.d2), (rt_datetime.d1 + rt_datetime.t1), rt_datetime.d2, rt_datetime.tz1, rt_datetime.d1, rt_datetime.tz2
+   GPU Scan Quals: (rt_datetime.id > 0)
 (4 rows)
 
 SELECT id, d1 + ival v1, d2 - ival v2, d1 - d2 v3,
@@ -190,12 +190,12 @@ SELECT id, t1 + d2 v1, t2 - t1 v2,
   INTO test11g
   FROM rt_datetime
  WHERE id > 0;
-                              QUERY PLAN                              
-----------------------------------------------------------------------
+                                                                                    QUERY PLAN                                                                                    
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_time_temp.rt_datetime
    Output: id, ((d2 + t1)), ((t2 - t1)), ((tz1 + iv1)), ((tz2 - iv2))
-   GPU Projection: id, (d2 + t1), (t2 - t1), (tz1 + iv1), (tz2 - iv2)
-   GPU Scan Quals: (id > 0) [rows: 3000 -> 3000]
+   GPU Projection: rt_datetime.id, (rt_datetime.d2 + rt_datetime.t1), (rt_datetime.t2 - rt_datetime.t1), (rt_datetime.tz1 + rt_datetime.iv1), (rt_datetime.tz2 - rt_datetime.iv2)
+   GPU Scan Quals: (rt_datetime.id > 0)
 (4 rows)
 
 SELECT id, t1 + d2 v1, t2 - t1 v2,
@@ -226,12 +226,12 @@ SELECT id, ts1 - ts2 v1, tsz1 + iv1 v2, tsz2 - iv2 v3
   INTO test12g
   FROM rt_datetime
  WHERE id > 0;
-                          QUERY PLAN                           
----------------------------------------------------------------
+                                                                    QUERY PLAN                                                                     
+---------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_time_temp.rt_datetime
    Output: id, ((ts1 - ts2)), ((tsz1 + iv1)), ((tsz2 - iv2))
-   GPU Projection: id, (ts1 - ts2), (tsz1 + iv1), (tsz2 - iv2)
-   GPU Scan Quals: (id > 0) [rows: 3000 -> 3000]
+   GPU Projection: rt_datetime.id, (rt_datetime.ts1 - rt_datetime.ts2), (rt_datetime.tsz1 + rt_datetime.iv1), (rt_datetime.tsz2 - rt_datetime.iv2)
+   GPU Scan Quals: (rt_datetime.id > 0)
 (4 rows)
 
 SELECT id, ts1 - ts2 v1, tsz1 + iv1 v2, tsz2 - iv2 v3
@@ -260,12 +260,12 @@ SELECT id, -iv1 v1, iv1 + iv2 v2, iv2 - iv1 v3
   INTO test13g
   FROM rt_datetime
  WHERE id > 0;
-                          QUERY PLAN                          
---------------------------------------------------------------
+                                                           QUERY PLAN                                                            
+---------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_time_temp.rt_datetime
    Output: id, ((- iv1)), ((iv1 + iv2)), ((iv2 - iv1))
-   GPU Projection: id, (- iv1), (iv1 + iv2), (iv2 - iv1)
-   GPU Scan Quals: (id > 0) [rows: 3000 -> 3000]
+   GPU Projection: rt_datetime.id, (- rt_datetime.iv1), (rt_datetime.iv1 + rt_datetime.iv2), (rt_datetime.iv2 - rt_datetime.iv1)
+   GPU Scan Quals: (rt_datetime.id > 0)
 (4 rows)
 
 SELECT id, -iv1 v1, iv1 + iv2 v2, iv2 - iv1 v3
@@ -295,12 +295,12 @@ SELECT id, d1 =  d2 v1, d1 <> d2 v2, d1 <  d2 v3,
   INTO test20g
   FROM rt_datetime
  WHERE id > 0;
-                                          QUERY PLAN                                           
------------------------------------------------------------------------------------------------
+                                                                                                                      QUERY PLAN                                                                                                                       
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_time_temp.rt_datetime
    Output: id, ((d1 = d2)), ((d1 <> d2)), ((d1 < d2)), ((d1 <= d2)), ((d1 > d2)), ((d1 >= d2))
-   GPU Projection: id, (d1 = d2), (d1 <> d2), (d1 < d2), (d1 <= d2), (d1 > d2), (d1 >= d2)
-   GPU Scan Quals: (id > 0) [rows: 3000 -> 3000]
+   GPU Projection: rt_datetime.id, (rt_datetime.d1 = rt_datetime.d2), (rt_datetime.d1 <> rt_datetime.d2), (rt_datetime.d1 < rt_datetime.d2), (rt_datetime.d1 <= rt_datetime.d2), (rt_datetime.d1 > rt_datetime.d2), (rt_datetime.d1 >= rt_datetime.d2)
+   GPU Scan Quals: (rt_datetime.id > 0)
 (4 rows)
 
 SELECT id, d1 =  d2 v1, d1 <> d2 v2, d1 <  d2 v3,
@@ -332,12 +332,12 @@ SELECT id, d1 =  ts2 v1, d1 <> ts2 v2, d1 <  ts2 v3,
   INTO test21g
   FROM rt_datetime
  WHERE id > 0;
-                                             QUERY PLAN                                              
------------------------------------------------------------------------------------------------------
+                                                                                                                         QUERY PLAN                                                                                                                          
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_time_temp.rt_datetime
    Output: id, ((d1 = ts2)), ((d1 <> ts2)), ((d1 < ts2)), ((d1 <= ts2)), ((d1 > ts2)), ((d1 >= ts2))
-   GPU Projection: id, (d1 = ts2), (d1 <> ts2), (d1 < ts2), (d1 <= ts2), (d1 > ts2), (d1 >= ts2)
-   GPU Scan Quals: (id > 0) [rows: 3000 -> 3000]
+   GPU Projection: rt_datetime.id, (rt_datetime.d1 = rt_datetime.ts2), (rt_datetime.d1 <> rt_datetime.ts2), (rt_datetime.d1 < rt_datetime.ts2), (rt_datetime.d1 <= rt_datetime.ts2), (rt_datetime.d1 > rt_datetime.ts2), (rt_datetime.d1 >= rt_datetime.ts2)
+   GPU Scan Quals: (rt_datetime.id > 0)
 (4 rows)
 
 SELECT id, d1 =  ts2 v1, d1 <> ts2 v2, d1 <  ts2 v3,
@@ -369,12 +369,12 @@ SELECT id, ts1 =  d2 v1, ts1 <> d2 v2, ts1 <  d2 v3,
   INTO test22g
   FROM rt_datetime
  WHERE id > 0;
-                                             QUERY PLAN                                              
------------------------------------------------------------------------------------------------------
+                                                                                                                         QUERY PLAN                                                                                                                          
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_time_temp.rt_datetime
    Output: id, ((ts1 = d2)), ((ts1 <> d2)), ((ts1 < d2)), ((ts1 <= d2)), ((ts1 > d2)), ((ts1 >= d2))
-   GPU Projection: id, (ts1 = d2), (ts1 <> d2), (ts1 < d2), (ts1 <= d2), (ts1 > d2), (ts1 >= d2)
-   GPU Scan Quals: (id > 0) [rows: 3000 -> 3000]
+   GPU Projection: rt_datetime.id, (rt_datetime.ts1 = rt_datetime.d2), (rt_datetime.ts1 <> rt_datetime.d2), (rt_datetime.ts1 < rt_datetime.d2), (rt_datetime.ts1 <= rt_datetime.d2), (rt_datetime.ts1 > rt_datetime.d2), (rt_datetime.ts1 >= rt_datetime.d2)
+   GPU Scan Quals: (rt_datetime.id > 0)
 (4 rows)
 
 SELECT id, ts1 =  d2 v1, ts1 <> d2 v2, ts1 <  d2 v3,
@@ -406,12 +406,12 @@ SELECT id, d1 =  tsz2 v1, d1 <> tsz2 v2, d1 <  tsz2 v3,
   INTO test23g
   FROM rt_datetime
  WHERE id > 0;
-                                                QUERY PLAN                                                 
------------------------------------------------------------------------------------------------------------
+                                                                                                                            QUERY PLAN                                                                                                                             
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_time_temp.rt_datetime
    Output: id, ((d1 = tsz2)), ((d1 <> tsz2)), ((d1 < tsz2)), ((d1 <= tsz2)), ((d1 > tsz2)), ((d1 >= tsz2))
-   GPU Projection: id, (d1 = tsz2), (d1 <> tsz2), (d1 < tsz2), (d1 <= tsz2), (d1 > tsz2), (d1 >= tsz2)
-   GPU Scan Quals: (id > 0) [rows: 3000 -> 3000]
+   GPU Projection: rt_datetime.id, (rt_datetime.d1 = rt_datetime.tsz2), (rt_datetime.d1 <> rt_datetime.tsz2), (rt_datetime.d1 < rt_datetime.tsz2), (rt_datetime.d1 <= rt_datetime.tsz2), (rt_datetime.d1 > rt_datetime.tsz2), (rt_datetime.d1 >= rt_datetime.tsz2)
+   GPU Scan Quals: (rt_datetime.id > 0)
 (4 rows)
 
 SELECT id, d1 =  tsz2 v1, d1 <> tsz2 v2, d1 <  tsz2 v3,
@@ -443,12 +443,12 @@ SELECT id, tsz1 =  d2 v1, tsz1 <> d2 v2, tsz1 <  d2 v3,
   INTO test24g
   FROM rt_datetime
  WHERE id > 0;
-                                                QUERY PLAN                                                 
------------------------------------------------------------------------------------------------------------
+                                                                                                                            QUERY PLAN                                                                                                                             
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_time_temp.rt_datetime
    Output: id, ((tsz1 = d2)), ((tsz1 <> d2)), ((tsz1 < d2)), ((tsz1 <= d2)), ((tsz1 > d2)), ((tsz1 >= d2))
-   GPU Projection: id, (tsz1 = d2), (tsz1 <> d2), (tsz1 < d2), (tsz1 <= d2), (tsz1 > d2), (tsz1 >= d2)
-   GPU Scan Quals: (id > 0) [rows: 3000 -> 3000]
+   GPU Projection: rt_datetime.id, (rt_datetime.tsz1 = rt_datetime.d2), (rt_datetime.tsz1 <> rt_datetime.d2), (rt_datetime.tsz1 < rt_datetime.d2), (rt_datetime.tsz1 <= rt_datetime.d2), (rt_datetime.tsz1 > rt_datetime.d2), (rt_datetime.tsz1 >= rt_datetime.d2)
+   GPU Scan Quals: (rt_datetime.id > 0)
 (4 rows)
 
 SELECT id, tsz1 =  d2 v1, tsz1 <> d2 v2, tsz1 <  d2 v3,
@@ -480,12 +480,12 @@ SELECT id, t1 =  t2 v1, t1 <> t2 v2, t1 <  t2 v3,
   INTO test25g
   FROM rt_datetime
  WHERE id > 0;
-                                          QUERY PLAN                                           
------------------------------------------------------------------------------------------------
+                                                                                                                      QUERY PLAN                                                                                                                       
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_time_temp.rt_datetime
    Output: id, ((t1 = t2)), ((t1 <> t2)), ((t1 < t2)), ((t1 <= t2)), ((t1 > t2)), ((t1 >= t2))
-   GPU Projection: id, (t1 = t2), (t1 <> t2), (t1 < t2), (t1 <= t2), (t1 > t2), (t1 >= t2)
-   GPU Scan Quals: (id > 0) [rows: 3000 -> 3000]
+   GPU Projection: rt_datetime.id, (rt_datetime.t1 = rt_datetime.t2), (rt_datetime.t1 <> rt_datetime.t2), (rt_datetime.t1 < rt_datetime.t2), (rt_datetime.t1 <= rt_datetime.t2), (rt_datetime.t1 > rt_datetime.t2), (rt_datetime.t1 >= rt_datetime.t2)
+   GPU Scan Quals: (rt_datetime.id > 0)
 (4 rows)
 
 SELECT id, t1 =  t2 v1, t1 <> t2 v2, t1 <  t2 v3,
@@ -517,12 +517,12 @@ SELECT id, tz1 =  tz2 v1, tz1 <> tz2 v2, tz1 <  tz2 v3,
   INTO test26g
   FROM rt_datetime
  WHERE id > 0;
-                                                QUERY PLAN                                                 
------------------------------------------------------------------------------------------------------------
+                                                                                                                            QUERY PLAN                                                                                                                             
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_time_temp.rt_datetime
    Output: id, ((tz1 = tz2)), ((tz1 <> tz2)), ((tz1 < tz2)), ((tz1 <= tz2)), ((tz1 > tz2)), ((tz1 >= tz2))
-   GPU Projection: id, (tz1 = tz2), (tz1 <> tz2), (tz1 < tz2), (tz1 <= tz2), (tz1 > tz2), (tz1 >= tz2)
-   GPU Scan Quals: (id > 0) [rows: 3000 -> 3000]
+   GPU Projection: rt_datetime.id, (rt_datetime.tz1 = rt_datetime.tz2), (rt_datetime.tz1 <> rt_datetime.tz2), (rt_datetime.tz1 < rt_datetime.tz2), (rt_datetime.tz1 <= rt_datetime.tz2), (rt_datetime.tz1 > rt_datetime.tz2), (rt_datetime.tz1 >= rt_datetime.tz2)
+   GPU Scan Quals: (rt_datetime.id > 0)
 (4 rows)
 
 SELECT id, tz1 =  tz2 v1, tz1 <> tz2 v2, tz1 <  tz2 v3,
@@ -554,12 +554,12 @@ SELECT id, ts1 =  ts2 v1, ts1 <> ts2 v2, ts1 <  ts2 v3,
   INTO test27g
   FROM rt_datetime
  WHERE id > 0;
-                                                QUERY PLAN                                                 
------------------------------------------------------------------------------------------------------------
+                                                                                                                            QUERY PLAN                                                                                                                             
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_time_temp.rt_datetime
    Output: id, ((ts1 = ts2)), ((ts1 <> ts2)), ((ts1 < ts2)), ((ts1 <= ts2)), ((ts1 > ts2)), ((ts1 >= ts2))
-   GPU Projection: id, (ts1 = ts2), (ts1 <> ts2), (ts1 < ts2), (ts1 <= ts2), (ts1 > ts2), (ts1 >= ts2)
-   GPU Scan Quals: (id > 0) [rows: 3000 -> 3000]
+   GPU Projection: rt_datetime.id, (rt_datetime.ts1 = rt_datetime.ts2), (rt_datetime.ts1 <> rt_datetime.ts2), (rt_datetime.ts1 < rt_datetime.ts2), (rt_datetime.ts1 <= rt_datetime.ts2), (rt_datetime.ts1 > rt_datetime.ts2), (rt_datetime.ts1 >= rt_datetime.ts2)
+   GPU Scan Quals: (rt_datetime.id > 0)
 (4 rows)
 
 SELECT id, ts1 =  ts2 v1, ts1 <> ts2 v2, ts1 <  ts2 v3,
@@ -591,12 +591,12 @@ SELECT id, ts1 =  d2 v1, ts1 <> d2 v2, ts1 <  d2 v3,
   INTO test28g
   FROM rt_datetime
  WHERE id > 0;
-                                             QUERY PLAN                                              
------------------------------------------------------------------------------------------------------
+                                                                                                                         QUERY PLAN                                                                                                                          
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_time_temp.rt_datetime
    Output: id, ((ts1 = d2)), ((ts1 <> d2)), ((ts1 < d2)), ((ts1 <= d2)), ((ts1 > d2)), ((ts1 >= d2))
-   GPU Projection: id, (ts1 = d2), (ts1 <> d2), (ts1 < d2), (ts1 <= d2), (ts1 > d2), (ts1 >= d2)
-   GPU Scan Quals: (id > 0) [rows: 3000 -> 3000]
+   GPU Projection: rt_datetime.id, (rt_datetime.ts1 = rt_datetime.d2), (rt_datetime.ts1 <> rt_datetime.d2), (rt_datetime.ts1 < rt_datetime.d2), (rt_datetime.ts1 <= rt_datetime.d2), (rt_datetime.ts1 > rt_datetime.d2), (rt_datetime.ts1 >= rt_datetime.d2)
+   GPU Scan Quals: (rt_datetime.id > 0)
 (4 rows)
 
 SELECT id, ts1 =  d2 v1, ts1 <> d2 v2, ts1 <  d2 v3,
@@ -628,12 +628,12 @@ SELECT id, tsz1 =  tsz2 v1, tsz1 <> tsz2 v2, tsz1 <  tsz2 v3,
   INTO test29g
   FROM rt_datetime
  WHERE id > 0;
-                                                      QUERY PLAN                                                       
------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                  QUERY PLAN                                                                                                                                   
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_time_temp.rt_datetime
    Output: id, ((tsz1 = tsz2)), ((tsz1 <> tsz2)), ((tsz1 < tsz2)), ((tsz1 <= tsz2)), ((tsz1 > tsz2)), ((tsz1 >= tsz2))
-   GPU Projection: id, (tsz1 = tsz2), (tsz1 <> tsz2), (tsz1 < tsz2), (tsz1 <= tsz2), (tsz1 > tsz2), (tsz1 >= tsz2)
-   GPU Scan Quals: (id > 0) [rows: 3000 -> 3000]
+   GPU Projection: rt_datetime.id, (rt_datetime.tsz1 = rt_datetime.tsz2), (rt_datetime.tsz1 <> rt_datetime.tsz2), (rt_datetime.tsz1 < rt_datetime.tsz2), (rt_datetime.tsz1 <= rt_datetime.tsz2), (rt_datetime.tsz1 > rt_datetime.tsz2), (rt_datetime.tsz1 >= rt_datetime.tsz2)
+   GPU Scan Quals: (rt_datetime.id > 0)
 (4 rows)
 
 SELECT id, tsz1 =  tsz2 v1, tsz1 <> tsz2 v2, tsz1 <  tsz2 v3,
@@ -665,12 +665,12 @@ SELECT id, d1 =  tsz2 v1, d1 <> tsz2 v2, d1 <  tsz2 v3,
   INTO test30g
   FROM rt_datetime
  WHERE id > 0;
-                                                QUERY PLAN                                                 
------------------------------------------------------------------------------------------------------------
+                                                                                                                            QUERY PLAN                                                                                                                             
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_time_temp.rt_datetime
    Output: id, ((d1 = tsz2)), ((d1 <> tsz2)), ((d1 < tsz2)), ((d1 <= tsz2)), ((d1 > tsz2)), ((d1 >= tsz2))
-   GPU Projection: id, (d1 = tsz2), (d1 <> tsz2), (d1 < tsz2), (d1 <= tsz2), (d1 > tsz2), (d1 >= tsz2)
-   GPU Scan Quals: (id > 0) [rows: 3000 -> 3000]
+   GPU Projection: rt_datetime.id, (rt_datetime.d1 = rt_datetime.tsz2), (rt_datetime.d1 <> rt_datetime.tsz2), (rt_datetime.d1 < rt_datetime.tsz2), (rt_datetime.d1 <= rt_datetime.tsz2), (rt_datetime.d1 > rt_datetime.tsz2), (rt_datetime.d1 >= rt_datetime.tsz2)
+   GPU Scan Quals: (rt_datetime.id > 0)
 (4 rows)
 
 SELECT id, d1 =  tsz2 v1, d1 <> tsz2 v2, d1 <  tsz2 v3,
@@ -702,12 +702,12 @@ SELECT id, tsz1 =  d2 v1, tsz1 <> d2 v2, tsz1 <  d2 v3,
   INTO test31g
   FROM rt_datetime
  WHERE id > 0;
-                                                QUERY PLAN                                                 
------------------------------------------------------------------------------------------------------------
+                                                                                                                            QUERY PLAN                                                                                                                             
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_time_temp.rt_datetime
    Output: id, ((tsz1 = d2)), ((tsz1 <> d2)), ((tsz1 < d2)), ((tsz1 <= d2)), ((tsz1 > d2)), ((tsz1 >= d2))
-   GPU Projection: id, (tsz1 = d2), (tsz1 <> d2), (tsz1 < d2), (tsz1 <= d2), (tsz1 > d2), (tsz1 >= d2)
-   GPU Scan Quals: (id > 0) [rows: 3000 -> 3000]
+   GPU Projection: rt_datetime.id, (rt_datetime.tsz1 = rt_datetime.d2), (rt_datetime.tsz1 <> rt_datetime.d2), (rt_datetime.tsz1 < rt_datetime.d2), (rt_datetime.tsz1 <= rt_datetime.d2), (rt_datetime.tsz1 > rt_datetime.d2), (rt_datetime.tsz1 >= rt_datetime.d2)
+   GPU Scan Quals: (rt_datetime.id > 0)
 (4 rows)
 
 SELECT id, tsz1 =  d2 v1, tsz1 <> d2 v2, tsz1 <  d2 v3,
@@ -739,12 +739,12 @@ SELECT id, ts1 =  tsz2 v1, ts1 <> tsz2 v2, ts1 <  tsz2 v3,
   INTO test32g
   FROM rt_datetime
  WHERE id > 0;
-                                                   QUERY PLAN                                                    
------------------------------------------------------------------------------------------------------------------
+                                                                                                                               QUERY PLAN                                                                                                                                
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_time_temp.rt_datetime
    Output: id, ((ts1 = tsz2)), ((ts1 <> tsz2)), ((ts1 < tsz2)), ((ts1 <= tsz2)), ((ts1 > tsz2)), ((ts1 >= tsz2))
-   GPU Projection: id, (ts1 = tsz2), (ts1 <> tsz2), (ts1 < tsz2), (ts1 <= tsz2), (ts1 > tsz2), (ts1 >= tsz2)
-   GPU Scan Quals: (id > 0) [rows: 3000 -> 3000]
+   GPU Projection: rt_datetime.id, (rt_datetime.ts1 = rt_datetime.tsz2), (rt_datetime.ts1 <> rt_datetime.tsz2), (rt_datetime.ts1 < rt_datetime.tsz2), (rt_datetime.ts1 <= rt_datetime.tsz2), (rt_datetime.ts1 > rt_datetime.tsz2), (rt_datetime.ts1 >= rt_datetime.tsz2)
+   GPU Scan Quals: (rt_datetime.id > 0)
 (4 rows)
 
 SELECT id, ts1 =  tsz2 v1, ts1 <> tsz2 v2, ts1 <  tsz2 v3,
@@ -776,12 +776,12 @@ SELECT id, tsz1 =  tsz2 v1, tsz1 <> tsz2 v2, tsz1 <  tsz2 v3,
   INTO test33g
   FROM rt_datetime
  WHERE id > 0;
-                                                      QUERY PLAN                                                       
------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                  QUERY PLAN                                                                                                                                   
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_time_temp.rt_datetime
    Output: id, ((tsz1 = tsz2)), ((tsz1 <> tsz2)), ((tsz1 < tsz2)), ((tsz1 <= tsz2)), ((tsz1 > tsz2)), ((tsz1 >= tsz2))
-   GPU Projection: id, (tsz1 = tsz2), (tsz1 <> tsz2), (tsz1 < tsz2), (tsz1 <= tsz2), (tsz1 > tsz2), (tsz1 >= tsz2)
-   GPU Scan Quals: (id > 0) [rows: 3000 -> 3000]
+   GPU Projection: rt_datetime.id, (rt_datetime.tsz1 = rt_datetime.tsz2), (rt_datetime.tsz1 <> rt_datetime.tsz2), (rt_datetime.tsz1 < rt_datetime.tsz2), (rt_datetime.tsz1 <= rt_datetime.tsz2), (rt_datetime.tsz1 > rt_datetime.tsz2), (rt_datetime.tsz1 >= rt_datetime.tsz2)
+   GPU Scan Quals: (rt_datetime.id > 0)
 (4 rows)
 
 SELECT id, tsz1 =  tsz2 v1, tsz1 <> tsz2 v2, tsz1 <  tsz2 v3,
@@ -813,12 +813,12 @@ SELECT id, iv1 =  iv2 v1, iv1 <> iv2 v2, iv1 <  iv2 v3,
   INTO test34g
   FROM rt_datetime
  WHERE id > 0;
-                                                QUERY PLAN                                                 
------------------------------------------------------------------------------------------------------------
+                                                                                                                            QUERY PLAN                                                                                                                             
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_time_temp.rt_datetime
    Output: id, ((iv1 = iv2)), ((iv1 <> iv2)), ((iv1 < iv2)), ((iv1 <= iv2)), ((iv1 > iv2)), ((iv1 >= iv2))
-   GPU Projection: id, (iv1 = iv2), (iv1 <> iv2), (iv1 < iv2), (iv1 <= iv2), (iv1 > iv2), (iv1 >= iv2)
-   GPU Scan Quals: (id > 0) [rows: 3000 -> 3000]
+   GPU Projection: rt_datetime.id, (rt_datetime.iv1 = rt_datetime.iv2), (rt_datetime.iv1 <> rt_datetime.iv2), (rt_datetime.iv1 < rt_datetime.iv2), (rt_datetime.iv1 <= rt_datetime.iv2), (rt_datetime.iv1 > rt_datetime.iv2), (rt_datetime.iv1 >= rt_datetime.iv2)
+   GPU Scan Quals: (rt_datetime.id > 0)
 (4 rows)
 
 SELECT id, iv1 =  iv2 v1, iv1 <> iv2 v2, iv1 <  iv2 v3,
@@ -856,12 +856,12 @@ SELECT id, (t1,t2)     OVERLAPS (t3,t4)     v1,
   INTO test40g
   FROM rt_datetime
  WHERE id > 0;
-                                                                                                                                          QUERY PLAN                                                                                                                                          
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                    QUERY PLAN                                                                                                                                                    
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_time_temp.rt_datetime
    Output: id, ((t1, t2) OVERLAPS (t3, t4)), ((t1, t3) OVERLAPS (t2, t4)), ((tz1, tz2) OVERLAPS (tz3, tz4)), ((tz1, tz3) OVERLAPS (tz2, tz4)), ((ts1, ts2) OVERLAPS (ts3, ts4)), ((ts1, ts3) OVERLAPS (ts2, ts4)), ((tsz1, tsz2) OVERLAPS (tsz3, tsz4)), ((tsz1, tsz3) OVERLAPS (tsz2, tsz4))
-   GPU Projection: id, t1, t2, t3, t4, tz1, tz2, tz3, tz4, ts1, ts2, ts3, ts4, tsz1, tsz2, tsz3, tsz4
-   GPU Scan Quals: (id > 0) [rows: 3000 -> 3000]
+   GPU Projection: rt_datetime.id, rt_datetime.t1, rt_datetime.t2, rt_datetime.t3, rt_datetime.t4, rt_datetime.tz1, rt_datetime.tz2, rt_datetime.tz3, rt_datetime.tz4, rt_datetime.ts1, rt_datetime.ts2, rt_datetime.ts3, rt_datetime.ts4, rt_datetime.tsz1, rt_datetime.tsz2, rt_datetime.tsz3, rt_datetime.tsz4
+   GPU Scan Quals: (rt_datetime.id > 0)
 (4 rows)
 
 SELECT id, (t1,t2)     OVERLAPS (t3,t4)     v1,
@@ -908,12 +908,12 @@ SELECT id, EXTRACT (microseconds FROM t1) v1,
   INTO test41g
   FROM rt_datetime
  WHERE id > 0;
-                                                                          QUERY PLAN                                                                           
----------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                             QUERY PLAN                                                                                                              
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_time_temp.rt_datetime
    Output: id, (EXTRACT(microseconds FROM t1)), (EXTRACT(milliseconds FROM t2)), (EXTRACT(second FROM t3)), (EXTRACT(minute FROM t4)), (EXTRACT(hour FROM t1))
-   GPU Projection: id, EXTRACT(microseconds FROM t1), EXTRACT(milliseconds FROM t2), EXTRACT(second FROM t3), EXTRACT(minute FROM t4), EXTRACT(hour FROM t1)
-   GPU Scan Quals: (id > 0) [rows: 3000 -> 3000]
+   GPU Projection: rt_datetime.id, EXTRACT(microseconds FROM rt_datetime.t1), EXTRACT(milliseconds FROM rt_datetime.t2), EXTRACT(second FROM rt_datetime.t3), EXTRACT(minute FROM rt_datetime.t4), EXTRACT(hour FROM rt_datetime.t1)
+   GPU Scan Quals: (rt_datetime.id > 0)
 (4 rows)
 
 SELECT id, EXTRACT (microseconds FROM t1) v1,
@@ -956,12 +956,12 @@ SELECT id, EXTRACT (microseconds FROM tz1) v1,
   INTO test42g
   FROM rt_datetime
  WHERE id > 0;
-                                                                             QUERY PLAN                                                                             
---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                QUERY PLAN                                                                                                                
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_time_temp.rt_datetime
    Output: id, (EXTRACT(microseconds FROM tz1)), (EXTRACT(milliseconds FROM tz2)), (EXTRACT(second FROM tz3)), (EXTRACT(minute FROM tz4)), (EXTRACT(hour FROM tz1))
-   GPU Projection: id, EXTRACT(microseconds FROM tz1), EXTRACT(milliseconds FROM tz2), EXTRACT(second FROM tz3), EXTRACT(minute FROM tz4), EXTRACT(hour FROM tz1)
-   GPU Scan Quals: (id > 0) [rows: 3000 -> 3000]
+   GPU Projection: rt_datetime.id, EXTRACT(microseconds FROM rt_datetime.tz1), EXTRACT(milliseconds FROM rt_datetime.tz2), EXTRACT(second FROM rt_datetime.tz3), EXTRACT(minute FROM rt_datetime.tz4), EXTRACT(hour FROM rt_datetime.tz1)
+   GPU Scan Quals: (rt_datetime.id > 0)
 (4 rows)
 
 SELECT id, EXTRACT (microseconds FROM tz1) v1,
@@ -1017,12 +1017,12 @@ SELECT id, EXTRACT (century         FROM ts1) v1,
   INTO test43g
   FROM rt_datetime
  WHERE id > 0;
-                                                                                                                                                                                                                                                               QUERY PLAN                                                                                                                                                                                                                                                               
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                                                                                                                                                                                                   QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                   
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_time_temp.rt_datetime
    Output: id, (EXTRACT(century FROM ts1)), (EXTRACT(day FROM ts2)), (EXTRACT(decade FROM ts1)), (EXTRACT(dow FROM ts2)), (EXTRACT(doy FROM ts1)), (EXTRACT(epoch FROM ts2)), (EXTRACT(hour FROM ts1)), (EXTRACT(isodow FROM ts2)), (EXTRACT(isoyear FROM ts1)), (EXTRACT(microseconds FROM ts2)), (EXTRACT(millennium FROM ts1)), (EXTRACT(milliseconds FROM ts2)), (EXTRACT(minute FROM ts1)), (EXTRACT(month FROM ts2)), (EXTRACT(quarter FROM ts1)), (EXTRACT(second FROM ts2)), (EXTRACT(week FROM ts2)), (EXTRACT(year FROM ts1))
-   GPU Projection: id, EXTRACT(century FROM ts1), EXTRACT(day FROM ts2), EXTRACT(decade FROM ts1), EXTRACT(dow FROM ts2), EXTRACT(doy FROM ts1), EXTRACT(epoch FROM ts2), EXTRACT(hour FROM ts1), EXTRACT(isodow FROM ts2), EXTRACT(isoyear FROM ts1), EXTRACT(microseconds FROM ts2), EXTRACT(millennium FROM ts1), EXTRACT(milliseconds FROM ts2), EXTRACT(minute FROM ts1), EXTRACT(month FROM ts2), EXTRACT(quarter FROM ts1), EXTRACT(second FROM ts2), EXTRACT(week FROM ts2), EXTRACT(year FROM ts1)
-   GPU Scan Quals: (id > 0) [rows: 3000 -> 3000]
+   GPU Projection: rt_datetime.id, EXTRACT(century FROM rt_datetime.ts1), EXTRACT(day FROM rt_datetime.ts2), EXTRACT(decade FROM rt_datetime.ts1), EXTRACT(dow FROM rt_datetime.ts2), EXTRACT(doy FROM rt_datetime.ts1), EXTRACT(epoch FROM rt_datetime.ts2), EXTRACT(hour FROM rt_datetime.ts1), EXTRACT(isodow FROM rt_datetime.ts2), EXTRACT(isoyear FROM rt_datetime.ts1), EXTRACT(microseconds FROM rt_datetime.ts2), EXTRACT(millennium FROM rt_datetime.ts1), EXTRACT(milliseconds FROM rt_datetime.ts2), EXTRACT(minute FROM rt_datetime.ts1), EXTRACT(month FROM rt_datetime.ts2), EXTRACT(quarter FROM rt_datetime.ts1), EXTRACT(second FROM rt_datetime.ts2), EXTRACT(week FROM rt_datetime.ts2), EXTRACT(year FROM rt_datetime.ts1)
+   GPU Scan Quals: (rt_datetime.id > 0)
 (4 rows)
 
 SELECT id, EXTRACT (century         FROM ts1) v1,
@@ -1120,12 +1120,12 @@ SELECT id, EXTRACT (century         FROM tsz1) v1,
   INTO test44g
   FROM rt_datetime
  WHERE id > 0;
-                                                                                                                                                                                                                                                                                                                            QUERY PLAN                                                                                                                                                                                                                                                                                                                             
--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                                                                                                                                                                                                                                                                               QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                                                                                
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_time_temp.rt_datetime
    Output: id, (EXTRACT(century FROM tsz1)), (EXTRACT(day FROM tsz2)), (EXTRACT(decade FROM tsz1)), (EXTRACT(dow FROM tsz2)), (EXTRACT(doy FROM tsz1)), (EXTRACT(epoch FROM tsz2)), (EXTRACT(hour FROM tsz1)), (EXTRACT(isodow FROM tsz2)), (EXTRACT(isoyear FROM tsz1)), (EXTRACT(microseconds FROM tsz2)), (EXTRACT(millennium FROM tsz1)), (EXTRACT(milliseconds FROM tsz2)), (EXTRACT(minute FROM tsz1)), (EXTRACT(month FROM tsz2)), (EXTRACT(quarter FROM tsz1)), (EXTRACT(second FROM tsz2)), (EXTRACT(timezone FROM tsz1)), (EXTRACT(timezone_hour FROM tsz2)), (EXTRACT(timezone_minute FROM tsz1)), (EXTRACT(week FROM tsz2)), (EXTRACT(year FROM tsz1))
-   GPU Projection: id, EXTRACT(century FROM tsz1), EXTRACT(day FROM tsz2), EXTRACT(decade FROM tsz1), EXTRACT(dow FROM tsz2), EXTRACT(doy FROM tsz1), EXTRACT(epoch FROM tsz2), EXTRACT(hour FROM tsz1), EXTRACT(isodow FROM tsz2), EXTRACT(isoyear FROM tsz1), EXTRACT(microseconds FROM tsz2), EXTRACT(millennium FROM tsz1), EXTRACT(milliseconds FROM tsz2), EXTRACT(minute FROM tsz1), EXTRACT(month FROM tsz2), EXTRACT(quarter FROM tsz1), EXTRACT(second FROM tsz2), EXTRACT(timezone FROM tsz1), EXTRACT(timezone_hour FROM tsz2), EXTRACT(timezone_minute FROM tsz1), EXTRACT(week FROM tsz2), EXTRACT(year FROM tsz1)
-   GPU Scan Quals: (id > 0) [rows: 3000 -> 3000]
+   GPU Projection: rt_datetime.id, EXTRACT(century FROM rt_datetime.tsz1), EXTRACT(day FROM rt_datetime.tsz2), EXTRACT(decade FROM rt_datetime.tsz1), EXTRACT(dow FROM rt_datetime.tsz2), EXTRACT(doy FROM rt_datetime.tsz1), EXTRACT(epoch FROM rt_datetime.tsz2), EXTRACT(hour FROM rt_datetime.tsz1), EXTRACT(isodow FROM rt_datetime.tsz2), EXTRACT(isoyear FROM rt_datetime.tsz1), EXTRACT(microseconds FROM rt_datetime.tsz2), EXTRACT(millennium FROM rt_datetime.tsz1), EXTRACT(milliseconds FROM rt_datetime.tsz2), EXTRACT(minute FROM rt_datetime.tsz1), EXTRACT(month FROM rt_datetime.tsz2), EXTRACT(quarter FROM rt_datetime.tsz1), EXTRACT(second FROM rt_datetime.tsz2), EXTRACT(timezone FROM rt_datetime.tsz1), EXTRACT(timezone_hour FROM rt_datetime.tsz2), EXTRACT(timezone_minute FROM rt_datetime.tsz1), EXTRACT(week FROM rt_datetime.tsz2), EXTRACT(year FROM rt_datetime.tsz1)
+   GPU Scan Quals: (rt_datetime.id > 0)
 (4 rows)
 
 SELECT id, EXTRACT (century         FROM tsz1) v1,
@@ -1223,12 +1223,12 @@ SELECT id, EXTRACT (microseconds FROM iv1) v1,
   INTO test45g
   FROM rt_datetime
  WHERE id > 0;
-                                                                                                                                                                               QUERY PLAN                                                                                                                                                                               
-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                                                                                     QUERY PLAN                                                                                                                                                                                                                                                     
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_time_temp.rt_datetime
    Output: id, (EXTRACT(microseconds FROM iv1)), (EXTRACT(milliseconds FROM iv2)), (EXTRACT(second FROM iv1)), (EXTRACT(minute FROM iv2)), (EXTRACT(hour FROM iv1)), (EXTRACT(day FROM iv2)), (EXTRACT(month FROM iv1)), (EXTRACT(quarter FROM iv2)), (EXTRACT(year FROM iv1)), (EXTRACT(decade FROM iv2)), (EXTRACT(century FROM iv1)), (EXTRACT(millennium FROM iv2))
-   GPU Projection: id, EXTRACT(microseconds FROM iv1), EXTRACT(milliseconds FROM iv2), EXTRACT(second FROM iv1), EXTRACT(minute FROM iv2), EXTRACT(hour FROM iv1), EXTRACT(day FROM iv2), EXTRACT(month FROM iv1), EXTRACT(quarter FROM iv2), EXTRACT(year FROM iv1), EXTRACT(decade FROM iv2), EXTRACT(century FROM iv1), EXTRACT(millennium FROM iv2)
-   GPU Scan Quals: (id > 0) [rows: 3000 -> 3000]
+   GPU Projection: rt_datetime.id, EXTRACT(microseconds FROM rt_datetime.iv1), EXTRACT(milliseconds FROM rt_datetime.iv2), EXTRACT(second FROM rt_datetime.iv1), EXTRACT(minute FROM rt_datetime.iv2), EXTRACT(hour FROM rt_datetime.iv1), EXTRACT(day FROM rt_datetime.iv2), EXTRACT(month FROM rt_datetime.iv1), EXTRACT(quarter FROM rt_datetime.iv2), EXTRACT(year FROM rt_datetime.iv1), EXTRACT(decade FROM rt_datetime.iv2), EXTRACT(century FROM rt_datetime.iv1), EXTRACT(millennium FROM rt_datetime.iv2)
+   GPU Scan Quals: (rt_datetime.id > 0)
 (4 rows)
 
 SELECT id, EXTRACT (microseconds FROM iv1) v1,

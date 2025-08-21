@@ -682,12 +682,14 @@ __parseArrowFieldStatsBinary(arrowFieldStatsBinary *bstats,
 				break;
 
 			case ArrowNodeTag__Decimal:
-				__xpu_numeric_to_varlena((char *)&stat_values[index].min.numeric,
-										 field->type.Decimal.scale,
-										 __min);
-				__xpu_numeric_to_varlena((char *)&stat_values[index].max.numeric,
-                                         field->type.Decimal.scale,
-                                         __max);
+				__decimal_to_varlena((char *)&stat_values[index].min.numeric,
+									 XPU_NUMERIC_KIND__VALID,
+									 field->type.Decimal.scale,
+									 __min);
+				__decimal_to_varlena((char *)&stat_values[index].max.numeric,
+									 XPU_NUMERIC_KIND__VALID,
+									 field->type.Decimal.scale,
+									 __max);
 				break;
 
 			case ArrowNodeTag__Date:
@@ -2100,18 +2102,16 @@ __buildRecordBatchStateOne(ArrowSchema *schema,
 static bool
 readArrowFile(const char *filename, ArrowFileInfo *af_info, bool missing_ok)
 {
-    File	filp = PathNameOpenFile(filename, O_RDONLY | PG_BINARY);
+	int		status = readArrowFileInfo(filename, af_info);
 
-	if (filp < 0)
+	if (status != 0)
 	{
-		if (missing_ok && errno == ENOENT)
+		if (missing_ok && status == ENOENT)
 			return false;
 		ereport(ERROR,
 				(errcode_for_file_access(),
-				 errmsg("could not open file \"%s\": %m", filename)));
+				 errmsg("could not open file \"%s\"", filename)));
 	}
-	readArrowFileDesc(FileGetRawDesc(filp), af_info);
-	FileClose(filp);
 	if (af_info->dictionaries != NULL)
 		elog(ERROR, "DictionaryBatch is not supported at '%s'", filename);
 	Assert(af_info->footer._num_dictionaries == 0);
@@ -4022,12 +4022,13 @@ pg_numeric_arrow_ref(kern_data_store *kds,
 	char	   *base = (char *)kds + cmeta->values_offset;
 	size_t		length = cmeta->values_length;
 	int			dscale = cmeta->attopts.decimal.scale;
+	uint8_t		kind = XPU_NUMERIC_KIND__VALID;
 	int128_t	ival;
 
 	if (sizeof(int128_t) * index >= length)
 		elog(ERROR, "corruption? numeric points out of range");
 	ival = ((int128_t *)base)[index];
-	__xpu_numeric_to_varlena(result, dscale, ival);
+	__decimal_to_varlena(result, kind, dscale, ival);
 
 	return PointerGetDatum(result);
 }
@@ -5437,8 +5438,8 @@ ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 					if (strcmp(schema.fields[j].name,
 							   stemp->fields[k].name) == 0)
 					{
-						if (arrowFieldTypeIsEqual(&schema.fields[j],
-												  &stemp->fields[k]))
+						if (equalArrowNode(&schema.fields[j].type.node,
+										   &stemp->fields[k].type.node))
 						{
 							found = true;
 							break;
@@ -5447,7 +5448,6 @@ ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 							 schema.fields[j].name, fname);
 					}
 				}
-
 				if (!found)
 					elog(ERROR, "field '%s' was not found in the file '%s'",
 						 schema.fields[j].name, fname);

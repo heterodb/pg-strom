@@ -28,7 +28,36 @@ typedef enum
 	ArrowMetadataVersion__V3 = 2,		/* not supported */
 	ArrowMetadataVersion__V4 = 3,
 	ArrowMetadataVersion__V5 = 4,
+	/* ------ Parquet File Version ------ */
+	ArrowMetadataVersion__Parquet_V1_0,
+	ArrowMetadataVersion__Parquet_V2_4,
+	ArrowMetadataVersion__Parquet_V2_6,
 } ArrowMetadataVersion;
+
+static inline const char *
+ArrowMetadataVersionAsCString(ArrowMetadataVersion code)
+{
+	switch (code)
+	{
+		case ArrowMetadataVersion__V1:	return "Arrow V1";
+		case ArrowMetadataVersion__V2:	return "Arrow V2";
+		case ArrowMetadataVersion__V3:	return "Arrow V3";
+		case ArrowMetadataVersion__V4:	return "Arrow V4";
+		case ArrowMetadataVersion__V5:	return "Arrow V5";
+		case ArrowMetadataVersion__Parquet_V1_0: return "Parquet v1.0";
+		case ArrowMetadataVersion__Parquet_V2_4: return "Parquet v2.4";
+		case ArrowMetadataVersion__Parquet_V2_6: return "Parquet v2.6";
+		default:						return "???";
+	}
+}
+
+static inline bool
+ArrowMetadataVersionIsParquet(ArrowMetadataVersion version)
+{
+	return (version == ArrowMetadataVersion__Parquet_V1_0 ||
+			version == ArrowMetadataVersion__Parquet_V2_4 ||
+			version == ArrowMetadataVersion__Parquet_V2_6);
+}
 
 /*
  * Feature : long
@@ -50,6 +79,18 @@ typedef enum
 	ArrowFeature__CompressedBody = 2,
 } ArrowFeature;
 
+static inline const char *
+ArrowFeatureAsCString(ArrowFeature code)
+{
+	switch (code)
+	{
+		case ArrowFeature__Unused:					return "Unused";
+		case ArrowFeature__DictionaryReplacement:	return "DictionaryReplacement";
+		case ArrowFeature__CompressedBody:			return "CompressedBody";
+		default:									return "???";
+	}
+}
+
 /*
  * MessageHeader : byte
  */
@@ -70,6 +111,17 @@ typedef enum
 	ArrowEndianness__Little		= 0,
 	ArrowEndianness__Big		= 1,
 } ArrowEndianness;
+
+static inline const char *
+ArrowEndiannessAsCString(ArrowEndianness code)
+{
+	switch (code)
+	{
+		case ArrowEndianness__Little:	return "Little";
+		case ArrowEndianness__Big:		return "Big";
+		default:						return "???";
+	}
+}
 
 /*
  * Type : byte
@@ -108,6 +160,17 @@ typedef enum
 	ArrowDateUnit__MilliSecond	= 1,
 } ArrowDateUnit;
 
+static inline const char *
+ArrowDateUnitAsCString(ArrowDateUnit unit)
+{
+	switch (unit)
+	{
+		case ArrowDateUnit__Day:			return "Day";
+		case ArrowDateUnit__MilliSecond:	return "MilliSecond";
+		default:							return "???";
+	}
+}
+
 /*
  * TimeUnit : short
  */
@@ -119,6 +182,19 @@ typedef enum
 	ArrowTimeUnit__NanoSecond	= 3,
 } ArrowTimeUnit;
 
+static inline const char *
+ArrowTimeUnitAsCString(ArrowTimeUnit unit)
+{
+	switch (unit)
+	{
+		case ArrowTimeUnit__Second:			return "sec";
+		case ArrowTimeUnit__MilliSecond:	return "ms";
+		case ArrowTimeUnit__MicroSecond:	return "us";
+		case ArrowTimeUnit__NanoSecond:		return "ns";
+		default:							return "???";
+	}
+}
+
 /*
  * IntervalUnit : short
  */
@@ -128,6 +204,18 @@ typedef enum
 	ArrowIntervalUnit__Day_Time		= 1,
 	ArrowIntervalUnit__Month_Day_Nano = 2,
 } ArrowIntervalUnit;
+
+static inline const char *
+ArrowIntervalUnitAsCString(ArrowIntervalUnit unit)
+{
+	switch (unit)
+	{
+		case ArrowIntervalUnit__Year_Month:		return "Year/Month";
+		case ArrowIntervalUnit__Day_Time:		return "Day/Time";
+		case ArrowIntervalUnit__Month_Day_Nano:	return "Month/Day/Nano";
+		default:								return "???";
+	}
+}
 
 /*
  * Precision : short
@@ -139,6 +227,18 @@ typedef enum
 	ArrowPrecision__Double		= 2,
 } ArrowPrecision;
 
+static inline const char *
+ArrowPrecisionAsCString(ArrowPrecision prec)
+{
+	switch (prec)
+	{
+		case ArrowPrecision__Half:		return "Half";
+		case ArrowPrecision__Single:	return "Single";
+		case ArrowPrecision__Double:	return "Double";
+		default:						return "???";
+	}
+}
+
 /*
  * UnionMode : short
  */
@@ -147,6 +247,17 @@ typedef enum
 	ArrowUnionMode__Sparse		= 0,
 	ArrowUnionMode__Dense		= 1,
 } ArrowUnionMode;
+
+static inline const char *
+ArrowUnionModeAsCString(ArrowUnionMode mode)
+{
+	switch (mode)
+	{
+		case ArrowUnionMode__Sparse:	return "Sparse";
+		case ArrowUnionMode__Dense:		return "Dense";
+		default:						return "???";
+	}
+}
 
 /*
  * ArrowNodeTag
@@ -246,7 +357,7 @@ struct ArrowNode
 	ArrowNodeTag	tag;
 	const char	   *tagName;
 	void		  (*dumpArrowNode)(struct SQLbuffer *buf,
-								   struct ArrowNode *node);
+								   const struct ArrowNode *node);
 	void		  (*copyArrowNode)(struct ArrowNode *dest,
 								   const struct ArrowNode *source);
 };
@@ -453,6 +564,11 @@ typedef struct		ArrowField
 	/* vector of user defined metadata */
 	ArrowKeyValue  *custom_metadata;
 	int				_num_custom_metadata;
+#ifdef HAS_PARQUET
+	/* valid only parquet format (used for dumpArrowNode in JSON) */
+	const char	   *parquet_extra_attrs;
+	int				_parquet_extra_attrs_len;
+#endif
 } ArrowField;
 
 /*
@@ -463,6 +579,20 @@ typedef struct		ArrowFieldNode
 	ArrowNode		node;
 	uint64_t		length;
 	uint64_t		null_count;
+	/*
+	 * NOTE: stat_min_value and stat_max_value are not fields defined in Apache Arrow.
+	 * They are intended to set the statistical values embedded in Parquet files or
+	 * when min_values and max_values are set for the field.
+	 */
+	const char	   *stat_min_value;
+	int				_stat_min_value_len;
+	const char	   *stat_max_value;
+	int				_stat_max_value_len;
+#ifdef HAS_PARQUET
+	/* valid only parquet format (used for dumpArrowNode in JSON) */
+	const char	   *parquet_extra_attrs;
+	int				_parquet_extra_attrs_len;
+#endif
 } ArrowFieldNode;
 
 /*
@@ -474,6 +604,17 @@ typedef enum		ArrowCompressionType
 	ArrowCompressionType__ZSTD = 1,
 } ArrowCompressionType;
 
+static inline const char *
+ArrowCompressionTypeAsCString(ArrowCompressionType codec)
+{
+	switch (codec)
+	{
+		case ArrowCompressionType__LZ4_FRAME:	return "LZ4_FRAME";
+		case ArrowCompressionType__ZSTD:		return "ZSTD";
+		default:								return "???";
+	}
+}
+
 /*
  * BodyCompressionMethod : byte
  */
@@ -481,6 +622,16 @@ typedef enum		ArrowBodyCompressionMethod
 {
 	ArrowBodyCompressionMethod__BUFFER = 0,
 } ArrowBodyCompressionMethod;
+
+static inline const char *
+ArrowBodyCompressionMethodAsCString(ArrowBodyCompressionMethod method)
+{
+	switch (method)
+	{
+		case ArrowBodyCompressionMethod__BUFFER:	return "BUFFER";
+		default:									return "???";
+	}
+}
 
 /*
  * BodyCompression
@@ -583,6 +734,8 @@ typedef struct		ArrowFooter
 	int				_num_dictionaries;
 	ArrowBlock	   *recordBatches;
 	int				_num_recordBatches;
+	ArrowKeyValue  *custom_metadata;
+	int				_num_custom_metadata;
 } ArrowFooter;
 
 /*
@@ -594,8 +747,25 @@ typedef struct
 	struct stat		stat_buf;
 	ArrowFooter		footer;
 	ArrowMessage   *dictionaries;	/* array of ArrowDictionaryBatch */
+	int				_num_dictionaries;
 	ArrowMessage   *recordBatches;	/* array of ArrowRecordBatch */
+	int				_num_recordBatches;
 } ArrowFileInfo;
 
+/*
+ * arrow_meta.cc (C++ interface)
+ */
+#ifdef __cplusplus
+#define __EXTERN	extern "C"
+#else
+#define __EXTERN	extern
+#endif
+
+__EXTERN char  *dumpArrowNode(const ArrowNode *node);
+__EXTERN void	copyArrowNode(ArrowNode *dest, const ArrowNode *src);
+__EXTERN bool	equalArrowNode(const ArrowNode *a, const ArrowNode *b);
+__EXTERN int	readArrowFileInfo(const char *filename, ArrowFileInfo *af_info);
+
+#undef __EXTERN
 #endif		/* !__CUDACC__ */
 #endif		/* _ARROW_DEFS_H_ */

@@ -13,7 +13,7 @@
 #include <math.h>
 
 INLINE_FUNCTION(int)
-xpu_numeric_sign(xpu_numeric_t *num)
+xpu_numeric_sign(const xpu_numeric_t *num)
 {
 	assert(num->kind != XPU_NUMERIC_KIND__VARLENA);
 	if (num->kind != XPU_NUMERIC_KIND__VALID)
@@ -75,8 +75,8 @@ xpu_numeric_datum_arrow_read(kern_context *kcxt,
 		result->kind = XPU_NUMERIC_KIND__VALID;
 		result->weight = cmeta->attopts.decimal.scale;
 		result->u.value = *addr;
-		__xpu_numeric_normalize(&result->weight,
-								&result->u.value);
+		NUMERIC_NORMALIZE(&result->weight,
+						  &result->u.value);
 	}
 	return true;
 }
@@ -170,25 +170,7 @@ xpu_numeric_datum_write(kern_context *kcxt,
 			memcpy(buffer, arg->u.vl_addr, sz);
 		return sz;
 	}
-	else if (arg->kind != XPU_NUMERIC_KIND__VALID)
-	{
-		int		sz = offsetof(NumericData, choice.n_header) + sizeof(uint16_t);
-
-		if (buffer)
-		{
-			NumericChoice *nc = (NumericChoice *)buffer;
-
-			if (arg->kind == XPU_NUMERIC_KIND__POS_INF)
-				nc->n_header = NUMERIC_PINF;
-			else if (arg->kind == XPU_NUMERIC_KIND__NEG_INF)
-				nc->n_header = NUMERIC_NINF;
-			else
-				nc->n_header = NUMERIC_NAN;
-			SET_VARSIZE(nc, sz);
-		}
-		return sz;
-	}
-	return __xpu_numeric_to_varlena(buffer, arg->weight, arg->u.value);
+	return __decimal_to_varlena(buffer, arg->kind, arg->weight, arg->u.value);
 }
 
 PUBLIC_FUNCTION(bool)
@@ -235,7 +217,7 @@ PGSTROM_SQLTYPE_OPERATORS(numeric, false, 4, -1);
 INLINE_FUNCTION(void)
 set_normalized_numeric(xpu_numeric_t *result, int128_t value, int16_t weight)
 {
-	__xpu_numeric_normalize(&weight, &value);
+	NUMERIC_NORMALIZE(&weight, &value);
 	result->expr_ops = &xpu_numeric_ops;
 	result->kind     = XPU_NUMERIC_KIND__VALID;
 	result->weight   = weight;
@@ -245,10 +227,10 @@ set_normalized_numeric(xpu_numeric_t *result, int128_t value, int16_t weight)
 PUBLIC_FUNCTION(const char *)
 xpu_numeric_from_varlena(xpu_numeric_t *result, const varlena *addr)
 {
-	const char *emsg = __xpu_numeric_from_varlena(&result->kind,
-												  &result->weight,
-												  &result->u.value,
-												  addr);
+	const char *emsg = __decimal_from_varlena(&result->kind,
+											  &result->weight,
+											  &result->u.value,
+											  addr);
 	if (!emsg)
 		result->expr_ops = &xpu_numeric_ops;
 	return emsg;
@@ -435,8 +417,8 @@ PG_NUMERIC_TO_FLOAT_TEMPLATE(float8, __to_fp64)
 			result->kind = XPU_NUMERIC_KIND__VALID;					\
 			result->weight = 0;										\
 			result->u.value = ival.value;							\
-			__xpu_numeric_normalize(&result->weight,				\
-									&result->u.value);				\
+			NUMERIC_NORMALIZE(&result->weight,						\
+							  &result->u.value);					\
 		}															\
 		return true;												\
 	}
@@ -463,78 +445,10 @@ pgfn_money_to_numeric(XPU_PGFUNCTION_ARGS)
 		result->kind = XPU_NUMERIC_KIND__VALID;
 		result->weight = fpoint;
 		result->u.value = ival.value;
-		__xpu_numeric_normalize(&result->weight,
-								&result->u.value);
+		NUMERIC_NORMALIZE(&result->weight,
+						  &result->u.value);
 	}
 	return true;
-}
-
-STATIC_FUNCTION(void)
-__xpu_fp64_to_numeric(xpu_numeric_t *result, float8_t __fval)
-{
-	uint64_t	fval = __double_as_longlong__(__fval);
-	uint64_t	frac = (fval & ((1UL<<FP64_FRAC_BITS)-1));
-	int32_t		expo = (fval >> (FP64_FRAC_BITS)) & ((1UL<<FP64_EXPO_BITS)-1);
-	bool		sign = (fval >> (FP64_FRAC_BITS + FP64_EXPO_BITS)) != 0;
-	int			weight = 0;
-
-	/* special cases */
-	if (expo == 0x7ff)
-	{
-		if (fval != 0)
-			result->kind = XPU_NUMERIC_KIND__NAN;
-		else if (sign)
-			result->kind = XPU_NUMERIC_KIND__NEG_INF;
-		else
-			result->kind = XPU_NUMERIC_KIND__POS_INF;
-		result->expr_ops = &xpu_numeric_ops;
-		return;
-	}
-	frac |= (1UL << FP64_FRAC_BITS);
-
-	/*
-	 * fraction must be adjusted by 10^prec / 2^(FP64_FRAC_BITS - expo)
-	 * with keeping accuracy (52bit).
-	 */
-	while (expo > FP64_EXPO_BIAS + FP64_FRAC_BITS)
-	{
-		if (frac <= 0x1800000000000000UL)
-		{
-			frac *= 2;
-			expo--;
-		}
-		else
-		{
-			frac /= 10;
-			weight--;
-		}
-	}
-	while (expo < FP64_EXPO_BIAS + FP64_FRAC_BITS)
-	{
-		if (frac >= 0x1800000000000000UL)
-		{
-			frac /= 2;
-			expo++;
-		}
-		else
-		{
-			frac *= 10;
-			weight++;
-		}
-	}
-	/* only 15 digits are valid */
-	while (frac >= 1000000000000000UL)
-	{
-		frac /= 10;
-		weight--;
-	}
-	result->kind = XPU_NUMERIC_KIND__VALID;
-	result->weight = weight;
-	if (!sign)
-		result->u.value = (int128_t)frac;
-	else
-		result->u.value = -(int128_t)frac;
-	result->expr_ops = &xpu_numeric_ops;
 }
 
 #define PG_FLOAT_TO_NUMERIC_TEMPLATE(SOURCE,__TYPE,__CAST)			\
@@ -552,7 +466,13 @@ __xpu_fp64_to_numeric(xpu_numeric_t *result, float8_t __fval)
 		if (XPU_DATUM_ISNULL(&datum))								\
 			result->expr_ops = NULL;								\
 		else														\
-			__xpu_fp64_to_numeric(result, __CAST(datum.value));		\
+		{															\
+			__decimal_from_float8(__CAST(datum.value),				\
+								  &result->kind,					\
+								  &result->weight,					\
+								  &result->u.value);				\
+			result->expr_ops = &xpu_numeric_ops;					\
+		}															\
 		return true;												\
 	}
 PG_FLOAT_TO_NUMERIC_TEMPLATE(float2, float,__to_fp32)
@@ -661,54 +581,19 @@ pgfn_numeric_add(XPU_PGFUNCTION_ARGS)
 		result->expr_ops = NULL;
 	else if (!xpu_numeric_validate(kcxt, &datum_a) ||
 			 !xpu_numeric_validate(kcxt, &datum_b))
-	{
 		return false;
-	}
 	else
 	{
+		const char *emsg
+			= __decimal_add(&result->kind, &result->weight, &result->u.value,
+							datum_a.kind, datum_a.weight, datum_a.u.value,
+							datum_b.kind, datum_b.weight, datum_b.u.value);
+		if (emsg)
+		{
+			STROM_ELOG(kcxt, emsg);
+			return false;
+		}
 		result->expr_ops = &xpu_numeric_ops;
-
-		if (datum_a.kind != XPU_NUMERIC_KIND__VALID ||
-			datum_b.kind != XPU_NUMERIC_KIND__VALID)
-		{
-			if (datum_a.kind == XPU_NUMERIC_KIND__NAN ||
-				datum_b.kind == XPU_NUMERIC_KIND__NAN)
-				result->kind = XPU_NUMERIC_KIND__NAN;
-			else if (datum_a.kind == XPU_NUMERIC_KIND__POS_INF)
-			{
-				if (datum_b.kind == XPU_NUMERIC_KIND__NEG_INF)
-					result->kind = XPU_NUMERIC_KIND__NAN;	/* Inf - Inf */
-				else
-					result->kind = XPU_NUMERIC_KIND__POS_INF;
-			}
-			else if (datum_a.kind == XPU_NUMERIC_KIND__NEG_INF)
-			{
-				if (datum_b.kind == XPU_NUMERIC_KIND__POS_INF)
-					result->kind = XPU_NUMERIC_KIND__NAN;	/* -Inf + Inf */
-				else
-					result->kind = XPU_NUMERIC_KIND__NEG_INF;
-			}
-			else if (datum_b.kind == XPU_NUMERIC_KIND__POS_INF)
-				result->kind = XPU_NUMERIC_KIND__POS_INF;
-			else
-				result->kind = XPU_NUMERIC_KIND__NEG_INF;
-		}
-		else
-		{
-			while (datum_a.weight > datum_b.weight)
-			{
-				datum_b.u.value *= 10;
-				datum_b.weight++;
-			}
-			while (datum_a.weight < datum_b.weight)
-			{
-				datum_a.u.value *= 10;
-				datum_a.weight++;
-			}
-			set_normalized_numeric(result,
-								   datum_a.u.value + datum_b.u.value,
-								   datum_a.weight);
-		}
 	}
 	return true;
 }
@@ -722,54 +607,19 @@ pgfn_numeric_sub(XPU_PGFUNCTION_ARGS)
 		result->expr_ops = NULL;
 	else if (!xpu_numeric_validate(kcxt, &datum_a) ||
 			 !xpu_numeric_validate(kcxt, &datum_b))
-	{
 		return false;
-	}
 	else
 	{
+		const char *emsg
+			= __decimal_sub(&result->kind, &result->weight, &result->u.value,
+							datum_a.kind, datum_a.weight, datum_a.u.value,
+							datum_b.kind, datum_b.weight, datum_b.u.value);
+		if (emsg)
+		{
+			STROM_ELOG(kcxt, emsg);
+			return false;
+		}
 		result->expr_ops = &xpu_numeric_ops;
-
-		if (datum_a.kind != XPU_NUMERIC_KIND__VALID ||
-			datum_b.kind != XPU_NUMERIC_KIND__VALID)
-		{
-			if (datum_a.kind == XPU_NUMERIC_KIND__NAN ||
-				datum_b.kind == XPU_NUMERIC_KIND__NAN)
-				result->kind = XPU_NUMERIC_KIND__NAN;
-			else if (datum_a.kind == XPU_NUMERIC_KIND__POS_INF)
-			{
-				if (datum_b.kind == XPU_NUMERIC_KIND__POS_INF)
-					result->kind = XPU_NUMERIC_KIND__NAN;	/* Inf - Inf */
-				else
-					result->kind = XPU_NUMERIC_KIND__POS_INF;
-			}
-			else if (datum_a.kind == XPU_NUMERIC_KIND__NEG_INF)
-			{
-				if (datum_b.kind == XPU_NUMERIC_KIND__NEG_INF)
-					result->kind = XPU_NUMERIC_KIND__NAN;	/* -Inf - -Inf*/
-				else
-					result->kind = XPU_NUMERIC_KIND__NEG_INF;
-			}
-			else if (datum_b.kind == XPU_NUMERIC_KIND__POS_INF)
-				result->kind = XPU_NUMERIC_KIND__NEG_INF;
-			else
-				result->kind = XPU_NUMERIC_KIND__POS_INF;
-		}
-		else
-		{
-			while (datum_a.weight > datum_b.weight)
-			{
-				datum_b.u.value *= 10;
-				datum_b.weight++;
-			}
-			while (datum_a.weight < datum_b.weight)
-			{
-				datum_a.u.value *= 10;
-				datum_a.weight++;
-			}
-			set_normalized_numeric(result,
-								   datum_a.u.value - datum_b.u.value,
-								   datum_a.weight);
-		}
 	}
 	return true;
 }
@@ -783,72 +633,19 @@ pgfn_numeric_mul(XPU_PGFUNCTION_ARGS)
 		result->expr_ops = NULL;
 	else if (!xpu_numeric_validate(kcxt, &datum_a) ||
 			 !xpu_numeric_validate(kcxt, &datum_b))
-	{
 		return false;
-	}
 	else
 	{
+		const char *emsg
+			= __decimal_mul(&result->kind, &result->weight, &result->u.value,
+							datum_a.kind, datum_a.weight, datum_a.u.value,
+							datum_b.kind, datum_b.weight, datum_b.u.value);
+		if (emsg)
+		{
+			STROM_ELOG(kcxt, emsg);
+			return false;
+		}
 		result->expr_ops = &xpu_numeric_ops;
-
-		if (datum_a.kind != XPU_NUMERIC_KIND__VALID ||
-			datum_b.kind != XPU_NUMERIC_KIND__VALID)
-		{
-			if (datum_a.kind == XPU_NUMERIC_KIND__NAN ||
-				datum_a.kind == XPU_NUMERIC_KIND__NAN)
-			{
-				result->kind = XPU_NUMERIC_KIND__NAN;
-			}
-			else if (datum_a.kind == XPU_NUMERIC_KIND__POS_INF)
-			{
-				int		__sign = xpu_numeric_sign(&datum_b);
-
-				if (__sign < 0)
-					result->kind = XPU_NUMERIC_KIND__NEG_INF;
-				else if (__sign > 0)
-					result->kind = XPU_NUMERIC_KIND__POS_INF;
-				else
-					result->kind = XPU_NUMERIC_KIND__NAN;
-			}
-			else if (datum_a.kind == XPU_NUMERIC_KIND__NEG_INF)
-			{
-				int		__sign = xpu_numeric_sign(&datum_b);
-
-				if (__sign < 0)
-					result->kind = XPU_NUMERIC_KIND__POS_INF;
-				else if (__sign > 0)
-					result->kind = XPU_NUMERIC_KIND__NEG_INF;
-				else
-					result->kind = XPU_NUMERIC_KIND__NAN;
-			}
-			else if (datum_b.kind == XPU_NUMERIC_KIND__POS_INF)
-			{
-				int		__sign = xpu_numeric_sign(&datum_a);
-
-				if (__sign < 0)
-					result->kind = XPU_NUMERIC_KIND__NEG_INF;
-				else if (__sign > 0)
-					result->kind = XPU_NUMERIC_KIND__POS_INF;
-				else
-					result->kind = XPU_NUMERIC_KIND__NAN;
-			}
-			else
-			{
-				int		__sign = xpu_numeric_sign(&datum_a);
-
-				if (__sign < 0)
-					result->kind = XPU_NUMERIC_KIND__POS_INF;
-				else if (__sign > 0)
-					result->kind = XPU_NUMERIC_KIND__NEG_INF;
-				else
-					result->kind = XPU_NUMERIC_KIND__NAN;
-			}
-		}
-		else
-		{
-			set_normalized_numeric(result,
-								   datum_a.u.value * datum_b.u.value,
-								   datum_a.weight + datum_b.weight);
-		}
 	}
 	return true;
 }
@@ -862,102 +659,19 @@ pgfn_numeric_div(XPU_PGFUNCTION_ARGS)
 		result->expr_ops = NULL;
 	else if (!xpu_numeric_validate(kcxt, &datum_a) ||
 			 !xpu_numeric_validate(kcxt, &datum_b))
-	{
 		return false;
-	}
 	else
 	{
-		result->expr_ops = &xpu_numeric_ops;
-
-		if (datum_a.kind != XPU_NUMERIC_KIND__VALID ||
-			datum_b.kind != XPU_NUMERIC_KIND__VALID)
-		{
-			if (datum_a.kind == XPU_NUMERIC_KIND__NAN ||
-				datum_b.kind == XPU_NUMERIC_KIND__NAN)
-			{
-				result->kind = XPU_NUMERIC_KIND__NAN;
-			}
-			else if (datum_a.kind == XPU_NUMERIC_KIND__POS_INF)
-			{
-				int		__sign = xpu_numeric_sign(&datum_b);
-				if (__sign == 1)
-					result->kind = XPU_NUMERIC_KIND__NEG_INF;
-				else if (__sign == -1)
-					result->kind = XPU_NUMERIC_KIND__POS_INF;
-				else if (__sign != 0)
-					result->kind = XPU_NUMERIC_KIND__NAN;
-				else
-				{
-					STROM_ELOG(kcxt, "division by zero");
-					return false;
-				}
-			}
-			else if (datum_a.kind == XPU_NUMERIC_KIND__NEG_INF)
-			{
-				int		__sign = xpu_numeric_sign(&datum_b);
-
-				if (__sign == 1)
-					result->kind = XPU_NUMERIC_KIND__NEG_INF;
-				else if (__sign == -1)
-					result->kind = XPU_NUMERIC_KIND__POS_INF;
-				else if (__sign != 0)
-					result->kind = XPU_NUMERIC_KIND__NAN;
-				else
-				{
-					STROM_ELOG(kcxt, "division by zero");
-					return false;
-				}
-			}
-			else
-			{
-				/* by here, datum_a must be finite, so datum_b is not */
-				set_normalized_numeric(result, 0, 0);
-			}
-		}
-		else if (datum_b.u.value == 0)
-		{
-			STROM_ELOG(kcxt, "division by zero");
-			return false;
-		}
-		else
-		{
-			int128_t	rem = datum_a.u.value;
-			int128_t	div = datum_b.u.value;
-			int128_t	x, ival = 0;
-			int16_t		weight = datum_a.weight - datum_b.weight;
-			bool		negative = false;
-
-			if (rem < 0)
-			{
-				rem = -rem;
-				if (div < 0)
-					div = -div;
-				else
-					negative = true;
-			}
-			else if (div < 0)
-			{
-				negative = true;
-				div = -div;
-			}
-			assert(rem >= 0 && div >= 0);
-			for (;;)
-			{
-				x = rem / div;
-				ival = 10 * ival + x;
-				rem -= x * div;
-				/*
-				 * 999,999,999,999,999 = 0x03 8D7E A4C6 7FFF
-				 */
-				if (rem == 0 || (ival >> 50) != 0)
-					break;
-				rem *= 10;
-				weight++;
-			}
-			if (negative)
-				ival = -ival;
-			set_normalized_numeric(result, ival, weight);
-		}
+      const char *emsg
+            = __decimal_div(&result->kind, &result->weight, &result->u.value,
+							datum_a.kind, datum_a.weight, datum_a.u.value,
+							datum_b.kind, datum_b.weight, datum_b.u.value);
+        if (emsg)
+        {
+            STROM_ELOG(kcxt, emsg);
+            return false;
+        }
+        result->expr_ops = &xpu_numeric_ops;
 	}
 	return true;
 }
@@ -971,63 +685,19 @@ pgfn_numeric_mod(XPU_PGFUNCTION_ARGS)
 		result->expr_ops = NULL;
 	else if (!xpu_numeric_validate(kcxt, &datum_a) ||
 			 !xpu_numeric_validate(kcxt, &datum_b))
-	{
 		return false;
-	}
 	else
 	{
-		result->expr_ops = &xpu_numeric_ops;
-
-		if (datum_a.kind != XPU_NUMERIC_KIND__VALID ||
-			datum_b.kind != XPU_NUMERIC_KIND__VALID)
+		const char *emsg
+			= __decimal_div(&result->kind, &result->weight, &result->u.value,
+							datum_a.kind, datum_a.weight, datum_a.u.value,
+							datum_b.kind, datum_b.weight, datum_b.u.value);
+		if (emsg)
 		{
-			if (datum_a.kind == XPU_NUMERIC_KIND__NAN ||
-				datum_b.kind == XPU_NUMERIC_KIND__NAN)
-			{
-				result->kind = XPU_NUMERIC_KIND__NAN;
-			}
-			else if (datum_a.kind == XPU_NUMERIC_KIND__POS_INF ||
-					 datum_a.kind == XPU_NUMERIC_KIND__NEG_INF)
-			{
-				if (datum_b.kind == XPU_NUMERIC_KIND__VALID &&
-					datum_b.u.value == 0)
-				{
-					STROM_ELOG(kcxt, "division by zero");
-					return false;
-				}
-				else
-				{
-					result->kind = XPU_NUMERIC_KIND__NAN;
-				}
-			}
-			else
-			{
-				/* num2 must be [-]Inf; result is num1 regardless of sign of num2 */
-				result->kind = datum_b.kind;
-				result->u.value = datum_b.u.value;
-			}
-		}
-		else if (datum_b.u.value == 0)
-		{
-			STROM_ELOG(kcxt, "division by zero");
+			STROM_ELOG(kcxt, emsg);
 			return false;
 		}
-		else
-		{
-			while (datum_a.weight > datum_b.weight)
-			{
-				datum_b.u.value *= 10;
-				datum_b.weight++;
-			}
-			while (datum_a.weight < datum_b.weight)
-			{
-				datum_a.u.value *= 10;
-				datum_a.weight++;
-			}
-			set_normalized_numeric(result,
-								   datum_a.u.value % datum_b.u.value,
-								   datum_a.weight);
-		}
+		result->expr_ops = &xpu_numeric_ops;
 	}
 	return true;
 }
@@ -1400,4 +1070,57 @@ pgfn_devcast_text_to_numeric(XPU_PGFUNCTION_ARGS)
 		return false;
 	}
 	return true;
+}
+
+PUBLIC_FUNCTION(int128_t)
+__normalize_numeric_int128(int16_t weight_d,	/* weight of the destination */
+						   int16_t weight_s,	/* weight of the source */
+						   int128_t ival)
+{
+	static uint64_t		__pow10[] = {
+		1UL,					/* 10^0 */
+		10UL,					/* 10^1 */
+		100UL,					/* 10^2 */
+		1000UL,					/* 10^3 */
+		10000UL,				/* 10^4 */
+		100000UL,				/* 10^5 */
+		1000000UL,				/* 10^6 */
+		10000000UL,				/* 10^7 */
+		100000000UL,			/* 10^8 */
+		1000000000UL,			/* 10^9 */
+		10000000000UL,			/* 10^10 */
+		100000000000UL,			/* 10^11 */
+		1000000000000UL,		/* 10^12 */
+		10000000000000UL,		/* 10^13 */
+		100000000000000UL,		/* 10^14 */
+		1000000000000000UL,		/* 10^15 */
+		10000000000000000UL,	/* 10^16 */
+		100000000000000000UL,	/* 10^17 */
+		1000000000000000000UL,	/* 10^18 */
+	};
+	if (weight_d > weight_s)
+	{
+		int		shift = (weight_d - weight_s);
+
+		while (shift > 0)
+		{
+			int		k = Min(shift, 18);
+
+			ival *= (int128_t)__pow10[k];
+			shift -= k;
+		}
+	}
+	else if (weight_d < weight_s)
+	{
+		int		shift = (weight_s - weight_d);
+
+		while (shift > 0)
+		{
+			int		k = Min(shift, 18);
+
+			ival /= (int128_t)__pow10[k];
+			shift -= k;
+		}
+	}
+	return ival;
 }

@@ -35,7 +35,7 @@ static char			   *dpuserv_base_directory = NULL;
 static long				dpuserv_num_workers = -1;
 static char			   *dpuserv_identifier = NULL;
 static const char	   *dpuserv_logfile = NULL;
-static bool				verbose = false;
+static int				verbose = 0;
 static bool				use_direct_io = false;
 static pthread_mutex_t	dpu_client_mutex;
 static dlist_head		dpu_client_list;
@@ -58,6 +58,7 @@ struct dpuTaskExecState
 	bool		   (*handleDpuTaskFinalDepth)(dpuClient *dclient,
 											  struct dpuTaskExecState *dtes,
 											  kern_context *kcxt);
+	int32_t			scan_repeat_id;
 	uint32_t		kds_dst_nrooms;
 	uint32_t		kds_dst_nitems;
 	uint32_t		nitems_raw;		/* nitems in the raw data chunk */
@@ -135,6 +136,7 @@ dpuClientWriteBack(dpuClient *dclient,
 	resp->tag   = XpuCommandTag__Success;
 	resp->u.results.chunks_offset = resp_sz;
 	resp->u.results.chunks_nitems = dtes->kds_dst_nitems;
+	resp->u.results.scan_repeat_id = dtes->scan_repeat_id;
 	resp->u.results.nitems_raw = dtes->nitems_raw;
 	resp->u.results.nitems_in  = dtes->nitems_in;
 	resp->u.results.nitems_out = dtes->nitems_out;
@@ -815,9 +817,9 @@ __handleDpuTaskExecProjection(dpuClient *dclient,
 
 	assert(kexp_projection != NULL &&
 		   kexp_projection->opcode  == FuncOpCode__Projection);
-	tupsz = kern_estimate_heaptuple(kcxt,
-									kexp_projection,
-									dtes->kds_dst_head);
+	tupsz = kern_estimate_minimal_tuple(kcxt,
+										kexp_projection,
+										dtes->kds_dst_head);
 	if (tupsz > 0)
 	{
 		kern_data_store *kds_dst = dtes->kds_dst;
@@ -876,11 +878,11 @@ __handleDpuTaskExecProjection(dpuClient *dclient,
 		KDS_GET_ROWINDEX(kds_dst)[rowid] = kds_dst->usage;
 		tupitem = (kern_tupitem *)
 			((char *)kds_dst + kds_dst->length - offset);
-		tupitem->rowid = rowid;
-		tupitem->t_len = kern_form_heaptuple(kcxt,
-											 kexp_projection,
-											 kds_dst,
-											 &tupitem->htup);
+		kern_form_minimal_tuple(kcxt,
+								kexp_projection,
+								kds_dst,
+								tupitem,
+								rowid);
 		dtes->nitems_out++;
 		return true;
 	}
@@ -896,7 +898,7 @@ __handleDpuTaskExecProjection(dpuClient *dclient,
 static int32_t
 __writeOutOneTuplePreAgg(kern_context *kcxt,
 						 kern_data_store *kds_final,
-						 HeapTupleHeaderData *htup,
+						 kern_tupitem *titem,
 						 kern_expression *kexp_actions)
 {
 	int			nattrs = Min(kds_final->ncols, kexp_actions->u.pagg.nattrs);
@@ -904,18 +906,13 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 	uint16_t	t_infomask = HEAP_HASNULL;
 	char	   *buffer = NULL;
 
-	t_hoff = MAXALIGN(offsetof(HeapTupleHeaderData,
+	t_hoff = MAXALIGN(offsetof(kern_tupitem,
 							   t_bits) + BITMAPLEN(nattrs));
-	if (htup)
+	if (titem)
 	{
-		memset(htup, 0, t_hoff);
-		htup->t_choice.t_datum.datum_typmod = kds_final->tdtypmod;
-		htup->t_choice.t_datum.datum_typeid = kds_final->tdtypeid;
-		htup->t_ctid.ip_blkid.bi_hi = 0xffff;	/* InvalidBlockNumber */
-		htup->t_ctid.ip_blkid.bi_lo = 0xffff;
-		htup->t_ctid.ip_posid = 0;				/* InvalidOffsetNumber */
-		htup->t_infomask2 = (nattrs & HEAP_NATTS_MASK);
-		htup->t_hoff = t_hoff;
+		memset(titem, 0, t_hoff);
+		titem->t_infomask2 = (nattrs & HEAP_NATTS_MASK);
+		titem->t_hoff = t_hoff + MINIMAL_TUPLE_OFFSET;
 	}
 	/* walk on the columns */
 	for (int j=0; j < nattrs; j++)
@@ -929,11 +926,11 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 			   (char *)cmeta < (char *)kds_final + kds_final->length);
 		assert(cmeta->attalign > 0 && cmeta->attalign <= 8);
 		t_next = TYPEALIGN(cmeta->attalign, t_hoff);
-		if (htup)
+		if (titem)
 		{
 			if (t_next > t_hoff)
-				memset((char *)htup + t_hoff, 0, t_next - t_hoff);
-			buffer = (char *)htup + t_next;
+				memset((char *)titem + t_hoff, 0, t_next - t_hoff);
+			buffer = (char *)titem + t_next;
 		}
 
 		switch (desc->action)
@@ -1028,6 +1025,19 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 				t_infomask |= HEAP_HASVARWIDTH;
 				break;
 
+			case KAGG_ACTION__PSUM_INT64:
+			case KAGG_ACTION__PAVG_INT64:
+				nbytes = sizeof(kagg_state__psum_numeric_packed);
+				if (buffer)
+				{
+					kagg_state__psum_numeric_packed *r =
+						(kagg_state__psum_numeric_packed *)buffer;
+					memset(r, 0, sizeof(kagg_state__psum_numeric_packed));
+					SET_VARSIZE(r, sizeof(kagg_state__psum_numeric_packed));
+				}
+				t_infomask |= HEAP_HASVARWIDTH;
+				break;
+
 			case KAGG_ACTION__PSUM_FP:
 			case KAGG_ACTION__PAVG_FP:
 				nbytes = sizeof(kagg_state__psum_fp_packed);
@@ -1035,6 +1045,20 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 				{
 					memset(buffer, 0, sizeof(kagg_state__psum_fp_packed));
 					SET_VARSIZE(buffer, sizeof(kagg_state__psum_fp_packed));
+				}
+				t_infomask |= HEAP_HASVARWIDTH;
+				break;
+
+			case KAGG_ACTION__PSUM_NUMERIC:
+			case KAGG_ACTION__PAVG_NUMERIC:
+				nbytes = sizeof(kagg_state__psum_numeric_packed);
+				if (buffer)
+				{
+					kagg_state__psum_numeric_packed *r =
+						(kagg_state__psum_numeric_packed *)buffer;
+					memset(r, 0, sizeof(kagg_state__psum_numeric_packed));
+					r->attrs = __numeric_typmod_weight(desc->typmod);
+					SET_VARSIZE(r, sizeof(kagg_state__psum_numeric_packed));
 				}
 				t_infomask |= HEAP_HASVARWIDTH;
 				break;
@@ -1064,12 +1088,17 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 						(int)desc->action);
 				return -1;
 		}
-		if (htup && nbytes > 0)
-			htup->t_bits[j>>3] |= (1<<(j&7));
+		if (titem && nbytes > 0)
+			titem->t_bits[j>>3] |= (1<<(j&7));
 		t_hoff = t_next + nbytes;
 	}
-	if (htup)
-		htup->t_infomask = t_infomask;
+	t_hoff += ROWID_SIZE;
+
+	if (titem)
+	{
+		titem->t_len = t_hoff;
+		titem->t_infomask = t_infomask;
+	}
 	return t_hoff;
 }
 
@@ -1083,47 +1112,33 @@ __insertOneTupleNoGroups(kern_context *kcxt,
 {
 	kern_tupitem   *tupitem;
 	int32_t			tupsz;
-	int32_t			required;
-	uint64_t		__usage;
-	uint32_t		__nitems_old;
-	uint32_t		__nitems_cur;
-	uint32_t		__nitems_new;
+	uint32_t		rowid;
+	uint64_t		offset;
 
 	assert(kds_final->format == KDS_FORMAT_ROW &&
-		   kds_final->nitems == 0 &&
 		   kds_final->hash_nslots == 0);
 	/* estimate length */
 	tupsz = __writeOutOneTuplePreAgg(kcxt, kds_final, NULL,
 									 kexp_groupby_actions);
 	assert(tupsz > 0);
-	required = MAXALIGN(offsetof(kern_tupitem, htup) + tupsz);
 	/* expand kds_final */
-	__usage = __atomic_add_uint64(&kds_final->usage, required);
-	__nitems_cur = __volatileRead(&kds_final->nitems);
-	do {
-		__nitems_old = __nitems_cur;
-		__nitems_new = __nitems_cur + 1;
-		if (!__KDS_CHECK_OVERFLOW(kds_final,
-								  __nitems_new,
-								  __usage + required))
-			return NULL;    /* out of memory */
-	} while ((__nitems_cur = __atomic_cas_uint32(&kds_final->nitems,
-												 __nitems_old,
-												 __nitems_new)) != __nitems_old);
-    /* ok, both nitems and usage are valid to write */
+	offset = __atomic_add_uint64(&kds_final->usage, tupsz);
+	if (!__KDS_CHECK_OVERFLOW(kds_final, 1, offset + tupsz))
+		return NULL;	/* out of memory */
+	offset += tupsz;
+	rowid = __atomic_add_uint32(&kds_final->nitems, 1);
+	assert(rowid == 0);
+	/* ok, both nitems and usage are valid to write */
 	tupitem = (kern_tupitem *)((char *)kds_final
 							   + kds_final->length
-							   - __usage
-							   - required);
-	__writeOutOneTuplePreAgg(kcxt, kds_final,
-							 &tupitem->htup,
+							   - offset);
+	__writeOutOneTuplePreAgg(kcxt, kds_final, tupitem,
 							 kexp_groupby_actions);
-	tupitem->t_len = tupsz;
-	tupitem->rowid = __nitems_new - 1;
-	KDS_GET_ROWINDEX(kds_final)[tupitem->rowid]
-		= (uint64_t)((char *)kds_final
-					 + kds_final->length
-					 - (char *)tupitem);
+	KERN_TUPITEM_SET_ROWID(tupitem, rowid);
+	assert(tupitem->t_len == tupsz);
+	__atomic_thread_fense();
+	__atomic_write_uint64(KDS_GET_ROWINDEX(kds_final), offset);
+
 	return tupitem;
 }
 
@@ -1137,11 +1152,9 @@ __insertOneTupleGroupBy(kern_context *kcxt,
 {
 	kern_hashitem  *hitem;
 	int32_t			tupsz;
-	int32_t			required;
-	uint64_t		__usage;
+	uint64_t		__offset;
 	uint32_t		__nitems_old;
 	uint32_t		__nitems_cur;
-	uint32_t		__nitems_new;
 
 	assert(kds_final->format == KDS_FORMAT_HASH &&
 		   kds_final->hash_nslots > 0);
@@ -1149,35 +1162,33 @@ __insertOneTupleGroupBy(kern_context *kcxt,
 	tupsz = __writeOutOneTuplePreAgg(kcxt, kds_final, NULL,
 									 kexp_groupby_actions);
 	assert(tupsz > 0);
-	required = MAXALIGN(offsetof(kern_hashitem, t.htup) + tupsz);
-
 	/* expand kds_final */
-	__usage = __atomic_add_uint64(&kds_final->usage, required);
+	__offset = __atomic_add_uint64(&kds_final->usage,
+								   offsetof(kern_hashitem, t) + tupsz);
+	__offset += offsetof(kern_hashitem, t) + tupsz;
 	__nitems_cur = __volatileRead(&kds_final->nitems);
 	do {
-		__nitems_old = __nitems_cur;
-		__nitems_new = __nitems_cur + 1;
 		if (!__KDS_CHECK_OVERFLOW(kds_final,
-								  __nitems_new,
-								  __usage + required))
+								  __nitems_cur + 1,
+								  __offset))
 			return NULL;	/* out of memory */
+		__nitems_old = __nitems_cur;
 	} while ((__nitems_cur = __atomic_cas_uint32(&kds_final->nitems,
 												 __nitems_old,
-												 __nitems_new)) != __nitems_old);
+												 __nitems_old + 1)) != __nitems_old);
 	/* ok, both nitems and usage are valid to write */
 	hitem = (kern_hashitem *)((char *)kds_final
 							  + kds_final->length
-							  - __usage
-							  - required);
+							  - __offset);
 	__writeOutOneTuplePreAgg(kcxt, kds_final,
-							 &hitem->t.htup,
+							 &hitem->t,
 							 kexp_groupby_actions);
-	hitem->t.t_len = tupsz;
-	hitem->t.rowid = __nitems_new - 1;
-	KDS_GET_ROWINDEX(kds_final)[hitem->t.rowid]
-		= ((char *)kds_final
-		   + kds_final->length
-		   - (char *)&hitem->t);
+	assert(hitem->t.t_len == tupsz);
+	KERN_TUPITEM_SET_ROWID(&hitem->t, __nitems_old);
+	__atomic_write_uint64(KDS_GET_ROWINDEX(kds_final) + __nitems_old,
+						  ((char *)kds_final
+						   + kds_final->length
+						   - (char *)&hitem->t));
 	return hitem;
 }
 
@@ -1357,6 +1368,27 @@ __update_preagg__psum_int(kern_context *kcxt,
 }
 
 /*
+ * __update_preagg__psum_int64
+ */
+static inline void
+__update_preagg__psum_int64(kern_context *kcxt,
+							char *buffer,
+							kern_colmeta *cmeta,
+							kern_aggregate_desc *desc)
+{
+	const xpu_datum_t  *xdatum = kcxt->kvars_slot[desc->arg0_slot_id];
+	int64_t		ival;
+
+	if (__preagg_fetch_xdatum_as_int64(&ival, xdatum))
+	{
+		kagg_state__psum_numeric_packed *r =
+			(kagg_state__psum_numeric_packed *)buffer;
+		__atomic_add_uint64(&r->nitems, 1);
+		__atomic_add_int128_packed(&r->sum, ival);
+	}
+}
+
+/*
  * __update_preagg__psum_fp
  */
 static inline void
@@ -1376,6 +1408,48 @@ __update_preagg__psum_fp(kern_context *kcxt,
 		__atomic_add_int64(&r->nitems, 1);
 		__atomic_add_fp64(&r->sum, fval);
 	}
+}
+
+/*
+ * __update_preagg__psum_numeric
+ */
+static inline void
+__update_preagg__psum_numeric(kern_context *kcxt,
+							  char *buffer,
+							  kern_colmeta *cmeta,
+							  kern_aggregate_desc *desc)
+{
+	xpu_numeric_t *xnum = (xpu_numeric_t *)kcxt->kvars_slot[desc->arg0_slot_id];
+
+	if (xnum->expr_ops == &xpu_numeric_ops &&
+		xpu_numeric_validate(kcxt, xnum))
+	{
+		kagg_state__psum_numeric_packed *r =
+			(kagg_state__psum_numeric_packed *)buffer;
+		if (xnum->kind == XPU_NUMERIC_KIND__VALID)
+		{
+			int16_t		weight = (int16_t)(r->attrs & __PAGG_NUMERIC_ATTRS__WEIGHT);
+			int128_t	ival = __normalize_numeric_int128(weight,
+														  xnum->weight,
+														  xnum->u.value);
+			__atomic_add_uint64(&r->nitems, 1);
+			__atomic_add_int128_packed(&r->sum, ival);
+		}
+		else
+		{
+			uint32_t	special;
+
+			if (xnum->kind == XPU_NUMERIC_KIND__POS_INF)
+				special = __PAGG_NUMERIC_ATTRS__PINF;
+			else if (xnum->kind == XPU_NUMERIC_KIND__NEG_INF)
+				special = __PAGG_NUMERIC_ATTRS__NINF;
+			else
+				special = XPU_NUMERIC_KIND__NAN;
+			__atomic_or_uint32(&r->attrs, special);
+		}
+	}
+	assert(cmeta->attlen == -1 &&
+		   VARSIZE_ANY(buffer) >= sizeof(kagg_state__psum_numeric_packed));
 }
 
 /*
@@ -1435,15 +1509,15 @@ __update_preagg__pcovar(kern_context *kcxt,
 static void
 __updateOneTupleDpuPreAgg(kern_context *kcxt,
 						  kern_data_store *kds_final,
-						  HeapTupleHeaderData *htup,
+						  kern_tupitem *tupitem,
 						  kern_expression *kexp_groupby_actions)
 {
-	int			nattrs = (htup->t_infomask2 & HEAP_NATTS_MASK);
-	bool		heap_hasnull = ((htup->t_infomask & HEAP_HASNULL) != 0);
+	int			nattrs = (tupitem->t_infomask2 & HEAP_NATTS_MASK);
+	bool		heap_hasnull = ((tupitem->t_infomask & HEAP_HASNULL) != 0);
 	uint32_t	t_hoff;
 	char	   *buffer = NULL;
 
-	t_hoff = offsetof(HeapTupleHeaderData, t_bits);
+	t_hoff = offsetof(kern_tupitem, t_bits);
 	if (heap_hasnull)
 		t_hoff += BITMAPLEN(nattrs);
 	t_hoff = MAXALIGN(t_hoff);
@@ -1453,7 +1527,7 @@ __updateOneTupleDpuPreAgg(kern_context *kcxt,
 		kern_aggregate_desc *desc = &kexp_groupby_actions->u.pagg.desc[j];
 		kern_colmeta   *cmeta = &kds_final->colmeta[j];
 
-		if (heap_hasnull && att_isnull(j, htup->t_bits))
+		if (heap_hasnull && att_isnull(j, tupitem->t_bits))
 		{
 			/* only grouping-key may have NULL */
 			assert(desc->action == KAGG_ACTION__VREF);
@@ -1462,9 +1536,9 @@ __updateOneTupleDpuPreAgg(kern_context *kcxt,
 
 		if (cmeta->attlen > 0)
 			t_hoff = TYPEALIGN(cmeta->attalign, t_hoff);
-		else if (!VARATT_NOT_PAD_BYTE((char *)htup + t_hoff))
+		else if (!VARATT_NOT_PAD_BYTE((char *)tupitem + t_hoff))
 			t_hoff = TYPEALIGN(cmeta->attalign, t_hoff);
-		buffer = ((char *)htup + t_hoff);
+		buffer = ((char *)tupitem + t_hoff);
 		if (cmeta->attlen > 0)
 			t_hoff += cmeta->attlen;
 		else
@@ -1500,9 +1574,17 @@ __updateOneTupleDpuPreAgg(kern_context *kcxt,
 			case KAGG_ACTION__PAVG_INT:
 				__update_preagg__psum_int(kcxt, buffer, cmeta, desc);
 				break;
+			case KAGG_ACTION__PSUM_INT64:
+			case KAGG_ACTION__PAVG_INT64:
+				__update_preagg__psum_int64(kcxt, buffer, cmeta, desc);
+				break;
 			case KAGG_ACTION__PSUM_FP:
 			case KAGG_ACTION__PAVG_FP:
 				__update_preagg__psum_fp(kcxt, buffer, cmeta, desc);
+				break;
+			case KAGG_ACTION__PAVG_NUMERIC:
+			case KAGG_ACTION__PSUM_NUMERIC:
+				__update_preagg__psum_numeric(kcxt, buffer, cmeta, desc);
 				break;
 			case KAGG_ACTION__STDDEV:
 				__update_preagg__pstddev(kcxt, buffer, cmeta, desc);
@@ -1579,7 +1661,10 @@ __handleDpuTaskExecNoGroupPreAgg(dpuClient *dclient,
 	{
 		assert(karg->opcode == FuncOpCode__SaveExpr);
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, NULL))
+		{
+			__NoticeKexp(kcxt);
 			return false;
+		}
 	}
 
 	pthreadRWLockReadLock(&gf_buf->kds_final_rwlock);
@@ -1610,13 +1695,14 @@ __handleDpuTaskExecNoGroupPreAgg(dpuClient *dclient,
 			{
 				/* out of memory */
 				pthreadRWLockUnlock(&gf_buf->kds_final_rwlock);
+				__Notice("out of memory");
 				return false;
 			}
 		}
 	}
 	/* update the partial aggregation */
 	__updateOneTupleDpuPreAgg(kcxt, kds_final,
-							  &tupitem->htup,
+							  tupitem,
 							  kexp_groupby_actions);
 	pthreadRWLockUnlock(&gf_buf->kds_final_rwlock);
 	return true;
@@ -1654,16 +1740,24 @@ __handleDpuTaskExecGroupByPreAgg(dpuClient *dclient,
 	{
 		assert(karg->opcode == FuncOpCode__SaveExpr);
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, NULL))
+		{
+			__NoticeKexp(kcxt);
 			return false;
+		}
 	}
 	/*
 	 * calculation of GROUP BY key hash-value
 	 */
 	if (!EXEC_KERN_EXPRESSION(kcxt, kexp_groupby_keyhash, &hash))
+	{
+		__NoticeKexp(kcxt);
 		return false;
+	}
 	if (XPU_DATUM_ISNULL(&hash))
+	{
+		__Notice("Bug? Group-By hash was NULL");
 		return false;
-
+	}
 	pthreadRWLockReadLock(&gf_buf->kds_final_rwlock);
 	kds_final = gf_buf->kds_final;
 	assert(kds_final->format == KDS_FORMAT_HASH);
@@ -1686,20 +1780,24 @@ __handleDpuTaskExecGroupByPreAgg(dpuClient *dclient,
 		{
 			bool	saved_compare_nulls = kcxt->kmode_compare_nulls;
 
-			if (hitem->hash != hash.value)
+			if (hitem->t.hash != hash.value)
 				continue;
 
 			kcxt->kmode_compare_nulls = true;
-			ExecLoadVarsHeapTuple(kcxt,
-								  kexp_groupby_keyload,
-								  -2,
-								  kds_final,
-								  &hitem->t.htup);
+			ExecLoadVarsMinimalTuple(kcxt,
+									 kexp_groupby_keyload,
+									 -2,
+									 kds_final,
+									 &hitem->t);
 			if (EXEC_KERN_EXPRESSION(kcxt, kexp_groupby_keycomp, &status))
 			{
 				kcxt->kmode_compare_nulls = saved_compare_nulls;
 				if (!XPU_DATUM_ISNULL(&status) && status.value)
 					break;
+			}
+			else
+			{
+				__NoticeKexp(kcxt);
 			}
 			kcxt->kmode_compare_nulls = saved_compare_nulls;
 		}
@@ -1711,8 +1809,8 @@ __handleDpuTaskExecGroupByPreAgg(dpuClient *dclient,
 											kexp_groupby_actions);
 			if (hitem)
 			{
-				hitem->hash = hash.value;
 				hitem->next = saved;
+				hitem->t.hash = hash.value;
 				hoffset = ((char *)kds_final
 						   + kds_final->length
 						   - (char *)hitem);
@@ -1736,6 +1834,7 @@ __handleDpuTaskExecGroupByPreAgg(dpuClient *dclient,
 					if (!expandGroupByFinalBuffer(gf_buf))
 					{
 						pthreadRWLockUnlock(&gf_buf->kds_final_rwlock);
+						__Notice("out of memory");
 						return false;
 					}
 				}
@@ -1744,7 +1843,7 @@ __handleDpuTaskExecGroupByPreAgg(dpuClient *dclient,
 	} while (!hitem);
 	/* update the partial aggregation */
 	__updateOneTupleDpuPreAgg(kcxt, kds_final,
-							  &hitem->t.htup,
+							  &hitem->t,
 							  kexp_groupby_actions);
 	pthreadRWLockUnlock(&gf_buf->kds_final_rwlock);
 
@@ -1780,15 +1879,17 @@ __handleDpuTaskExecNestLoop(dpuClient *dclient,
 	for (uint32_t rowid=0; rowid < kds_heap->nitems; rowid++)
 	{
 		kern_tupitem   *tupitem = KDS_GET_TUPITEM(kds_heap, rowid);
-		xpu_int4_t		status;
+		int				status;
 
 		kcxt_reset(kcxt);
-		ExecLoadVarsHeapTuple(kcxt, kexp_load_vars, depth,
-							  kds_heap, &tupitem->htup);
-		if (!EXEC_KERN_EXPRESSION(kcxt, kexp_join_quals, &status))
+		ExecLoadVarsMinimalTuple(kcxt, kexp_load_vars, depth,
+								 kds_heap, tupitem);
+		if (!ExecGpuJoinQuals(kcxt, kexp_join_quals, &status))
+		{
+			__NoticeKexp(kcxt);
 			return false;
-		assert(!XPU_DATUM_ISNULL(&status));
-		if (status.value > 0)
+		}
+		if (status > 0)
 		{
 			if (depth >= kmrels->num_rels)
 			{
@@ -1806,7 +1907,7 @@ __handleDpuTaskExecNestLoop(dpuClient *dclient,
 					return false;
 			}
 		}
-		if (status.value != 0)
+		if (status != 0)
 		{
 			matched = true;
 			if (oj_map)
@@ -1816,8 +1917,8 @@ __handleDpuTaskExecNestLoop(dpuClient *dclient,
 	/* LEFT OUTER if needed */
 	if (kmrels->chunks[depth-1].left_outer && !matched)
 	{
-		ExecLoadVarsHeapTuple(kcxt, kexp_load_vars, depth,
-							  kds_heap, NULL);
+		ExecLoadVarsMinimalTuple(kcxt, kexp_load_vars, depth,
+								 kds_heap, NULL);
 		if (depth >= kmrels->num_rels)
 		{
 			if (!dtes->handleDpuTaskFinalDepth(dclient, dtes, kcxt))
@@ -1852,25 +1953,31 @@ __handleDpuTaskExecHashJoin(dpuClient *dclient,
 	kern_expression	   *kexp_hash_value = SESSION_KEXP_HASH_VALUE(session,depth);
 	kern_hashitem	   *khitem;
 	xpu_int4_t			hash;
-	xpu_int4_t			status;
 	bool				matched = false;
 
 	if (!EXEC_KERN_EXPRESSION(kcxt, kexp_hash_value, &hash))
+	{
+		__NoticeKexp(kcxt);
 		return false;
+	}
 	assert(!XPU_DATUM_ISNULL(&hash));
 	for (khitem = KDS_HASH_FIRST_ITEM(kds_hash, hash.value);
 		 khitem != NULL;
 		 khitem = KDS_HASH_NEXT_ITEM(kds_hash, khitem->next))
 	{
-		if (khitem->hash != hash.value)
+		int				status;
+
+		if (khitem->t.hash != hash.value)
 			continue;
-		ExecLoadVarsHeapTuple(kcxt, kexp_load_vars, depth,
-							  kds_hash, &khitem->t.htup);
+		ExecLoadVarsMinimalTuple(kcxt, kexp_load_vars, depth,
+								 kds_hash, &khitem->t);
 		kcxt_reset(kcxt);
-		if (!EXEC_KERN_EXPRESSION(kcxt, kexp_join_quals, &status))
+		if (!ExecGpuJoinQuals(kcxt, kexp_join_quals, &status))
+		{
+			__NoticeKexp(kcxt);
 			return false;
-		assert(!XPU_DATUM_ISNULL(&status));
-		if (status.value > 0)
+		}
+		if (status > 0)
 		{
 			if (depth >= kmrels->num_rels)
 			{
@@ -1888,18 +1995,21 @@ __handleDpuTaskExecHashJoin(dpuClient *dclient,
 					return false;
 			}
 		}
-		if (status.value != 0)
+		if (status != 0)
 		{
 			matched = true;
 			if (oj_map)
-				oj_map[khitem->t.rowid] = true;
+			{
+				uint32_t	rowid = KERN_TUPITEM_GET_ROWID(&khitem->t);
+				oj_map[rowid] = true;
+			}
 		}
 	}
 	/* LEFT OUTER if needed */
 	if (kmrels->chunks[depth-1].left_outer && !matched)
 	{
-		ExecLoadVarsHeapTuple(kcxt, kexp_load_vars, depth,
-							  kds_hash, NULL);
+		ExecLoadVarsMinimalTuple(kcxt, kexp_load_vars, depth,
+								 kds_hash, NULL);
 		if (depth >= kmrels->num_rels)
 		{
 			if (!dtes->handleDpuTaskFinalDepth(dclient, dtes, kcxt))
@@ -1952,11 +2062,11 @@ __handleDpuScanExecBlock(dpuClient *dclient,
 			htup = (HeapTupleHeaderData *) PageGetItem(page, lpp);
 			dtes->nitems_raw++;
 			kcxt_reset(kcxt);
-			if (ExecLoadVarsOuterRow(kcxt,
-									 kexp_load_vars,
-									 kexp_scan_quals,
-									 kds_src,
-									 htup))
+			if (ExecLoadVarsOuterHeap(kcxt,
+									  kexp_load_vars,
+									  kexp_scan_quals,
+									  kds_src,
+									  htup))
 			{
 				dtes->nitems_in++;
 				if (!kmrels)
@@ -1985,6 +2095,7 @@ __handleDpuScanExecBlock(dpuClient *dclient,
 								kcxt->error_lineno,
 								kcxt->error_funcname,
 								kcxt->error_message);
+				__NoticeKexp(kcxt);
 				return false;
 			}
 		}
@@ -2071,8 +2182,8 @@ dpuservHandleDpuTaskExec(dpuClient *dclient, XpuCommand *xcmd)
 		kds_src_iovec = (strom_io_vector *)((char *)xcmd + xcmd->u.task.kds_src_iovec);
 	if (xcmd->u.task.kds_src_offset)
 		kds_src_head = (kern_data_store *)((char *)xcmd + xcmd->u.task.kds_src_offset);
-//	if (xcmd->u.task.kds_dst_offset)
-//		kds_dst_head = (kern_data_store *)((char *)xcmd + xcmd->u.task.kds_dst_offset);
+	if (session->projection_kds_dst)
+		kds_dst_head = (kern_data_store *)((char *)session + session->projection_kds_dst);
 	if (!kds_src_pathname || !kds_src_iovec || !kds_src_head || !kds_dst_head)
 	{
 		dpuClientElog(dclient, "kern_data_store is corrupted");
@@ -2084,6 +2195,7 @@ dpuservHandleDpuTaskExec(dpuClient *dclient, XpuCommand *xcmd)
 	sz = offsetof(dpuTaskExecState, stats[num_rels]);
 	dtes = alloca(sz);
 	memset(dtes, 0, sz);
+	dtes->scan_repeat_id = xcmd->u.task.scan_repeat_id;
 	dtes->kds_dst_head = SESSION_KDS_DST_HEAD(session);
 	dtes->num_rels = num_rels;
 	if (session->xpucode_groupby_actions == 0)
@@ -2117,6 +2229,10 @@ dpuservHandleDpuTaskExec(dpuClient *dclient, XpuCommand *xcmd)
 				dpuClientWriteBack(dclient, dtes);
 			free(base_addr);
 		}
+		else
+		{
+			__Notice("unable to load KDS_FORMAT_BLOCK buffer");
+		}
 	}
 	else if (kds_src_head->format == KDS_FORMAT_ARROW)
 	{
@@ -2132,6 +2248,10 @@ dpuservHandleDpuTaskExec(dpuClient *dclient, XpuCommand *xcmd)
 			if (__handleDpuScanExecArrow(dclient, dtes, kds_src, NULL))
 				dpuClientWriteBack(dclient, dtes);
 			free(base_addr);
+		}
+		else
+		{
+			__Notice("unable to load KDS_FORMAT_ARROW buffer");
 		}
 	}
 	else
@@ -2171,6 +2291,7 @@ dpuservHandleDpuTaskFinal(dpuClient *dclient, XpuCommand *xcmd)
 	resp_sz = MAXALIGN(offsetof(XpuCommand, u.results.stats));
 	resp.magic = XpuCommandMagicNumber;
 	resp.tag   = XpuCommandTag__Success;
+	resp.u.results.scan_repeat_id = INT_MAX;
 
 	iov = &iovec_array[iovcnt++];
     iov->iov_base = &resp;
@@ -2351,8 +2472,7 @@ dpuservDpuWorkerMain(void *__priv)
 {
 	long	worker_id = (long)__priv;
 
-	if (verbose)
-		fprintf(stderr, "[worker-%lu] DPU service worker start.\n", worker_id);
+	__Info("[worker-%lu] DPU service worker start.", worker_id);
 	pthreadMutexLock(&dpu_command_mutex);
 	while (!got_sigterm)
 	{
@@ -2377,27 +2497,24 @@ dpuservDpuWorkerMain(void *__priv)
 						if (dpuservHandleOpenSession(dclient, xcmd))
 							xcmd = NULL;	/* session information shall be kept until
 											 * end of the session. */
-						if (verbose)
-							fprintf(stderr, "[DPU-%ld@%s] OpenSession ... %s\n",
-									worker_id, dclient->peer_addr,
-									(xcmd != NULL ? "failed" : "ok"));
+						__Info("[DPU-%ld@%s] OpenSession ... %s",
+							   worker_id, dclient->peer_addr,
+							   (xcmd != NULL ? "failed" : "ok"));
 						break;
 					case XpuCommandTag__XpuTaskExec:
 						dpuservHandleDpuTaskExec(dclient, xcmd);
-						if (verbose)
-							fprintf(stderr, "[DPU-%ld@%s] CMD=XpuTaskExec\n",
-									worker_id, dclient->peer_addr);
+						__Info("[DPU-%ld@%s] CMD=XpuTaskExec",
+							   worker_id, dclient->peer_addr);
 						break;
 					case XpuCommandTag__XpuTaskFinal:
 						dpuservHandleDpuTaskFinal(dclient, xcmd);
-						if (verbose)
-							fprintf(stderr, "[DPU-%ld@%s] CMD=XpuTaskFinal\n",
-									worker_id, dclient->peer_addr);
+						__Info("[DPU-%ld@%s] CMD=XpuTaskFinal",
+							   worker_id, dclient->peer_addr);
 						break;
 					default:
-						fprintf(stderr, "[DPU-%ld@%s] unknown xPU command (tag=%u, len=%ld)\n",
-								worker_id, dclient->peer_addr,
-								xcmd->tag, xcmd->length);
+						__Notice("[DPU-%ld@%s] unknown xPU command (tag=%u, len=%ld)",
+								 worker_id, dclient->peer_addr,
+								 xcmd->tag, xcmd->length);
 						break;
 				}
 			}
@@ -2413,8 +2530,7 @@ dpuservDpuWorkerMain(void *__priv)
 		}
 	}
 	pthreadMutexUnlock(&dpu_command_mutex);
-	if (verbose)
-		fprintf(stderr, "[worker-%lu] DPU service worker terminated.\n", worker_id);
+	__Info("[worker-%lu] DPU service worker terminated.", worker_id);
 	return NULL;
 }
 
@@ -2435,10 +2551,9 @@ __dpuServAttachCommand(void *__priv, XpuCommand *xcmd)
 	getDpuClient(dclient, 2);
 	xcmd->priv = dclient;
 
-	if (verbose)
-		fprintf(stderr, "[%s] received xcmd (tag=%u len=%lu)\n",
-				dclient->peer_addr,
-				xcmd->tag, xcmd->length);
+	__Info("[%s] received xcmd (tag=%u len=%lu)",
+		   dclient->peer_addr,
+		   xcmd->tag, xcmd->length);
 
 	pthreadMutexLock(&dpu_command_mutex);
 	dlist_push_tail(&dpu_command_list, &xcmd->chain);
@@ -2453,8 +2568,7 @@ dpuservMonitorClient(void *__priv)
 {
 	dpuClient  *dclient = (dpuClient *)__priv;
 
-	if (verbose)
-		fprintf(stderr, "[%s] connection start\n", dclient->peer_addr);
+	__Info("[%s] connection start.", dclient->peer_addr);
 	while (!got_sigterm && !dclient->in_termination)
 	{
 		struct pollfd  pfd;
@@ -2481,16 +2595,14 @@ dpuservMonitorClient(void *__priv)
 			}
 			else if (pfd.revents & ~POLLIN)
 			{
-				if (verbose)
-					fprintf(stderr, "[%s] peer socket closed\n", dclient->peer_addr);
+				__Info("[%s] peer socket closed.", dclient->peer_addr);
 				break;
 			}
 		}
 	}
 	dclient->in_termination = true;
 	putDpuClient(dclient, 1);
-	if (verbose)
-		fprintf(stderr, "[%s] connection terminated\n", dclient->peer_addr);
+	__Info("[%s] connection terminated.", dclient->peer_addr);
 	return NULL;
 }
 
@@ -2501,8 +2613,7 @@ dpuserv_signal_handler(int signum)
 
 	if (signum == SIGTERM)
 		got_sigterm = true;
-	if (verbose)
-		fprintf(stderr, "got signal (%d)\n", signum);
+	__Info("got signal (%d)", signum);
 	errno = errno_saved;
 }
 
@@ -2756,7 +2867,7 @@ main(int argc, char *argv[])
 				break;
 
 			case 'v':
-				verbose = true;
+				verbose++;
 				break;
 			default:	/* --help */
 				fputs("usage: dpuserv [OPTIONS]\n"

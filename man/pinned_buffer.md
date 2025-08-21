@@ -76,7 +76,7 @@ If the INNER table is relatively large and contains search conditions that are e
 @en{
 In this way, if data ping-pong occurs between the CPU and GPU when reading the INNER table or building the INNER buffer, you can configure GPUJoin to use ***Pinned Inner Buffer***. It is possible to shorten the execution start lead time and reduce memory usage.
 In the above EXPLAIN output, reading of the `supplier` table will be performed by GpuScan, and according to the statistical information, it is estimated that about 2 million rows will be read from the table. Meanwhile, notice the output of `GPU Pinned Buffer: enabled`. This is a function that if the estimated size of the INNER table exceeds the configuration value of `pg_strom.pinned_inner_buffer_threshold`, the processing result of GpuScan is retained in the GPU memory and used as part of the INNER buffer at the next GpuJoin. (If necessary, hash value calculation is also performed on the GPU).
-Therefore, after the contents of the `supplier` table are read from storage to the GPU using GPU-Direct SQL, they can be used in the next GPUJoin without being returned to the CPU or loaded to the GPU again. It will be.
+Therefore, after the contents of the `supplier` table are read from storage to the GPU using GPU-Direct SQL, they can be used in the next GPUJoin without being returned to the CPU or loaded to the GPU again. 
 }
 @ja{
 一方で注意すべき点もあります。

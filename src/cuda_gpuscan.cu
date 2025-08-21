@@ -398,93 +398,6 @@ kern_global_stair_sum_u32(uint32_t *values, uint32_t nitems, uint32_t step)
  *
  * ----------------------------------------------------------------
  */
-STATIC_FUNCTION(int)
-__gpuscan_load_source_row(kern_context *kcxt,
-						  kern_warp_context *wp,
-						  const kern_data_store *kds_src,
-						  const kern_expression *kexp_load_vars,
-						  const kern_expression *kexp_scan_quals,
-						  const kern_expression *kexp_move_vars,
-						  char *dst_kvecs_buffer)
-{
-	uint32_t	count;
-	uint32_t	index;
-	uint32_t	wr_pos;
-	kern_tupitem *tupitem = NULL;
-
-	/* compute the next row-index */
-	index = get_global_size() * wp->smx_row_count + get_global_base();
-	if (index >= kds_src->nitems)
-	{
-		if (get_local_id() == 0)
-			wp->scan_done = 1;
-		__syncthreads();
-		return 1;
-	}
-	index += get_local_id();
-
-	/*
-	 * fetch the outer tuple to scan
-	 */
-	if (index < kds_src->nitems)
-	{
-		uint64_t	offset = KDS_GET_ROWINDEX(kds_src)[index];
-
-		assert(offset <= kds_src->usage);
-		tupitem = (kern_tupitem *)((char *)kds_src +
-								   kds_src->length -
-								   offset);
-		assert(__KDS_TUPITEM_CHECK_VALID(kds_src, tupitem));
-		if (!ExecLoadVarsOuterRow(kcxt,
-								  kexp_load_vars,
-								  kexp_scan_quals,
-								  kds_src,
-								  &tupitem->htup))
-			tupitem = NULL;
-	}
-	/* error checks */
-	if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
-		return -1;
-
-	/*
-	 * save the private kvars slot on the combination buffer (depth=0)
-	 */
-	wr_pos = WARP_WRITE_POS(wp,0);
-	wr_pos += pgstrom_stair_sum_binary(tupitem != NULL, &count);
-	if (tupitem != NULL)
-	{
-		if (!ExecMoveKernelVariables(kcxt,
-									 kexp_move_vars,
-									 dst_kvecs_buffer,
-									 (wr_pos % KVEC_UNITSZ)))
-		{
-			assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
-		}
-	}
-	/* error checks */
-	if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
-		return -1;
-	/*
-	 * NOTE: 'smx_row_count' and 'WARP_WRITE_POS' must be updated after
-	 * the GPU kernel suspend/resume possibility has gone.
-	 * Once GPU kernel gets suspended, it restarts this depth again, and
-	 * its read and write position should be immutable with the first try.
-	 *
-	 * When any of tuple needs CPU fallbacks but a fallback buffer is not
-	 * allocated yet, we stop the GPU kernel once, then restart this block
-	 * again. In this case, we have to fetch tuples from the same position
-	 * (calculated based on smx_row_count), and have to write to the same
-	 * WARP_WRITE_POS.
-	 */
-	if (get_local_id() == 0)
-	{
-		wp->smx_row_count++;
-		WARP_WRITE_POS(wp,0) += count;
-	}
-	__syncthreads();
-	/* move to the next depth, if more than blockSize tuples were fetched. */
-	return (WARP_WRITE_POS(wp,0) >= WARP_READ_POS(wp,0) + get_local_size() ? 1 : 0);
-}
 
 /*
  * __gpuscan_load_source_block
@@ -516,10 +429,10 @@ __gpuscan_load_source_block(kern_context *kcxt,
 		{
 			off = wp->lp_items[rd_pos % LP_ITEMS_PER_BLOCK];
 			htup = (HeapTupleHeaderData *)((char *)kds_src + off);
-			if (!ExecLoadVarsOuterRow(kcxt,
-									  kexp_load_vars,
-									  kexp_scan_quals,
-									  kds_src, htup))
+			if (!ExecLoadVarsOuterHeap(kcxt,
+									   kexp_load_vars,
+									   kexp_scan_quals,
+									   kds_src, htup))
 				htup = NULL;
 		}
 		/* error checks */
@@ -840,13 +753,6 @@ execGpuScanLoadSource(kern_context *kcxt,
 
 	switch (kds_src->format)
 	{
-		case KDS_FORMAT_ROW:
-			return __gpuscan_load_source_row(kcxt, wp,
-											 kds_src,
-											 kexp_load_vars,
-											 kexp_scan_quals,
-											 kexp_move_vars,
-											 dst_kvecs_buffer);
 		case KDS_FORMAT_BLOCK:
 			return __gpuscan_load_source_block(kcxt, wp,
 											   kds_src,

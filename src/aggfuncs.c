@@ -367,10 +367,10 @@ pgstrom_partial_sum_numeric(PG_FUNCTION_ARGS)
 
 	if (PG_NARGS() > 1 && !PG_GETARG_BOOL(1))
 		PG_RETURN_NULL();
-	emsg = __xpu_numeric_from_varlena(&kind,
-									  &weight,
-									  &value,
-									  (varlena *)PG_GETARG_NUMERIC(0));
+	emsg = __decimal_from_varlena(&kind,
+								  &weight,
+								  &value,
+								  (varlena *)PG_GETARG_NUMERIC(0));
 	if (emsg)
 		elog(ERROR, "%s: %s", __FUNCTION__, emsg);
 
@@ -648,12 +648,13 @@ pgstrom_fsum_final_numeric(PG_FUNCTION_ARGS)
 	}
 	else
 	{
+		uint8_t		kind = XPU_NUMERIC_KIND__VALID;
 		int16_t		weight = (state->attrs & __PAGG_NUMERIC_ATTRS__WEIGHT);
 		int128_t	ival = __fetch_int128_packed(&state->sum);
-		int			bufsz = __xpu_numeric_to_varlena(NULL, weight, ival);
+		int			bufsz = __decimal_to_varlena(NULL, kind, weight, ival);
 		char	   *buf = palloc(bufsz);
 
-		__xpu_numeric_to_varlena(buf, weight, ival);
+		__decimal_to_varlena(buf, kind, weight, ival);
 		datum = PointerGetDatum(buf);
 	}
 	PG_RETURN_DATUM(datum);
@@ -728,13 +729,14 @@ pgstrom_favg_final_numeric(PG_FUNCTION_ARGS)
 	}
 	else
 	{
+		uint8_t		kind = XPU_NUMERIC_KIND__VALID;
 		int16_t		weight = (state->attrs & __PAGG_NUMERIC_ATTRS__WEIGHT);
 		int128_t	ival = __fetch_int128_packed(&state->sum);
-		int			bufsz = __xpu_numeric_to_varlena(NULL, weight, ival);
+		int			bufsz = __decimal_to_varlena(NULL, kind, weight, ival);
 		Numeric		sum = palloc(bufsz);
 		Numeric		div = int64_to_numeric(state->nitems);
 
-		__xpu_numeric_to_varlena((char *)sum, weight, ival);
+		__decimal_to_varlena((char *)sum, kind, weight, ival);
 		datum = DirectFunctionCall2(numeric_div,
 									NumericGetDatum(sum),
 									NumericGetDatum(div));

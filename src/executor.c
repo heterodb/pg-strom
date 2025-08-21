@@ -28,6 +28,8 @@ struct XpuConnection
 	int				num_ready_cmds;
 	dlist_head		ready_cmds_list;	/* ready, but not fetched yet  */
 	dlist_head		active_cmds_list;	/* currently in-use */
+	pg_atomic_uint64 *scan_repeat_sync_control; /* sync variable when repeat-id
+												 * is incremented to the next. */
 	kern_errorbuf	errorbuf;
 };
 
@@ -54,9 +56,9 @@ __xpuConnectAttachCommand(void *__priv, XpuCommand *xcmd)
 
 	xcmd->priv = conn;
 	pthreadMutexLock(&conn->mutex);
-	Assert(conn->num_running_cmds > 0);
 	if (xcmd->tag == XpuCommandTag__Error)
 	{
+		Assert(conn->num_running_cmds > 0);
 		conn->num_running_cmds--;
 		if (conn->errorbuf.errcode == ERRCODE_STROM_SUCCESS)
 		{
@@ -68,7 +70,27 @@ __xpuConnectAttachCommand(void *__priv, XpuCommand *xcmd)
 	else
 	{
 		if (xcmd->tag == XpuCommandTag__Success)
+		{
+			uint64_t	control;
+
+			Assert(conn->num_running_cmds > 0);
 			conn->num_running_cmds--;
+			/*
+			 * NOTE: When repeating the outer scan multiple times, it is prohibited
+			 * to submit a task with a new repeat-id until all tasks with old repeat-ids
+			 * are completed.
+			 * This is because the pinned inner buffer is partitioned, and if it is
+			 * necessary to switch buffers based on repeat-id, GPU-Join cannot properly
+			 * switch the buffers used.
+			 * The upper 32bit of the scan_repeat_sync_control is the repeat-id that
+			 * is currently running, and the lower 32bit is the number of tasks
+			 * currently in running. So, if lower 32bit is zero, we can submit further
+			 * tasks with different repeat-id.
+			 */
+			control = pg_atomic_fetch_sub_u64(conn->scan_repeat_sync_control, 1);
+			assert((control >> 32) == xcmd->u.results.scan_repeat_id &&
+				   (control & 0xffffffffUL) > 0);
+		}
 		else
 		{
 			/*
@@ -162,6 +184,83 @@ __xpuConnectSessionWorker(void *__priv)
 }
 
 /*
+ * __syncScanRepeatIdChangingPoint
+ *
+ * wait for completion of any running tasks that has different scan repeat-id
+ */
+static void
+__syncScanRepeatIdChangingPoint(XpuConnection *conn, const XpuCommand *xcmd)
+{
+	int32_t		repeat_id;
+	uint64_t	control;
+
+	switch (xcmd->tag)
+	{
+		case XpuCommandTag__OpenSession:
+			repeat_id = 0;
+			break;
+		case XpuCommandTag__XpuTaskExec:
+		case XpuCommandTag__XpuTaskExecGpuCache:
+			repeat_id = xcmd->u.task.scan_repeat_id;
+			break;
+		case XpuCommandTag__XpuTaskFinal:
+			repeat_id = INT_MAX;
+			break;
+		default:
+			elog(ERROR, "unexpected XpuCommand tag: %d", xcmd->tag);
+	}
+
+	control = pg_atomic_read_u64(conn->scan_repeat_sync_control);
+	for (;;)
+	{
+		/*
+		 * The upper 32 bits of the control variable indicate repeat_id of the tasks
+		 * currently running, and the lower 32 bits indicate number of the tasks.
+		 * Therefore, when the lower 32 bits are 1 or greater, a task can only be
+		 * submitted if the repeat_id is the same. If you want to update the repeat_id,
+		 * you must wait for the lower 32 bits to become 0.
+		 */
+		if ((control>>32) == repeat_id)
+		{
+			/* repeat-id is not changed */
+			assert((control & 0xffffffffUL) != 0xffffffffUL);
+			if (pg_atomic_compare_exchange_u64(conn->scan_repeat_sync_control,
+											   &control,
+											   control + 1))
+				break;
+		}
+		else if ((control & 0xffffffffUL) == 0)
+		{
+			/* no tasks with previous repeat-id is not running */
+			if (pg_atomic_compare_exchange_u64(conn->scan_repeat_sync_control,
+											   &control,
+											   ((uint64_t)repeat_id << 32) | 1UL))
+			{
+				elog(DEBUG1, "executor: scan repeat-id was switched %u -> %u",
+					 (int32_t)(control>>32), repeat_id);
+				break;
+			}
+		}
+		else
+		{
+			/* any tasks with previous repeat-id is still running */
+			int		ev = WaitLatch(MyLatch,
+								   WL_LATCH_SET |
+								   WL_TIMEOUT |
+								   WL_POSTMASTER_DEATH,
+								   1000L,
+								   PG_WAIT_EXTENSION);
+			ResetLatch(MyLatch);
+			if (ev & WL_POSTMASTER_DEATH)
+				elog(FATAL, "unexpected postmaster dead");
+			CHECK_FOR_INTERRUPTS();
+
+			control = pg_atomic_read_u64(conn->scan_repeat_sync_control);
+		}
+	}
+}
+
+/*
  * xpuClientSendCommand
  */
 void
@@ -171,6 +270,8 @@ xpuClientSendCommand(XpuConnection *conn, const XpuCommand *xcmd)
 	const char *buf = (const char *)xcmd;
 	size_t		len = xcmd->length;
 	ssize_t		nbytes;
+
+	__syncScanRepeatIdChangingPoint(conn, xcmd);
 
 	pthreadMutexLock(&conn->mutex);
 	conn->num_running_cmds++;
@@ -197,10 +298,14 @@ xpuClientSendCommand(XpuConnection *conn, const XpuCommand *xcmd)
  * xpuClientSendCommandIOV
  */
 static void
-xpuClientSendCommandIOV(XpuConnection *conn, struct iovec *iov, int iovcnt)
+xpuClientSendCommandIOV(XpuConnection *conn,
+						const XpuCommand *xcmd,
+						struct iovec *iov, int iovcnt)
 {
 	int			sockfd = conn->sockfd;
 	ssize_t		nbytes;
+
+    __syncScanRepeatIdChangingPoint(conn, xcmd);
 
 	Assert(iovcnt > 0);
 	pthreadMutexLock(&conn->mutex);
@@ -569,6 +674,8 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 	XpuCommand	   *xcmd;
 	StringInfoData	buf;
 	bytea		   *xpucode;
+	TransactionId	session_curr_xid = InvalidTransactionId;	/* only if writable */
+	CommandId		session_curr_cid = InvalidCommandId;		/* only if writable */
 
 	initStringInfo(&buf);
 	session_sz = offsetof(kern_session_info, poffset[nparams]);
@@ -701,29 +808,45 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 		if ((pts->xpu_task_flags & (DEVTASK__PINNED_ROW_RESULTS |
 									DEVTASK__PINNED_HASH_RESULTS)) != 0)
 		{
-			size_t		kds_length = (4UL << 20);	/* 4MB */
-
-			if ((pts->xpu_task_flags & DEVTASK__PINNED_HASH_RESULTS) != 0)
+			if ((pts->xpu_task_flags & DEVTASK__PREAGG) == 0)
 			{
-				uint64_t	hash_nslots = KDS_GET_HASHSLOT_WIDTH(pp_info->final_nrows);
-				uint32_t	unitsz = (offsetof(kern_hashitem, t.htup) +
-									  MAXALIGN(offsetof(HeapTupleHeaderData, t_bits) +
-											   BITMAPLEN(kds_dst_tdesc->natts)) +
-									  pts->css.ss.ps.plan->plan_width);
-				kds_length = (head_sz +
-							  sizeof(uint64_t) * hash_nslots +		/* hash-slots */
-							  sizeof(uint64_t) * 2 * hash_nslots +	/* row-index */
-							  unitsz * 2 * hash_nslots);
-				if (kds_length < (1UL<<30))
-					kds_length = (1UL<<30);		/* 1GB at least */
-				else
-					kds_length = TYPEALIGN(1024, kds_length);
-
-				kds_temp->hash_nslots = hash_nslots;
-				kds_temp->format = KDS_FORMAT_HASH;
+				/* Pinned Inner Buffer - Thus, buffer should be small pieces */
+				if ((pts->xpu_task_flags & DEVTASK__PINNED_HASH_RESULTS) != 0)
+				{
+					kds_temp->hash_nslots = 137;
+					kds_temp->format = KDS_FORMAT_HASH;
+				}
+				kds_temp->length = (512UL << 20);	/* 512MB per buffer */
 			}
-			kds_temp->length = kds_length;
-			session->groupby_kds_final = __appendBinaryStringInfo(&buf, kds_temp, head_sz);
+			else if ((pts->xpu_task_flags & DEVTASK__PINNED_HASH_RESULTS) != 0)
+			{
+				uint64_t	nslots = KDS_GET_HASHSLOT_WIDTH(pp_info->final_nrows);
+				size_t		length;
+				size_t		unitsz;
+
+				unitsz = (MAXALIGN(offsetof(kern_hashitem, t.t_bits) +
+								   BITMAPLEN(kds_dst_tdesc->natts)) +
+						  MAXALIGN(pts->css.ss.ps.plan->plan_width + ROWID_SIZE));
+				length = (head_sz +
+						  sizeof(uint64_t) * nslots +
+						  sizeof(uint64_t) * 2 * nslots +
+						  unitsz * 2 * nslots);
+				if (length < (1UL<<30))
+					length = (1UL<<30);		/* 1G at least */
+				else
+					length = TYPEALIGN(1024, length);
+
+				kds_temp->length = length;
+				kds_temp->format = KDS_FORMAT_HASH;
+				kds_temp->hash_nslots = nslots;
+			}
+			else
+			{
+				/* nogroup aggregation will use very small portion */
+				kds_temp->length = (4UL<<20);	/* 4MB */
+			}
+			session->groupby_kds_final
+				= __appendBinaryStringInfo(&buf, kds_temp, head_sz);
 			session->groupby_prepfn_bufsz = pp_info->groupby_prepfn_bufsz;
 			session->groupby_ngroups_estimation = pts->css.ss.ps.plan->plan_rows;
 		}
@@ -749,6 +872,54 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 									 sizeof(kern_fallback_desc) * nitems);
 		session->fallback_desc_nitems = nitems;
 	}
+
+	/* SELECT INTO Direct related */
+	if (OidIsValid(pp_info->select_into_relid))
+	{
+		Relation	drel    = relation_open(pp_info->select_into_relid,
+											AccessExclusiveLock);
+		TupleDesc	d_tdesc = d_tdesc = RelationGetDescr(drel);
+		size_t		head_sz = estimate_kern_data_store(d_tdesc);
+		kern_data_store *kds_temp = (kern_data_store *)alloca(head_sz);
+		Datum		pathname = DirectFunctionCall1(pg_relation_filepath,
+												   pp_info->select_into_relid);
+
+		Assert((pp_info->xpu_task_flags & DEVTASK__SELECT_INTO_DIRECT) != 0);
+		session->select_into_pathname =
+			__appendBinaryStringInfo(&buf, VARDATA_ANY(pathname),
+									 VARSIZE_ANY_EXHDR(pathname));
+		appendStringInfoChar(&buf, '\0');
+
+		/* length and block_offset must be set on allocation time */
+		setup_kern_data_store(kds_temp, d_tdesc, 0, KDS_FORMAT_BLOCK);
+		session->select_into_kds_head =
+			__appendBinaryStringInfo(&buf, kds_temp, head_sz);
+
+		if (pp_info->select_into_proj != NIL)
+		{
+			kern_aggfinal_projection_desc *af_proj;
+			ListCell   *lc;
+			int			j = 0;
+			int			nattrs = list_length(pp_info->select_into_proj);
+			size_t		length = offsetof(kern_aggfinal_projection_desc,
+										  desc[nattrs]);
+			af_proj = alloca(length);
+			af_proj->nattrs = nattrs;
+			foreach (lc, pp_info->select_into_proj)
+			{
+				int		code = lfirst_int(lc);
+
+				af_proj->desc[j].action = (code >> 16);
+				af_proj->desc[j].resno = (code & 0xffffU);
+				j++;
+			}
+			session->select_into_projdesc =
+				__appendBinaryStringInfo(&buf, af_proj, length);
+		}
+		session_curr_xid = ps_state->pgsql_curr_xid;
+		session_curr_cid = ps_state->pgsql_curr_cid;
+		relation_close(drel, NoLock);
+	}
 	/* other database session information */
 	session->query_plan_id = ps_state->query_plan_id;
 	session->xpu_task_flags = pts->xpu_task_flags;
@@ -759,10 +930,13 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 	session->cuda_stack_size  = pp_info->cuda_stack_size;
 	session->hostEpochTimestamp = SetEpochTimestamp();
 	session->xactStartTimestamp = GetCurrentTransactionStartTimestamp();
+	session->session_curr_xid = session_curr_xid;
+	session->session_curr_cid = session_curr_cid;
 	session->session_xact_state = __build_session_xact_state(&buf);
 	session->session_timezone = __build_session_timezone(&buf);
 	session->session_encode = __build_session_encode(&buf);
 	__build_session_lconvert(session);
+	session->pinned_inner_buffer_partition_size = pgstrom_pinned_inner_buffer_partition_size();
 	session->pgsql_port_number = PostPortNumber;
 	session->pgsql_plan_node_id = pts->css.ss.ps.plan->plan_node_id;
 	session->join_inner_handle = join_inner_handle;
@@ -850,16 +1024,29 @@ __updateStatsXpuCommand(pgstromTaskState *pts, const XpuCommand *xcmd)
 			pg_atomic_fetch_add_u64(&ps_state->inners[i].stats_join,
 									xcmd->u.results.stats[i].nitems_out);
 		}
-		pg_atomic_fetch_add_u64(&ps_state->result_ntuples, xcmd->u.results.nitems_out);
-		if (xcmd->u.results.final_plan_task)
-		{
+		pg_atomic_fetch_add_u64(&ps_state->result_ntuples,
+								xcmd->u.results.nitems_out);
+		if (xcmd->u.results.final_nitems > 0)
 			pg_atomic_fetch_add_u64(&ps_state->final_nitems,
 									xcmd->u.results.final_nitems);
+		if (xcmd->u.results.final_usage > 0)
 			pg_atomic_fetch_add_u64(&ps_state->final_usage,
 									xcmd->u.results.final_usage);
+		if (xcmd->u.results.final_total > 0)
 			pg_atomic_fetch_add_u64(&ps_state->final_total,
 									xcmd->u.results.final_total);
-		}
+		if (xcmd->u.results.final_sorting_msec > 0)
+			pg_atomic_fetch_add_u32(&ps_state->final_sorting_msec,
+									xcmd->u.results.final_sorting_msec);
+		if (xcmd->u.results.final_reconstruction_msec > 0)
+			pg_atomic_fetch_add_u32(&ps_state->final_reconstruction_msec,
+									xcmd->u.results.final_reconstruction_msec);
+		if (xcmd->u.results.join_reconstruction_msec > 0)
+			pg_atomic_fetch_add_u32(&ps_state->join_reconstruction_msec,
+									xcmd->u.results.join_reconstruction_msec);
+		if (xcmd->u.results.select_into_nblocks > 0)
+			pg_atomic_fetch_add_u32(&ps_state->select_into_nblocks,
+									xcmd->u.results.select_into_nblocks);
 	}
 }
 
@@ -1003,7 +1190,7 @@ __fetchNextXpuCommand(pgstromTaskState *pts)
 				Assert(pts->scan_done);
 				break;
 			}
-			xpuClientSendCommandIOV(conn, xcmd_iov, xcmd_iovcnt);
+			xpuClientSendCommandIOV(conn, xcmd, xcmd_iov, xcmd_iovcnt);
 		}
 		else if (!dlist_is_empty(&conn->ready_cmds_list))
 		{
@@ -1088,14 +1275,9 @@ pgstromScanNextTuple(pgstromTaskState *pts)
 
 		if (index < kds->nitems)
 		{
-			kern_tupitem   *tupitem = KDS_GET_TUPITEM(kds, index);
-
-			pts->curr_htup.t_len = tupitem->t_len;
-			memcpy(&pts->curr_htup.t_self,
-				   &tupitem->htup.t_ctid,
-				   sizeof(ItemPointerData));
-			pts->curr_htup.t_data = &tupitem->htup;
-			return ExecStoreHeapTuple(&pts->curr_htup, slot, false);
+			kern_tupitem   *titem = KDS_GET_TUPITEM(kds, index);
+			/* kern_tupitem and MinimalTuple are binary compatible */
+			return ExecStoreMinimalTuple((MinimalTuple)titem, slot, false);
 		}
 		if (++pts->curr_chunk >= pts->curr_resp->u.results.chunks_nitems)
 			break;
@@ -1401,7 +1583,7 @@ pgstromCreateTaskState(CustomScan *cscan,
 	pts->css.flags = cscan->flags;
 	pts->css.methods = methods;
 #if PG_VERSION_NUM >= 160000
-	pts->css.slotOps = &TTSOpsHeapTuple;
+	pts->css.slotOps = &TTSOpsMinimalTuple;
 #endif
 	pts->xpu_task_flags = pp_info->xpu_task_flags;
 	pts->pp_info = pp_info;
@@ -1504,7 +1686,7 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 	 */
 	ExecInitScanTupleSlot(estate, &pts->css.ss,
 						  pts->css.ss.ps.scandesc,
-						  &TTSOpsHeapTuple);
+						  &TTSOpsMinimalTuple);
 	ExecAssignScanProjectionInfoWithVarno(&pts->css.ss, INDEX_VAR);
 #endif
 	/*
@@ -1579,7 +1761,7 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 
 			Assert(pgstrom_is_gpuscan_state(istate->ps) ||
 				   pgstrom_is_gpujoin_state(istate->ps));
-			Assert(pp_info->gpusort_keys_expr == NIL);
+			Assert(i_pts->pp_info->gpusort_keys_expr == NIL);
 			if (pp_inner->hash_inner_keys != NIL &&
 				pp_inner->hash_outer_keys != NIL)
 				i_pts->xpu_task_flags |= DEVTASK__PINNED_HASH_RESULTS;
@@ -1725,15 +1907,10 @@ pgstromExecScanReCheck(pgstromTaskState *pts, EPQState *epqstate)
 				pts->fallback_nitems > __fallback_nitems &&
 				pts->fallback_usage  > __fallback_usage)
 			{
-				HeapTupleData	htup;
 				kern_tupitem   *titem = (kern_tupitem *)
 					(pts->fallback_buffer +
 					 pts->fallback_tuples[pts->fallback_index]);
-
-				htup.t_len = titem->t_len;
-				htup.t_data = &titem->htup;
-				scan_slot = pts->css.ss.ss_ScanTupleSlot;
-				ExecForceStoreHeapTuple(&htup, scan_slot, false);
+				ExecStoreMinimalTuple((MinimalTuple)titem, scan_slot, false);
 			}
 			else
 			{
@@ -2144,6 +2321,8 @@ pgstromSharedStateInitDSM(CustomScanState *node,
 	}
 	ps_state->query_plan_id = ((uint64_t)MyProcPid) << 32 |
 		(uint64_t)pts->css.ss.ps.plan->plan_node_id;
+	ps_state->pgsql_curr_xid = GetCurrentTransactionIdIfAny();
+	ps_state->pgsql_curr_cid = GetCurrentCommandId(true);
 	ps_state->num_rels = num_rels;
 	ConditionVariableInit(&ps_state->preload_cond);
 	SpinLockInit(&ps_state->preload_mutex);
@@ -2209,6 +2388,25 @@ pgstromSharedStateShutdownDSM(CustomScanState *node)
 		dst_state = MemoryContextAllocZero(estate->es_query_cxt, sz);
 		memcpy(dst_state, src_state, sz);
 		pts->ps_state = dst_state;
+	}
+	/*
+	 * SELECT-INTO Direct mode needs to update processed tuples
+	 * out of PostgreSQL.
+	 */
+	if ((pts->xpu_task_flags & DEVTASK__SELECT_INTO_DIRECT) != 0)
+	{
+		pgstromSharedState *ps_state = pts->ps_state;
+		pgstromPlanInfo	   *pp_info = pts->pp_info;
+		uint64_t			n_processed;
+
+		if (OidIsValid(pp_info->select_into_relid))
+		{
+			if ((pts->xpu_task_flags & DEVTASK__MERGE_FINAL_BUFFER) != 0)
+				n_processed = pg_atomic_read_u64(&ps_state->final_nitems);
+			else
+				n_processed = pg_atomic_read_u64(&ps_state->result_ntuples);
+			pts->css.ss.ps.state->es_processed += n_processed;
+		}
 	}
 }
 
@@ -2280,6 +2478,193 @@ pgstromGpuDirectExplain(pgstromTaskState *pts,
 	}
 	if (!pgstrom_regression_test_mode)
 		ExplainPropertyText("Scan-Engine", buf.data, es);
+	pfree(buf.data);
+}
+
+/*
+ * pgstromExplainSelectIntoDirect
+ */
+static void
+pgstromExplainSelectIntoDirect(pgstromTaskState *pts, List *dcontext, ExplainState *es)
+{
+	pgstromSharedState *ps_state = pts->ps_state;
+	CustomScan *cscan = (CustomScan *)pts->css.ss.ps.plan;
+	pgstromPlanInfo *pp_info = pts->pp_info;
+	StringInfoData buf;
+	ListCell   *lc;
+
+	if ((pts->xpu_task_flags & DEVTASK__SELECT_INTO_DIRECT) == 0)
+		return;		/* not supported */
+
+	initStringInfo(&buf);
+	if (!OidIsValid(pp_info->select_into_relid))
+		appendStringInfoString(&buf, "possible");
+	else
+	{
+		uint32_t	select_into_nblocks = pg_atomic_read_u32(&ps_state->select_into_nblocks);
+
+		appendStringInfoString(&buf, "enabled");
+		if (select_into_nblocks > 0)
+			appendStringInfo(&buf, ", nblocks=%u (%s)",
+							 select_into_nblocks,
+							 format_bytesz((size_t)select_into_nblocks * BLCKSZ));
+	}
+
+	/* displays the simple projection */
+	foreach (lc, pp_info->select_into_proj)
+	{
+		int		fcode = (lfirst_int(lc) >> 16);
+		int		resno = (lfirst_int(lc) & 0x0000ffffU);
+		char   *str;
+		TargetEntry *tle;
+
+		if (lc == list_head(pp_info->select_into_proj))
+			appendStringInfo(&buf, "; projection=");
+		else
+			appendStringInfo(&buf, ", ");
+		assert(resno > 0 && resno <= list_length(cscan->custom_scan_tlist));
+		tle = list_nth(cscan->custom_scan_tlist, resno-1);
+		str = deparse_expression((Node *)tle->expr, dcontext, false, false);
+		switch (fcode)
+		{
+			case KAGG_FINAL__SIMPLE_VREF:
+				appendStringInfo(&buf, "%s", str);
+				break;
+			case KAGG_FINAL__FMINMAX_INT8:
+				appendStringInfo(&buf, "fminmax_int8(%s)", str);
+				break;
+			case KAGG_FINAL__FMINMAX_INT16:
+				appendStringInfo(&buf, "fminmax_int16(%s)", str);
+				break;
+			case KAGG_FINAL__FMINMAX_INT32:
+				appendStringInfo(&buf, "fminmax_int32(%s)", str);
+				break;
+			case KAGG_FINAL__FMINMAX_INT64:
+				appendStringInfo(&buf, "fminmax_int64(%s)", str);
+				break;
+			case KAGG_FINAL__FMINMAX_FP16:
+				appendStringInfo(&buf, "fminmax_fp16(%s)", str);
+				break;
+			case KAGG_FINAL__FMINMAX_FP32:
+				appendStringInfo(&buf, "fminmax_fp32(%s)", str);
+				break;
+			case KAGG_FINAL__FMINMAX_FP64:
+				appendStringInfo(&buf, "fminmax_fp64(%s)", str);
+				break;
+			case KAGG_FINAL__FMINMAX_NUMERIC:
+				appendStringInfo(&buf, "fminmax_num(%s)", str);
+				break;
+			case KAGG_FINAL__FMINMAX_CASH:
+				appendStringInfo(&buf, "fminmax_cash(%s)", str);
+				break;
+			case KAGG_FINAL__FMINMAX_DATE:
+				appendStringInfo(&buf, "fminmax_date(%s)", str);
+				break;
+			case KAGG_FINAL__FMINMAX_TIME:
+				appendStringInfo(&buf, "fminmax_time(%s)", str);
+				break;
+			case KAGG_FINAL__FMINMAX_TIMESTAMP:
+				appendStringInfo(&buf, "fminmax_ts(%s)", str);
+				break;
+			case KAGG_FINAL__FMINMAX_TIMESTAMPTZ:
+				appendStringInfo(&buf, "fminmax_tstz(%s)", str);
+				break;
+			case KAGG_FINAL__FSUM_INT:
+				appendStringInfo(&buf, "fsum_int(%s)", str);
+				break;
+			case KAGG_FINAL__FSUM_INT64:
+				appendStringInfo(&buf, "fsum_int64(%s)", str);
+				break;
+			case KAGG_FINAL__FSUM_FP32:
+				appendStringInfo(&buf, "fsum_fp32(%s)", str);
+				break;
+			case KAGG_FINAL__FSUM_FP64:
+				appendStringInfo(&buf, "fsum_fp64(%s)", str);
+				break;
+			case KAGG_FINAL__FSUM_NUMERIC:
+				appendStringInfo(&buf, "fsum_num(%s)", str);
+				break;
+			case KAGG_FINAL__FSUM_CASH:
+				appendStringInfo(&buf, "fsum_cash(%s)", str);
+				break;
+			case KAGG_FINAL__FAVG_INT:
+				appendStringInfo(&buf, "fsum_int(%s)", str);
+				break;
+			case KAGG_FINAL__FAVG_INT64:
+				appendStringInfo(&buf, "fsum_int64(%s)", str);
+				break;
+			case KAGG_FINAL__FAVG_FP64:
+				appendStringInfo(&buf, "fsum_fp64(%s)", str);
+				break;
+			case KAGG_FINAL__FAVG_NUMERIC:
+				appendStringInfo(&buf, "fsum_num(%s)", str);
+				break;
+			case KAGG_FINAL__FSTDDEV_SAMP:
+				appendStringInfo(&buf, "fstddev_samp(%s)", str);
+				break;
+			case KAGG_FINAL__FSTDDEV_SAMPF:
+				appendStringInfo(&buf, "fstddev_sampf(%s)", str);
+				break;
+			case KAGG_FINAL__FSTDDEV_POP:
+				appendStringInfo(&buf, "fstddev_pop(%s)", str);
+				break;
+			case KAGG_FINAL__FSTDDEV_POPF:
+				appendStringInfo(&buf, "fstddev_popf(%s)", str);
+				break;
+			case KAGG_FINAL__FVAR_SAMP:
+				appendStringInfo(&buf, "fvar_samp(%s)", str);
+				break;
+			case KAGG_FINAL__FVAR_SAMPF:
+				appendStringInfo(&buf, "fvar_sampf(%s)", str);
+				break;
+			case KAGG_FINAL__FVAR_POP:
+				appendStringInfo(&buf, "fvar_pop(%s)", str);
+				break;
+			case KAGG_FINAL__FVAR_POPF:
+				appendStringInfo(&buf, "fvar_popf(%s)", str);
+				break;
+			case KAGG_FINAL__FCORR:
+				appendStringInfo(&buf, "fcorr(%s)", str);
+				break;
+			case KAGG_FINAL__FCOVAR_SAMP:
+				appendStringInfo(&buf, "fcovar_samp(%s)", str);
+				break;
+			case KAGG_FINAL__FCOVAR_POP:
+				appendStringInfo(&buf, "fcovar_pop(%s)", str);
+				break;
+			case KAGG_FINAL__FREGR_AVGX:
+				appendStringInfo(&buf, "fregr_avgx(%s)", str);
+				break;
+			case KAGG_FINAL__FREGR_AVGY:
+				appendStringInfo(&buf, "fregr_avgy(%s)", str);
+				break;
+			case KAGG_FINAL__FREGR_COUNT:
+				appendStringInfo(&buf, "fregr_count(%s)", str);
+				break;
+			case KAGG_FINAL__FREGR_INTERCEPT:
+				appendStringInfo(&buf, "fregr_intercept(%s)", str);
+				break;
+			case KAGG_FINAL__FREGR_R2:
+				appendStringInfo(&buf, "fregr_r2(%s)", str);
+				break;
+			case KAGG_FINAL__FREGR_SLOPE:
+				appendStringInfo(&buf, "fregr_slope(%s)", str);
+				break;
+			case KAGG_FINAL__FREGR_SXX:
+				appendStringInfo(&buf, "fregr_sxx(%s)", str);
+				break;
+			case KAGG_FINAL__FREGR_SXY:
+				appendStringInfo(&buf, "fregr_sxy(%s)", str);
+				break;
+			case KAGG_FINAL__FREGR_SYY:
+				appendStringInfo(&buf, "fregr_syy(%s)", str);
+				break;
+			default:
+				elog(ERROR, "Bug? unknown final function code (%d)", fcode);
+				break;
+		}
+	}
+	ExplainPropertyText("SELECT-INTO Direct", buf.data, es);
 	pfree(buf.data);
 }
 
@@ -2640,23 +3025,50 @@ pgstromExplainTaskState(CustomScanState *node,
 	 */
 	if (pp_info->gpusort_keys_expr != NIL)
 	{
+		ListCell   *lc1, *lc2;
+		int64_t		final_nfiltered = -1;
+
 		resetStringInfo(&buf);
-		foreach (lc, pp_info->gpusort_keys_expr)
+		forboth (lc1, pp_info->gpusort_keys_expr,
+				 lc2, pp_info->gpusort_keys_kind)
 		{
-			Node   *sortkey = lfirst(lc);
+			Node   *sortkey = lfirst(lc1);
+			int		kind = lfirst_int(lc2);
 
 			if (buf.len > 0)
 				appendStringInfoString(&buf, ", ");
 			str = deparse_expression(sortkey, dcontext, es->verbose, true);
-			appendStringInfoString(&buf, str);
+			if (!es->verbose)
+				appendStringInfoString(&buf, str);
+			else
+				appendStringInfo(&buf, "%s %s NULLS %s", str,
+								 (kind & KSORT_KEY_ATTR__ORDER_ASC) != 0 ? "ASC" : "DESC",
+								 (kind & KSORT_KEY_ATTR__NULLS_FIRST) != 0 ? "FIRST" : "LAST");
 		}
 		if (pgstrom_explain_developer_mode)
 			appendStringInfo(&buf, " [htup-margin: %d]",
 							 pp_info->gpusort_htup_margin);
+		if (es->analyze && ps_state)
+		{
+			pgstromSharedInnerState *istate = &ps_state->inners[pp_info->num_rels - 1];
+
+			appendStringInfo(&buf, " [buffer reconstruction: %umsec, GPU-sorting %umsec]",
+							 pg_atomic_read_u32(&ps_state->final_reconstruction_msec),
+							 pg_atomic_read_u32(&ps_state->final_sorting_msec));
+			final_nfiltered = (pg_atomic_read_u64(&istate->stats_join) +
+							   pg_atomic_read_u64(&istate->stats_roj) -
+							   pg_atomic_read_u64(&ps_state->final_nitems));
+		}
 		ExplainPropertyText("GPU-Sort keys", buf.data, es);
+		
 		if (pp_info->gpusort_limit_count > 0)
-			ExplainPropertyInteger("GPU-Sort Limit", NULL,
-								   pp_info->gpusort_limit_count, es);
+		{
+			resetStringInfo(&buf);
+			appendStringInfo(&buf, "%d", pp_info->gpusort_limit_count);
+			if (final_nfiltered >= 0)
+				appendStringInfo(&buf, ", %ld rows filtered", final_nfiltered);
+			ExplainPropertyText("GPU-Sort Limit", buf.data, es);
+		}
 		if (pp_info->window_rank_func)
 		{
 			int		keycnt = 0;
@@ -2707,10 +3119,17 @@ pgstromExplainTaskState(CustomScanState *node,
 				needs_comma = true;
 			}
 			appendStringInfo(&buf, ") < %u", pp_info->window_rank_limit);
-
+			if (final_nfiltered >= 0)
+				appendStringInfo(&buf, " [%ld rows filtered by window function]",
+								 final_nfiltered);
 			ExplainPropertyText("Window-Rank Filter", buf.data, es);
 		}
 	}
+
+	/*
+	 * SELECT INTO direct mode
+	 */
+	pgstromExplainSelectIntoDirect(pts, dcontext, es);
 
 	/*
 	 * Dump the XPU code (only if verbose)
@@ -2774,6 +3193,7 @@ __xpuClientOpenSession(pgstromTaskState *pts,
 					   const XpuCommand *session,
 					   pgsocket sockfd)
 {
+	pgstromSharedState *ps_state = pts->ps_state;
 	XpuConnection  *conn;
 	XpuCommand	   *resp;
 	int				rv;
@@ -2793,6 +3213,7 @@ __xpuClientOpenSession(pgstromTaskState *pts,
 	conn->num_ready_cmds = 0;
 	dlist_init(&conn->ready_cmds_list);
 	dlist_init(&conn->active_cmds_list);
+	conn->scan_repeat_sync_control = &ps_state->scan_repeat_sync_control;
 	dlist_push_tail(&xpu_connections_list, &conn->chain);
 	pts->conn = conn;
 

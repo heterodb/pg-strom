@@ -87,6 +87,7 @@ typedef struct
 	uint32_t		smx_row_count;	/* current position of outer relation */
 	int				depth;		/* depth when last kernel is suspended */
 	int				scan_done;	/* smallest depth that may produce more tuples */
+	bool			stats_written; /* statistics are already written */
 	/* only KDS_FORMAT_BLOCK */
 	uint32_t		block_id;	/* BLOCK format needs to keep htuples on the */
 	uint32_t		lp_count;	/* lp_items array once, to pull maximum GPU */
@@ -154,7 +155,7 @@ typedef struct {
 		uint32_t	nitems_roj;		/* nitems of RIGHT-OUTER-JOIN tuples */
 		uint32_t	nitems_gist;	/* nitems picked up by GiST index */
 		uint32_t	nitems_out;		/* nitems after this depth */
-	} stats[1];		/* 'n_rels' items */
+	} stats[1]		__attribute__ ((aligned(8)));		/* 'n_rels' items */
 	/*
 	 * variable length fields
 	 * +-----------------------------------+  <---  __KERN_GPUTASK_WARP_OFFSET()
@@ -240,13 +241,6 @@ execGpuScanLoadSource(kern_context *kcxt,
 					  const kern_expression *kexp_scan_quals,
 					  const kern_expression *kexp_move_vars,
 					  char     *dst_kvecs_buffer);
-EXTERN_FUNCTION(int)
-execGpuJoinProjection(kern_context *kcxt,
-					  kern_warp_context *wp,
-					  int n_rels,
-					  kern_data_store *kds_dst,
-					  kern_expression *kexp_projection,
-					  char *kvars_addr_wp);
 EXTERN_FUNCTION(int)
 execGpuPreAggGroupBy(kern_context *kcxt,
 					 kern_warp_context *wp,

@@ -9,8 +9,8 @@ include ../Makefile.common
 STROM_OBJS = main.o githash.o extra.o codegen.o executor.o fallback.o \
              gpu_device.o gpu_service.o dpu_device.o \
              gpu_scan.o gpu_join.o gpu_preagg.o \
-             relscan.o brin.o gist.o gpu_cache.o \
-             arrow_fdw.o arrow_nodes.o \
+             relscan.o brin.o gist.o gpu_cache.o select_into.o \
+             arrow_fdw.o arrow_meta.o \
              misc.o float2.o tinyint.o aggfuncs.o
 GENERATED-HEADERS = gpu_devattrs.h githash.c
 STROM_HEADERS = arrow_defs.h arrow_ipc.h float2.h
@@ -67,6 +67,21 @@ PGSTROM_FLAGS += -DWITH_FATBIN=1
 endif
 
 #
+# libarrow / libparquet
+#
+HAS_LIBARROW = $(shell pkgconf --exists arrow>/dev/null 2>&1   && echo -n yes)
+HAS_PARQUET  = $(shell pkgconf --exists parquet>/dev/null 2>&1 && echo -n yes)
+ifeq ($(HAS_LIBARROW),yes)
+PGSTROM_FLAGS += -DHAS_LIBARROW=1 $(shell pkgconf --cflags arrow)
+ifeq ($(HAS_PARQUET),yes)
+PGSTROM_FLAGS += -DHAS_PARQUET=1  $(shell pkgconf --cflags parquet)
+SHLIB_LINK += $(shell pkgconf --libs parquet)
+else
+SHLIB_LINK += $(shell pkgconf --libs arrow)
+endif
+endif
+
+#
 # Definition of PG-Strom Extension
 #
 MODULE_big = pg_strom
@@ -79,7 +94,7 @@ EXTRA_CLEAN = $(CUDA_OBJS) $(GENERATED-HEADERS) \
               $(shell ls -d pgstrom-gpucode-V*-*.fatbin 2>/dev/null)
 EXTENSION = pg_strom
 PG_CPPFLAGS := $(PGSTROM_FLAGS) -I $(CUDA_IPATH)
-SHLIB_LINK := -L $(CUDA_LPATH) -lcuda
+SHLIB_LINK += -L $(CUDA_LPATH) -lcuda
 
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)

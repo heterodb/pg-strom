@@ -109,12 +109,12 @@ SELECT id, v->0 ival, v->1 fval, v->2 bval, v->3 sval_1, v->4 sval_2
   INTO test01g
   FROM rt_jsonb_a
  WHERE id > 0;
-                                QUERY PLAN                                
---------------------------------------------------------------------------
+                                                                QUERY PLAN                                                                
+------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_jsonb_temp.rt_jsonb_a
    Output: id, ((v -> 0)), ((v -> 1)), ((v -> 2)), ((v -> 3)), ((v -> 4))
-   GPU Projection: id, (v -> 0), (v -> 1), (v -> 2), (v -> 3), (v -> 4)
-   GPU Scan Quals: (id > 0) [rows: 5000 -> 5000]
+   GPU Projection: rt_jsonb_a.id, (rt_jsonb_a.v -> 0), (rt_jsonb_a.v -> 1), (rt_jsonb_a.v -> 2), (rt_jsonb_a.v -> 3), (rt_jsonb_a.v -> 4)
+   GPU Scan Quals: (rt_jsonb_a.id > 0)
 (4 rows)
 
 SELECT id, v->0 ival, v->1 fval, v->2 bval, v->3 sval_1, v->4 sval_2
@@ -143,12 +143,12 @@ SELECT id, v->>0 ival, v->>1 fval, v->>2 bval, v->>3 sval_1, v->>4 sval_2
   INTO test02g
   FROM rt_jsonb_a
  WHERE id > 0;
-                                  QUERY PLAN                                   
--------------------------------------------------------------------------------
+                                                                  QUERY PLAN                                                                   
+-----------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_jsonb_temp.rt_jsonb_a
    Output: id, ((v ->> 0)), ((v ->> 1)), ((v ->> 2)), ((v ->> 3)), ((v ->> 4))
-   GPU Projection: id, (v ->> 0), (v ->> 1), (v ->> 2), (v ->> 3), (v ->> 4)
-   GPU Scan Quals: (id > 0) [rows: 5000 -> 5000]
+   GPU Projection: rt_jsonb_a.id, (rt_jsonb_a.v ->> 0), (rt_jsonb_a.v ->> 1), (rt_jsonb_a.v ->> 2), (rt_jsonb_a.v ->> 3), (rt_jsonb_a.v ->> 4)
+   GPU Scan Quals: (rt_jsonb_a.id > 0)
 (4 rows)
 
 SELECT id, v->>0 ival, v->>1 fval, v->>2 bval, v->>3 sval_1, v->>4 sval_2
@@ -179,12 +179,12 @@ SELECT id, (v)->'ival' ival, (v)->'fval' fval, (v)->'bval',
   INTO test03g
   FROM rt_jsonb_o
  WHERE id > 0;
-                                                             QUERY PLAN                                                              
--------------------------------------------------------------------------------------------------------------------------------------
+                                                                                             QUERY PLAN                                                                                              
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_jsonb_temp.rt_jsonb_o
    Output: id, ((v -> 'ival'::text)), ((v -> 'fval'::text)), ((v -> 'bval'::text)), ((v -> 'sval_1'::text)), ((v -> 'sval_2'::text))
-   GPU Projection: id, (v -> 'ival'::text), (v -> 'fval'::text), (v -> 'bval'::text), (v -> 'sval_1'::text), (v -> 'sval_2'::text)
-   GPU Scan Quals: (id > 0) [rows: 6000 -> 5999]
+   GPU Projection: rt_jsonb_o.id, (rt_jsonb_o.v -> 'ival'::text), (rt_jsonb_o.v -> 'fval'::text), (rt_jsonb_o.v -> 'bval'::text), (rt_jsonb_o.v -> 'sval_1'::text), (rt_jsonb_o.v -> 'sval_2'::text)
+   GPU Scan Quals: (rt_jsonb_o.id > 0)
 (4 rows)
 
 SELECT id, (v)->'ival' ival, (v)->'fval' fval, (v)->'bval',
@@ -216,12 +216,12 @@ SELECT id, (v)->>'ival' ival, (v)->>'fval' fval, (v)->>'bval' bval,
   INTO test04g
   FROM rt_jsonb_o
  WHERE id > 0;
-                                                                QUERY PLAN                                                                
-------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                QUERY PLAN                                                                                                
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_jsonb_temp.rt_jsonb_o
    Output: id, ((v ->> 'ival'::text)), ((v ->> 'fval'::text)), ((v ->> 'bval'::text)), ((v ->> 'sval_1'::text)), ((v ->> 'sval_2'::text))
-   GPU Projection: id, (v ->> 'ival'::text), (v ->> 'fval'::text), (v ->> 'bval'::text), (v ->> 'sval_1'::text), (v ->> 'sval_2'::text)
-   GPU Scan Quals: (id > 0) [rows: 6000 -> 5999]
+   GPU Projection: rt_jsonb_o.id, (rt_jsonb_o.v ->> 'ival'::text), (rt_jsonb_o.v ->> 'fval'::text), (rt_jsonb_o.v ->> 'bval'::text), (rt_jsonb_o.v ->> 'sval_1'::text), (rt_jsonb_o.v ->> 'sval_2'::text)
+   GPU Scan Quals: (rt_jsonb_o.id > 0)
 (4 rows)
 
 SELECT id, (v)->>'ival' ival, (v)->>'fval' fval, (v)->>'bval' bval,
@@ -253,12 +253,12 @@ SELECT id, (v)->'comp' comp
   INTO test05g
   FROM rt_jsonb_c
  WHERE id > 0;
-                          QUERY PLAN                          
---------------------------------------------------------------
+                           QUERY PLAN                            
+-----------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_jsonb_temp.rt_jsonb_c
    Output: id, ((v -> 'comp'::text))
-   GPU Projection: id, (v -> 'comp'::text)
-   GPU Scan Quals: (id > 0) [rows: 6000 -> 5999]
+   GPU Projection: rt_jsonb_c.id, (rt_jsonb_c.v -> 'comp'::text)
+   GPU Scan Quals: (rt_jsonb_c.id > 0)
 (4 rows)
 
 SELECT id, (v)->'comp' comp
@@ -295,8 +295,8 @@ SELECT id, ((v)->>'num1')::numeric + ((v)->'comp'->>'ival')::numeric v1,
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_jsonb_temp.rt_jsonb_o
    Output: id, ((((v ->> 'num1'::text))::numeric + (((v -> 'comp'::text) ->> 'ival'::text))::numeric)), ((((v ->> 'num2'::text))::numeric + (((v -> 'comp'::text) ->> 'fval'::text))::numeric)), ("substring"((v ->> 'str1'::text), 2, 16) || "substring"(((v -> 'comp'::text) ->> 'sval_1'::text), 2, 16)), ("substring"(((v -> 'comp'::text) ->> 'sval_2'::text), 2, 16))
-   GPU Projection: id, (((v ->> 'num1'::text))::numeric + (((v -> 'comp'::text) ->> 'ival'::text))::numeric), (((v ->> 'num2'::text))::numeric + (((v -> 'comp'::text) ->> 'fval'::text))::numeric), v, "substring"(((v -> 'comp'::text) ->> 'sval_2'::text), 2, 16)
-   GPU Scan Quals: (id > 0) [rows: 6000 -> 5999]
+   GPU Projection: rt_jsonb_o.id, (((rt_jsonb_o.v ->> 'num1'::text))::numeric + (((rt_jsonb_o.v -> 'comp'::text) ->> 'ival'::text))::numeric), (((rt_jsonb_o.v ->> 'num2'::text))::numeric + (((rt_jsonb_o.v -> 'comp'::text) ->> 'fval'::text))::numeric), rt_jsonb_o.v, "substring"(((rt_jsonb_o.v -> 'comp'::text) ->> 'sval_2'::text), 2, 16)
+   GPU Scan Quals: (rt_jsonb_o.id > 0)
 (4 rows)
 
 SELECT id, ((v)->>'num1')::numeric + ((v)->'comp'->>'ival')::numeric v1,
