@@ -2797,6 +2797,11 @@ typedef struct dlist_head
 {
 	dlist_node		head;
 } dlist_head;
+typedef struct dlist_iter
+{
+	dlist_node *cur;
+	dlist_node *end;
+} dlist_iter;
 #endif
 
 typedef struct

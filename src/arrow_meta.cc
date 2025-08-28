@@ -3096,7 +3096,7 @@ __readParquetRowGroupMetadata(ArrowMessage *rbatch_message,
 	rbatch->_num_nodes = rg_meta->num_columns();
 	rbatch->nodes = (ArrowFieldNode *)
 		__palloc(sizeof(ArrowFieldNode) * rbatch->_num_nodes);
-	rbatch->_num_nodes = rg_meta->num_columns();
+	rbatch->_num_buffers = rbatch->_num_nodes;
 	rbatch->buffers = (ArrowBuffer *)
 		__palloc(sizeof(ArrowBuffer) * rbatch->_num_nodes);
 	for (int j=0; j < rg_meta->num_columns(); j++)

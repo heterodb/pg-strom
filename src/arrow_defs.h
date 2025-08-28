@@ -766,6 +766,25 @@ __EXTERN void	copyArrowNode(ArrowNode *dest, const ArrowNode *src);
 __EXTERN bool	equalArrowNode(const ArrowNode *a, const ArrowNode *b);
 __EXTERN int	readArrowFileInfo(const char *filename, ArrowFileInfo *af_info);
 
+/*
+ * parquet_read.cc (C++ interface)
+ */
+struct kern_data_store;
+
+__EXTERN struct kern_data_store *
+parquetReadOneRowGroup(const char *filename,
+					   int row_group_index,
+					   const struct kern_data_store *kds_head,
+					   int num_columns,
+					   int *columns_index,
+					   void *(*malloc_callback)(void *malloc_private,
+												size_t malloc_size),
+					   void *malloc_private);
 #undef __EXTERN
+#ifndef ARROW_ALIGN
+#define ALIGNOF_ARROW		64
+#define ARROW_ALIGN(x)		(((uintptr_t)(x)+ALIGNOF_ARROW-1) & ~((uintptr_t)(ALIGNOF_ARROW-1)))
+#endif	//ARROW_ALIGN
+
 #endif		/* !__CUDACC__ */
 #endif		/* _ARROW_DEFS_H_ */
