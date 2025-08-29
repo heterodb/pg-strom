@@ -103,6 +103,20 @@ typedef enum
 	ArrowMessageHeader__SparseTensor	= 5,
 } ArrowMessageHeader;
 
+static inline const char *
+ArrowMessageHeaderAsCString(ArrowMessageHeader code)
+{
+	switch (code)
+	{
+		case ArrowMessageHeader__Schema:			return "Schema";
+		case ArrowMessageHeader__DictionaryBatch:	return "DictionaryBatch";
+		case ArrowMessageHeader__RecordBatch:		return "RecordBatch";
+		case ArrowMessageHeader__Tensor:			return "Tensor";
+		case ArrowMessageHeader__SparseTensor:		return "SparseTensor";
+		default:									return "???";
+	}
+}
+
 /*
  * Endianness : short
  */
@@ -150,6 +164,36 @@ typedef enum
 	ArrowType__LargeUtf8		= 20,
 	ArrowType__LargeList		= 21,
 } ArrowTypeTag;
+
+static inline const char *
+ArrowTypeTagAsCString(ArrowTypeTag code)
+{
+	switch (code)
+	{
+		case ArrowType__Null:			return "Null";
+		case ArrowType__Int:			return "Int";
+		case ArrowType__FloatingPoint:	return "FloatingPoint";
+		case ArrowType__Binary:			return "Binary";
+		case ArrowType__Utf8:			return "Utf8";
+		case ArrowType__Bool:			return "Bool";
+		case ArrowType__Decimal:		return "Decimal";
+		case ArrowType__Date:			return "Date";
+		case ArrowType__Time:			return "Time";
+		case ArrowType__Timestamp:		return "Timestamp";
+		case ArrowType__Interval:		return "Interval";
+		case ArrowType__List:			return "List";
+		case ArrowType__Struct:			return "Struct";
+		case ArrowType__Union:			return "Union";
+		case ArrowType__FixedSizeBinary:return "FixedSizeBinary";
+		case ArrowType__FixedSizeList:	return "FixedSizeList";
+		case ArrowType__Map:			return "Map";
+		case ArrowType__Duration:		return "Duration";
+		case ArrowType__LargeBinary:	return "LargeBinary";
+		case ArrowType__LargeUtf8:		return "LargeUtf8";
+		case ArrowType__LargeList:		return "LargeList";
+		default:						return "???";
+	}
+}
 
 /*
  * DateUnit : short
@@ -300,6 +344,48 @@ typedef enum
 	ArrowNodeTag__Footer,
 	ArrowNodeTag__BodyCompression,
 } ArrowNodeTag;
+
+static inline const char *
+ArrowNodeTagAsCString(ArrowNodeTag code)
+{
+	switch (code)
+	{
+		case ArrowNodeTag__Null:			return "Null";
+		case ArrowNodeTag__Int:				return "Int";
+		case ArrowNodeTag__FloatingPoint:	return "FloatingPoint";
+		case ArrowNodeTag__Utf8:			return "Utf8";
+		case ArrowNodeTag__Binary:			return "Binary";
+		case ArrowNodeTag__Bool:			return "Bool";
+		case ArrowNodeTag__Decimal:			return "Decimal";
+		case ArrowNodeTag__Date:			return "Date";
+		case ArrowNodeTag__Time:			return "Time";
+		case ArrowNodeTag__Timestamp:		return "Timestamp";
+		case ArrowNodeTag__Interval:		return "Interval";
+		case ArrowNodeTag__List:			return "List";
+		case ArrowNodeTag__Struct:			return "Struct";
+		case ArrowNodeTag__Union:			return "Union";
+		case ArrowNodeTag__FixedSizeBinary:	return "FixedSizeBinary";
+		case ArrowNodeTag__FixedSizeList:	return "FixedSizeList";
+		case ArrowNodeTag__Map:				return "Map";
+		case ArrowNodeTag__Duration:		return "Duration";
+		case ArrowNodeTag__LargeBinary:		return "LargeBinary";
+		case ArrowNodeTag__LargeUtf8:		return "LargeUtf8";
+		case ArrowNodeTag__LargeList:		return "LargeList";
+		case ArrowNodeTag__KeyValue:		return "KeyValue";
+		case ArrowNodeTag__DictionaryEncoding: return "DictionaryEncoding";
+		case ArrowNodeTag__Field:			return "Field";
+		case ArrowNodeTag__FieldNode:		return "FieldNode";
+		case ArrowNodeTag__Buffer:			return "Buffer";
+		case ArrowNodeTag__Schema:			return "Schema";
+		case ArrowNodeTag__RecordBatch:		return "RecordBatch";
+		case ArrowNodeTag__DictionaryBatch:	return "DictionaryBatch";
+		case ArrowNodeTag__Message:			return "Message";
+		case ArrowNodeTag__Block:			return "Block";
+		case ArrowNodeTag__Footer:			return "Footer";
+		case ArrowNodeTag__BodyCompression:	return "BodyCompression";
+		default:							return "???";
+	}
+}
 
 /*
  * ArrowTypeOptions - our own definition
@@ -781,10 +867,11 @@ parquetReadOneRowGroup(const char *filename,
 												size_t malloc_size),
 					   void *malloc_private);
 #undef __EXTERN
+
 #ifndef ARROW_ALIGN
 #define ALIGNOF_ARROW		64
 #define ARROW_ALIGN(x)		(((uintptr_t)(x)+ALIGNOF_ARROW-1) & ~((uintptr_t)(ALIGNOF_ARROW-1)))
-#endif	//ARROW_ALIGN
+#endif
 
 #endif		/* !__CUDACC__ */
 #endif		/* _ARROW_DEFS_H_ */

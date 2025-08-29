@@ -139,6 +139,8 @@ ParquetFileHashTableWorker(void)
 						dlist_delete(&entry->hash_chain);
 					dlist_delete(&entry->lru_chain);
 					entry->arrow_filp->Close();
+					__Elog("parquet::arrow::FileReader('%s') was closed",
+						   entry->filename.c_str());
 					delete(entry);
 				}
 				pq_hash_lock[hindex].unlock();
@@ -196,14 +198,16 @@ __checkParquetFileColumn(const std::shared_ptr<arrow::Field> &field,
 		case arrow::Type::type::NA:
 			if (cmeta->attopts.tag == ArrowType__Null)
 				return true;
-			__Elog("not compatible Null column[%d] TYPE=%d",
-				   kds_col_index, (int)cmeta->attopts.tag);
+			__Elog("not compatible Null column[%d] TYPE=%s",
+				   kds_col_index,
+				   ArrowTypeTagAsCString(cmeta->attopts.tag));
 			break;
 		case arrow::Type::type::BOOL:
 			if (cmeta->attopts.tag == ArrowType__Bool)
 				return true;
-			__Elog("not compatible Bool column[%d] TYPE=%d",
-				   kds_col_index, (int)cmeta->attopts.tag);
+			__Elog("not compatible Bool column[%d] TYPE=%s",
+				   kds_col_index,
+				   ArrowTypeTagAsCString(cmeta->attopts.tag));
 			break;
 		case arrow::Type::type::INT8:
 		case arrow::Type::type::INT16:
@@ -213,8 +217,9 @@ __checkParquetFileColumn(const std::shared_ptr<arrow::Field> &field,
 				cmeta->attopts.integer.bitWidth == dtype->bit_width() &&
 				cmeta->attopts.integer.is_signed)
 				return true;
-			__Elog("not compatible Int column[%d] TYPE=%d bitWidth=%d is_signed=%s",
-				   kds_col_index, (int)cmeta->attopts.tag,
+			__Elog("not compatible Int column[%d] TYPE=%s bitWidth=%d is_signed=%s",
+				   kds_col_index,
+				   ArrowTypeTagAsCString(cmeta->attopts.tag),
 				   cmeta->attopts.integer.bitWidth,
 				   cmeta->attopts.integer.is_signed ? "true" : "false");
 			break;
@@ -226,8 +231,9 @@ __checkParquetFileColumn(const std::shared_ptr<arrow::Field> &field,
 				cmeta->attopts.integer.bitWidth == dtype->bit_width() &&
 				!cmeta->attopts.integer.is_signed)
 				return true;
-			__Elog("not compatible Uint column[%d] TYPE=%d bitWidth=%d is_signed=%s",
-				   kds_col_index, (int)cmeta->attopts.tag,
+			__Elog("not compatible Uint column[%d] TYPE=%s bitWidth=%d is_signed=%s",
+				   kds_col_index,
+				   ArrowTypeTagAsCString(cmeta->attopts.tag),
 				   cmeta->attopts.integer.bitWidth,
 				   cmeta->attopts.integer.is_signed ? "true" : "false");
 			break;
@@ -235,25 +241,28 @@ __checkParquetFileColumn(const std::shared_ptr<arrow::Field> &field,
 			if (cmeta->attopts.tag == ArrowType__FloatingPoint &&
 				cmeta->attopts.floating_point.precision == ArrowPrecision__Half)
 				return true;
-			__Elog("not compatible HalfFloat column[%d] TYPE=%d precision=%d",
-				   kds_col_index, (int)cmeta->attopts.tag,
-				   cmeta->attopts.floating_point.precision);
+			__Elog("not compatible HalfFloat column[%d] TYPE=%s precision=%s",
+				   kds_col_index,
+				   ArrowTypeTagAsCString(cmeta->attopts.tag),
+				   ArrowPrecisionAsCString(cmeta->attopts.floating_point.precision));
 			break;
 		case arrow::Type::type::FLOAT:
 			if (cmeta->attopts.tag == ArrowType__FloatingPoint &&
 				cmeta->attopts.floating_point.precision == ArrowPrecision__Single)
 				return true;
-			__Elog("not compatible Float column[%d] TYPE=%d precision=%d",
-				   kds_col_index, (int)cmeta->attopts.tag,
-				   cmeta->attopts.floating_point.precision);
+			__Elog("not compatible Float column[%d] TYPE=%s precision=%s",
+				   kds_col_index,
+				   ArrowTypeTagAsCString(cmeta->attopts.tag),
+				   ArrowPrecisionAsCString(cmeta->attopts.floating_point.precision));
 			break;
 		case arrow::Type::type::DOUBLE:
 			if (cmeta->attopts.tag == ArrowType__FloatingPoint &&
 				cmeta->attopts.floating_point.precision == ArrowPrecision__Double)
 				return true;
-			__Elog("not compatible Double column[%d] TYPE=%d precision=%d",
-				   kds_col_index, (int)cmeta->attopts.tag,
-				   cmeta->attopts.floating_point.precision);
+			__Elog("not compatible Double column[%d] TYPE=%s precision=%s",
+				   kds_col_index,
+				   ArrowTypeTagAsCString(cmeta->attopts.tag),
+				   ArrowPrecisionAsCString(cmeta->attopts.floating_point.precision));
 			break;
 		case arrow::Type::type::DECIMAL128:
 			if (cmeta->attopts.tag == ArrowType__Decimal &&
@@ -263,48 +272,55 @@ __checkParquetFileColumn(const std::shared_ptr<arrow::Field> &field,
 				if (cmeta->attopts.decimal.precision == __dtype->precision() &&
 					cmeta->attopts.decimal.scale     == __dtype->scale())
 					return true;
-				__Elog("not compatible Decimal column[%d] TYPE=%d precision=%d scale=%d",
-					   kds_col_index, (int)cmeta->attopts.tag,
+				__Elog("not compatible Decimal column[%d] TYPE=%s precision=%d scale=%d",
+					   kds_col_index,
+					   ArrowTypeTagAsCString(cmeta->attopts.tag),
 					   cmeta->attopts.decimal.precision,
 					   cmeta->attopts.decimal.scale);
 			}
 			else
 			{
-				__Elog("not compatible Decimal column[%d] TYPE=%d bitWidth=%d",
-					   kds_col_index, (int)cmeta->attopts.tag,
+				__Elog("not compatible Decimal column[%d] TYPE=%s bitWidth=%d",
+					   kds_col_index,
+					   ArrowTypeTagAsCString(cmeta->attopts.tag),
 					   cmeta->attopts.decimal.bitWidth);
 			}
 			break;
 		case arrow::Type::type::STRING:
 			if (cmeta->attopts.tag == ArrowType__Utf8)
 				return true;
-			__Elog("not compatible Utf8 column[%d] TYPE=%d",
-				   kds_col_index, (int)cmeta->attopts.tag);
+			__Elog("not compatible Utf8 column[%d] TYPE=%s",
+				   kds_col_index,
+				   ArrowTypeTagAsCString(cmeta->attopts.tag));
 			break;
 		case arrow::Type::type::LARGE_STRING:
 			if (cmeta->attopts.tag == ArrowType__LargeUtf8)
 				return true;
-			__Elog("not compatible LargeUtf8 column[%d] TYPE=%d",
-				   kds_col_index, (int)cmeta->attopts.tag);
+			__Elog("not compatible LargeUtf8 column[%d] TYPE=%s",
+				   kds_col_index,
+				   ArrowTypeTagAsCString(cmeta->attopts.tag));
 			break;
 		case arrow::Type::type::BINARY:
 			if (cmeta->attopts.tag == ArrowType__Binary)
 				return true;
-			__Elog("not compatible Binary column[%d] TYPE=%d",
-				   kds_col_index, (int)cmeta->attopts.tag);
+			__Elog("not compatible Binary column[%d] TYPE=%s",
+				   kds_col_index,
+				   ArrowTypeTagAsCString(cmeta->attopts.tag));
 			break;
 		case arrow::Type::type::LARGE_BINARY:
 			if (cmeta->attopts.tag == ArrowType__LargeBinary)
 				return true;
-			__Elog("not compatible LargeBinary column[%d] TYPE=%d",
-				   kds_col_index, (int)cmeta->attopts.tag);
+			__Elog("not compatible LargeBinary column[%d] TYPE=%s",
+				   kds_col_index,
+				   ArrowTypeTagAsCString(cmeta->attopts.tag));
 			break;
 		case arrow::Type::type::FIXED_SIZE_BINARY:
 			if (cmeta->attopts.tag == ArrowType__FixedSizeBinary &&
 				cmeta->attopts.fixed_size_binary.byteWidth == dtype->byte_width())
 				return true;
-			__Elog("not compatible FixedSizeBinary column[%d] TYPE=%d byteWidth=%d",
-				   kds_col_index, (int)cmeta->attopts.tag,
+			__Elog("not compatible FixedSizeBinary column[%d] TYPE=%s byteWidth=%d",
+				   kds_col_index,
+				   ArrowTypeTagAsCString(cmeta->attopts.tag),
 				   cmeta->attopts.fixed_size_binary.byteWidth);
 			break;
 		case arrow::Type::type::DATE32:
@@ -321,14 +337,16 @@ __checkParquetFileColumn(const std::shared_ptr<arrow::Field> &field,
 					default:
 						break;
 				}
-				__Elog("not compatible Time column[%d] TYPE=%d unit=%d",
-					   kds_col_index, (int)cmeta->attopts.tag,
-					   (int)cmeta->attopts.date.unit);
+				__Elog("not compatible Time column[%d] TYPE=%s unit=%s",
+					   kds_col_index,
+					   ArrowTypeTagAsCString(cmeta->attopts.tag),
+					   ArrowDateUnitAsCString(cmeta->attopts.date.unit));
 			}
 			else
 			{
-				__Elog("not compatible Date column[%d] TYPE=%d",
-					   kds_col_index, (int)cmeta->attopts.tag);
+				__Elog("not compatible Date column[%d] TYPE=%s",
+					   kds_col_index,
+					   ArrowTypeTagAsCString(cmeta->attopts.tag));
 			}
 			break;
 		case arrow::Type::type::TIMESTAMP:
@@ -348,14 +366,16 @@ __checkParquetFileColumn(const std::shared_ptr<arrow::Field> &field,
 					default:
 						break;
 				}
-				__Elog("not compatible Timestamp column[%d] TYPE=%d unit=%d",
-					   kds_col_index, (int)cmeta->attopts.tag,
-					   (int)cmeta->attopts.timestamp.unit);
+				__Elog("not compatible Timestamp column[%d] TYPE=%s unit=%s",
+					   kds_col_index,
+					   ArrowTypeTagAsCString(cmeta->attopts.tag),
+					   ArrowTimeUnitAsCString(cmeta->attopts.timestamp.unit));
 			}
 			else
 			{
-				__Elog("not compatible Timestamp column[%d] TYPE=%d",
-					   kds_col_index, (int)cmeta->attopts.tag);
+				__Elog("not compatible Timestamp column[%d] TYPE=%s",
+					   kds_col_index,
+					   ArrowTypeTagAsCString(cmeta->attopts.tag));
 			}
 			break;
 		case arrow::Type::type::TIME32:
@@ -376,30 +396,34 @@ __checkParquetFileColumn(const std::shared_ptr<arrow::Field> &field,
 					default:
 						break;
 				}
-				__Elog("not compatible Time column[%d] TYPE=%d unit=%d",
-					   kds_col_index, (int)cmeta->attopts.tag,
-					   (int)cmeta->attopts.time.unit);
+				__Elog("not compatible Time column[%d] TYPE=%s unit=%s",
+					   kds_col_index,
+					   ArrowTypeTagAsCString(cmeta->attopts.tag),
+					   ArrowTimeUnitAsCString(cmeta->attopts.time.unit));
 			}
 			else
 			{
-				__Elog("not compatible Time column[%d] TYPE=%d",
-					   kds_col_index, (int)cmeta->attopts.tag);
+				__Elog("not compatible Time column[%d] TYPE=%s",
+					   kds_col_index,
+					   ArrowTypeTagAsCString(cmeta->attopts.tag));
 			}
 			break;
 		case arrow::Type::type::INTERVAL_MONTHS:
 			if (cmeta->attopts.tag == ArrowType__Interval &&
 				cmeta->attopts.unitsz == sizeof(int32_t))
 				return true;
-			__Elog("not compatible Interval column[%d] TYPE=%d unitsz=%d",
-				   kds_col_index, (int)cmeta->attopts.tag,
+			__Elog("not compatible Interval column[%d] TYPE=%s unitsz=%d",
+				   kds_col_index,
+				   ArrowTypeTagAsCString(cmeta->attopts.tag),
 				   cmeta->attopts.unitsz);
 			break;
 		case arrow::Type::type::INTERVAL_DAY_TIME:
 			if (cmeta->attopts.tag == ArrowType__Interval &&
 				cmeta->attopts.unitsz == sizeof(int64_t))
 				return true;
-			__Elog("not compatible Interval column[%d] TYPE=%d unitsz=%d",
-				   kds_col_index, (int)cmeta->attopts.tag,
+			__Elog("not compatible Interval column[%d] TYPE=%s unitsz=%d",
+				   kds_col_index,
+				   ArrowTypeTagAsCString(cmeta->attopts.tag),
 				   cmeta->attopts.unitsz);
 			break;
 		case arrow::Type::type::LIST:
@@ -416,8 +440,9 @@ __checkParquetFileColumn(const std::shared_ptr<arrow::Field> &field,
 			}
 			else
 			{
-				__Elog("not compatible List column[%d] TYPE=%d",
-					   kds_col_index, (int)cmeta->attopts.tag);
+				__Elog("not compatible List column[%d] TYPE=%s",
+					   kds_col_index,
+					   ArrowTypeTagAsCString(cmeta->attopts.tag));
 			}
 			break;
 		case arrow::Type::type::STRUCT:
@@ -441,13 +466,15 @@ __checkParquetFileColumn(const std::shared_ptr<arrow::Field> &field,
 			}
 			else
 			{
-				__Elog("not compatible Struct column[%d] TYPE=%d",
-					   kds_col_index, (int)cmeta->attopts.tag);
+				__Elog("not compatible Struct column[%d] TYPE=%s",
+					   kds_col_index,
+					   ArrowTypeTagAsCString(cmeta->attopts.tag));
 			}
 			break;
 		default:
-			__Elog("not compatible Unknown column[%d] TYPE=%d",
-				   kds_col_index, (int)cmeta->attopts.tag);
+			__Elog("not compatible Unknown column[%d] TYPE=%s",
+				   kds_col_index,
+				   ArrowTypeTagAsCString(cmeta->attopts.tag));
 			break;
 	}
 	return false;
@@ -606,11 +633,9 @@ parquetReadArrowTable(std::shared_ptr<arrow::Table> table,
 	/*
 	 * estimate the buffer length
 	 */
-	for (int j : referenced)
+	for (int k=0; k < table->num_columns(); k++)
 	{
-		if (j < 0 || j >= table->num_columns())
-			return NULL;
-		auto	column = table->column(j);
+		auto	column = table->column(k);
 		for (const auto &chunk : column->chunks())
 		{
 			auto	data = chunk->data();
@@ -640,12 +665,11 @@ parquetReadArrowTable(std::shared_ptr<arrow::Table> table,
 	 * fillup the buffer
 	 */
 	memcpy(kds, kds_head, curr_pos);
-	for (int j : referenced)
+	for (int k=0; k < table->num_columns(); k++)
 	{
-		assert(j >= 0 && j < table->num_columns());
-		auto	column = table->column(j);
-		auto	cmeta = &kds->colmeta[j];
-		
+		auto	column = table->column(k);
+		auto	cmeta = &kds->colmeta[referenced[k]];
+
 		for (const auto &chunk : column->chunks())
 		{
 			auto	data = chunk->data();
@@ -747,9 +771,9 @@ parquetReadOneRowGroup(const char *filename,
 		auto	status = entry->file_reader->ReadRowGroup(row_group_index,
 														  referenced,
 														  &table);
-		std::cout << "ReadRowGroup is [" << status.ok() << "]\n";
 		if (status.ok())
 		{
+		std::cerr << "ReadRowGroup [" << status.ok() << "]\n";
 			kds = parquetReadArrowTable(table, referenced,
 										kds_head,
 										malloc_callback,
@@ -760,15 +784,12 @@ parquetReadOneRowGroup(const char *filename,
 			__Elog("failed on parquet::arrow::FileReader::ReadRowGroup");
 		}
 	}
-	else
-	{
-		std::cout << "Schema is not compatible\n";
-	}
 	// put the hash table entry
 	pq_hash_lock[hindex].lock();
 	assert(entry->refcnt > 0);
 	entry->refcnt--;
 	pq_hash_lock[hindex].unlock();
 
+	std::cerr << "KDS is [" << kds << "]\n";
 	return kds;
 }
