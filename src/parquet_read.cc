@@ -773,7 +773,6 @@ parquetReadOneRowGroup(const char *filename,
 														  &table);
 		if (status.ok())
 		{
-		std::cerr << "ReadRowGroup [" << status.ok() << "]\n";
 			kds = parquetReadArrowTable(table, referenced,
 										kds_head,
 										malloc_callback,
@@ -789,7 +788,5 @@ parquetReadOneRowGroup(const char *filename,
 	assert(entry->refcnt > 0);
 	entry->refcnt--;
 	pq_hash_lock[hindex].unlock();
-
-	std::cerr << "KDS is [" << kds << "]\n";
 	return kds;
 }
