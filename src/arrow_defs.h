@@ -304,6 +304,54 @@ ArrowUnionModeAsCString(ArrowUnionMode mode)
 }
 
 /*
+ * CompressionType : byte
+ */
+typedef enum		ArrowCompressionType
+{
+	ArrowCompressionType__UNCOMPRESSED,
+    ArrowCompressionType__SNAPPY,
+    ArrowCompressionType__GZIP,
+    ArrowCompressionType__BROTLI,
+    ArrowCompressionType__ZSTD,
+    ArrowCompressionType__LZ4,
+    ArrowCompressionType__LZ4_FRAME,
+    ArrowCompressionType__LZO,
+    ArrowCompressionType__BZ2,
+    ArrowCompressionType__LZ4_HADOOP,
+	ArrowCompressionType__UNKNOWN,
+} ArrowCompressionType;
+
+static inline const char *
+ArrowCompressionTypeAsCString(ArrowCompressionType codec)
+{
+	switch (codec)
+	{
+		case ArrowCompressionType__UNCOMPRESSED:
+			return "UNCOMPRESSED";
+		case ArrowCompressionType__SNAPPY:
+			return "SNAPPY";
+		case ArrowCompressionType__GZIP:
+			return "GZIP";
+		case ArrowCompressionType__BROTLI:
+			return "BROTLI";
+		case ArrowCompressionType__ZSTD:
+			return "ZSTD";
+		case ArrowCompressionType__LZ4:
+			return "LZ4";
+		case ArrowCompressionType__LZ4_FRAME:
+			return "LZ4_FRAME";
+		case ArrowCompressionType__LZO:
+			return "LZO";
+		case ArrowCompressionType__BZ2:
+			return "BZ2";
+		case ArrowCompressionType__LZ4_HADOOP:
+			return "LZ4_HADOOP";
+		default:
+			return "???";
+	}
+}
+
+/*
  * ArrowNodeTag
  */
 typedef enum
@@ -651,11 +699,28 @@ typedef struct		ArrowField
 	ArrowKeyValue  *custom_metadata;
 	int				_num_custom_metadata;
 #ifdef HAS_PARQUET
-	/* valid only parquet format (used for dumpArrowNode in JSON) */
-	const char	   *parquet_extra_attrs;
-	int				_parquet_extra_attrs_len;
+	/* Parquet specific properties*/
+	struct {
+		int16_t		max_definition_level;
+		int16_t		max_repetition_level;
+		int16_t		physical_type;		/* parquet::Type */
+		int16_t		converted_type;		/* parquet::ConvertedType */
+		int16_t		logical_type;		/* parquet::LogicalType::Type */
+		int16_t		logical_time_unit;	/* parquet::LogicalType::TimeUnit */
+		int16_t		logical_decimal_precision;
+		int16_t		logical_decimal_scale;
+	} parquet;
 #endif
 } ArrowField;
+
+#ifdef HAS_PARQUET
+typedef struct		ParquetEncodingStats
+{
+	int16_t		page_type;	/* parquet::PageType::type */
+	int16_t		encoding;	/* parquet::Encoding::type */
+	int			count;
+} ParquetEncodingStats;
+#endif
 
 /*
  * FieldNode
@@ -675,31 +740,28 @@ typedef struct		ArrowFieldNode
 	const char	   *stat_max_value;
 	int				_stat_max_value_len;
 #ifdef HAS_PARQUET
-	/* valid only parquet format (used for dumpArrowNode in JSON) */
-	const char	   *parquet_extra_attrs;
-	int				_parquet_extra_attrs_len;
+	/*
+	 * In Parquet format, each RowGroup (equivalent to a RecordBatch in Arrow) has
+	 * attached to it the same number of ColumnChunks as the number of fields.
+	 * Unlike the Arrow format, an indefinite number of buffers are attached depending
+	 * on the data type.
+	 * Therefore, when reading Parquet format, there are no buffers in the RecordBatch,
+	 * and various ColumnChunk metadata is stored in the FieldNode.
+	 */
+	struct {
+		int64_t		total_compressed_size;
+		int64_t		total_uncompressed_size;
+		int64_t		data_page_offset;
+		int64_t		dictionary_page_offset;
+		int64_t		index_page_offset;
+		ArrowCompressionType compression_type;
+		int			_num_encodings;
+		int16_t	   *encodings;
+		int			_num_encoding_stats;
+		ParquetEncodingStats *encoding_stats;
+	} parquet;
 #endif
 } ArrowFieldNode;
-
-/*
- * CompressionType : byte
- */
-typedef enum		ArrowCompressionType
-{
-	ArrowCompressionType__LZ4_FRAME = 0,
-	ArrowCompressionType__ZSTD = 1,
-} ArrowCompressionType;
-
-static inline const char *
-ArrowCompressionTypeAsCString(ArrowCompressionType codec)
-{
-	switch (codec)
-	{
-		case ArrowCompressionType__LZ4_FRAME:	return "LZ4_FRAME";
-		case ArrowCompressionType__ZSTD:		return "ZSTD";
-		default:								return "???";
-	}
-}
 
 /*
  * BodyCompressionMethod : byte
@@ -757,7 +819,7 @@ typedef struct		ArrowRecordBatch
 	/* vector of FieldNode */
 	ArrowFieldNode  *nodes;
 	int				_num_nodes;
-	/* vector of Buffer */
+	/* vector of Buffer (only Arrow files) */
 	ArrowBuffer	    *buffers;
 	int				_num_buffers;
 	/* optional compression of the message body */
@@ -867,11 +929,6 @@ parquetReadOneRowGroup(const char *filename,
 												size_t malloc_size),
 					   void *malloc_private);
 #undef __EXTERN
-
-#ifndef ARROW_ALIGN
-#define ALIGNOF_ARROW		64
-#define ARROW_ALIGN(x)		(((uintptr_t)(x)+ALIGNOF_ARROW-1) & ~((uintptr_t)(ALIGNOF_ARROW-1)))
-#endif
 
 #endif		/* !__CUDACC__ */
 #endif		/* _ARROW_DEFS_H_ */

@@ -2014,12 +2014,8 @@ __buildRecordBatchFieldState(setupRecordBatchContext *con,
 		 * positions and self-reported sizes, so there is no point in checking
 		 * consistency like when reading Arrow.
 		 */
-		if (depth == 0)
-		{
-			buffer_curr = con->buffer_curr++;
-			if (buffer_curr >= con->buffer_tail)
-				elog(ERROR, "RecordBatch has less buffers than expected");
-		}
+		Assert(con->buffer_curr == NULL &&
+			   con->buffer_tail == NULL);
 	}
 	else
 	{

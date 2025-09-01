@@ -190,6 +190,9 @@ typedef unsigned int		Oid;
 #endif	/* POSTGRES_H */
 #define __MAXALIGNED__		__attribute__((aligned(MAXIMUM_ALIGNOF)));
 #define MAXIMUM_ALIGNOF_SHIFT 3
+/* Arrow buffer alignent */
+#define ALIGNOF_ARROW		64
+#define ARROW_ALIGN(len)	TYPEALIGN(ALIGNOF_ARROW,len)
 
 #ifndef HAS_GPUMASK_TYPEDEF
 #define HAS_GPUMASK_TYPEDEF
