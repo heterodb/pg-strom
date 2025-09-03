@@ -695,11 +695,16 @@ struct kern_colmeta {
 	 * PostgreSQL types, it can have variation of data accuracy in time
 	 * related data types, or precision in decimal data type.
 	 *
+	 * 'field_index' points the physical column index on the source
+	 * arrow/parquet files. If negative, column does not exist on the
+	 * file, it means virtual column.
+	 *
 	 * 'virtual_offset' is not zero if this is a virtual column.
 	 * if negative, it means NULL. Elsewhere, it points contents of the
 	 * virtual column in the format of PostgreSQL datum.
 	 */
 	ArrowTypeOptions attopts;
+	int				field_index;
 	int64_t			virtual_offset;
 	uint64_t		nullmap_offset;
 	uint64_t		nullmap_length;
@@ -715,6 +720,7 @@ typedef struct kern_colmeta		kern_colmeta;
 #define KDS_FORMAT_BLOCK		'b'		/* raw blocks for direct loading */
 #define KDS_FORMAT_COLUMN		'c'		/* columnar based storage format */
 #define KDS_FORMAT_ARROW		'a'		/* apache arrow format */
+#define KDS_FORMAT_PARQUET		'p'		/* apache parquet format */
 #define KDS_FORMAT_FALLBACK		'f'		/* CPU-fallback buffer */
 
 struct kern_data_store {
@@ -735,8 +741,10 @@ struct kern_data_store {
 	uint32_t		block_nloaded;	/* number of blocks already loaded by CPU */
 	/* only KDS_FORMAT_COLUMN */
 	uint32_t		column_nrooms;	/* = max_num_rows parameter */
-	/* only KDS_FORMAT_ARROW */
+	/* only KDS_FORMAT_ARROW/PARQUET */
 	uint32_t		arrow_virtual_usage; /* usage of virtual column buffer */
+	/* only KDS_FORMAT_PARQUET */
+	uint32_t		parquet_row_group;	/* row-group id to be loaded */
 	/* column definition */
 	uint32_t		nr_colmeta;	/* number of colmeta[] array elements;
 								 * maybe, >= ncols, if any composite types */

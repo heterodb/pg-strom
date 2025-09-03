@@ -3516,18 +3516,30 @@ __arrowKdsAssignVirtualColumns(kern_data_store *kds,
 
 static kern_data_store *
 __arrowFdwSetupKDSHead(Relation relation,
+					   Bitmapset *referenced,
 					   RecordBatchState *rb_state,
 					   StringInfo chunk_buffer)
 {
 	ArrowFileState *af_state = rb_state->af_state;
 	TupleDesc	tupdesc = RelationGetDescr(relation);
 	size_t		head_off = chunk_buffer->len;
+	char		kds_format = KDS_FORMAT_ARROW;
 	kern_data_store *kds;
+
+	/*
+	 * KDS buffer is marked as KDS_FORMAT_PARQUET if source file is
+	 * apache parquet format; that does not support GPU-Direct SQL,
+	 * and needs to load data chunks by CPU (libarrow/libparquet).
+	 * Thus, it shall not have i/o vector, but filename and row-group
+	 * index.
+	 */
+	if (ArrowMetadataVersionIsParquet(af_state->version))
+		kds_format = KDS_FORMAT_PARQUET;
 
 	/* setup KDS and I/O-vector */
 	enlargeStringInfo(chunk_buffer, estimate_kern_data_store(tupdesc));
 	kds = (kern_data_store *)(chunk_buffer->data + head_off);
-	setup_kern_data_store(kds, tupdesc, 0, KDS_FORMAT_ARROW);
+	setup_kern_data_store(kds, tupdesc, 0, kds_format);
 	kds->nitems = rb_state->rb_nitems;
 	kds->table_oid = RelationGetRelid(relation);
 	chunk_buffer->len += KDS_HEAD_LENGTH(kds);
@@ -3539,10 +3551,16 @@ __arrowFdwSetupKDSHead(Relation relation,
 
 		if (field_index >= 0)
 		{
+			int		k = j - FirstLowInvalidHeapAttributeNumber;
+
 			Assert(field_index < rb_state->nfields);
 			__arrowKdsAssignAttrOptions(kds,
 										&kds->colmeta[j],
 										&rb_state->fields[field_index]);
+			if (bms_is_member(k+1, referenced))
+				kds->colmeta[j].field_index = field_index;
+			else
+				kds->colmeta[j].field_index = -1;	/* not referenced */
 		}
 		else if (field_index == __FIELD_INDEX_SPECIAL__VIRTUAL_PER_FILE)
 		{
@@ -3557,6 +3575,7 @@ __arrowFdwSetupKDSHead(Relation relation,
 			 * so kds must be refreshed.
 			 */
 			kds = (kern_data_store *)(chunk_buffer->data + head_off);
+			kds->colmeta[j].field_index = -1;		/* no physical field */
 		}
 		else if (field_index == __FIELD_INDEX_SPECIAL__VIRTUAL_PER_RECORD_BATCH)
 		{
@@ -3567,12 +3586,14 @@ __arrowFdwSetupKDSHead(Relation relation,
 										   chunk_buffer);
 			/* see the comment above */
 			kds = (kern_data_store *)(chunk_buffer->data + head_off);
+			kds->colmeta[j].field_index = -1;		/* no physical field */
 		}
 		else
 		{
 			elog(ERROR, "Bug? unexpected field-index (%d)", field_index);
 		}
 	}
+	kds->parquet_row_group = rb_state->rb_index;
 	kds->arrow_virtual_usage = (chunk_buffer->len
 								- (head_off + KDS_HEAD_LENGTH(kds)));
 	return kds;
@@ -3585,6 +3606,7 @@ arrowFdwLoadRecordBatch(Relation relation,
 						StringInfo chunk_buffer)
 {
 	kern_data_store *kds = __arrowFdwSetupKDSHead(relation,
+												  referenced,
 												  rb_state,
 												  chunk_buffer);
 	return arrowFdwSetupIOvector(rb_state, referenced, kds);
@@ -3691,33 +3713,20 @@ parquetFillupRowGroup(Relation relation,
 					  RecordBatchState *rb_state,
 					  StringInfo chunk_buffer)
 {
-	int		ncols = RelationGetNumberOfAttributes(relation);
-	int		j, nrefs = 0;
-	int	   *colnums = alloca(sizeof(int) * ncols);
 	kern_data_store *kds_head;
 	kern_data_store *kds;
 
-	/* todo: should be prepared at __arrowFdwExecInit() */
-	for (j = bms_next_member(referenced, -1);
-		 j > 0;
-		 j = bms_next_member(referenced, j))
-	{
-		int		k = j + FirstLowInvalidHeapAttributeNumber;
-
-		if (k > 0)
-			colnums[nrefs++] = k-1;
-	}
 	/* prepare the KDS buffer */
 	resetStringInfo(chunk_buffer);
-	__arrowFdwSetupKDSHead(relation, rb_state, chunk_buffer);
+	__arrowFdwSetupKDSHead(relation, referenced, rb_state, chunk_buffer);
 	kds_head = alloca(chunk_buffer->len);
 	memcpy(kds_head, chunk_buffer->data, chunk_buffer->len);
+	Assert(kds_head->format == KDS_FORMAT_PARQUET);
 
 	/* read a row-group of the Parquet file */
 	resetStringInfo(chunk_buffer);
 	kds = parquetReadOneRowGroup(rb_state->af_state->filename,
-								 rb_state->rb_index,
-								 kds_head, nrefs, colnums,
+								 kds_head,
 								 __parquetFillupAllocBuffer, chunk_buffer);
 	if (!kds)
 		elog(ERROR, "Unable to load row-group %d of the parquet file '%s'",
@@ -4861,10 +4870,10 @@ pgstromScanChunkArrowFdw(pgstromTaskState *pts,
 	StringInfo		chunk_buffer = &arrow_state->chunk_buffer;
 	RecordBatchState *rb_state;
 	ArrowFileState *af_state;
-	strom_io_vector *iovec;
 	XpuCommand *xcmd;
-	uint32_t	kds_src_offset;
-	uint32_t	kds_src_iovec;
+	kern_data_store *kds_src;
+	uint32_t	kds_src_offset = 0;
+	uint32_t	kds_src_iovec = 0;
 	uint32_t	kds_src_pathname;
 	int32_t		scan_repeat_id;
 
@@ -4883,17 +4892,27 @@ pgstromScanChunkArrowFdw(pgstromTaskState *pts,
 	appendBinaryStringInfo(chunk_buffer,
 						   pts->xcmd_buf.data,
 						   pts->xcmd_buf.len);
-	/* kds_src + iovec */
+	/* kds_src (arrow or parquet) */
 	kds_src_offset = chunk_buffer->len;
-	iovec = arrowFdwLoadRecordBatch(pts->css.ss.ss_currentRelation,
-									arrow_state->referenced,
-									rb_state,
-									chunk_buffer);
-	kds_src_iovec = __appendBinaryStringInfo(chunk_buffer,
-											 iovec,
-											 offsetof(strom_io_vector,
-													  ioc[iovec->nr_chunks]));
-	/* arrow filename */
+	kds_src = __arrowFdwSetupKDSHead(pts->css.ss.ss_currentRelation,
+									 arrow_state->referenced,
+									 rb_state,
+									 chunk_buffer);
+	if (kds_src->format == KDS_FORMAT_ARROW)
+	{
+		/* related i/o vector */
+		strom_io_vector *iovec = arrowFdwSetupIOvector(rb_state,
+													   arrow_state->referenced,
+													   kds_src);
+		size_t		iovec_sz = offsetof(strom_io_vector, ioc[iovec->nr_chunks]);
+		kds_src_iovec = __appendBinaryStringInfo(chunk_buffer,
+												 iovec, iovec_sz);
+	}
+	else
+	{
+		Assert(kds_src->format == KDS_FORMAT_PARQUET);
+	}
+	/* arrow/parquet filename */
 	kds_src_pathname = chunk_buffer->len;
 	if (!pts->ds_entry)
 		appendStringInfoString(chunk_buffer, af_state->filename);
@@ -5294,10 +5313,12 @@ RecordBatchAcquireSampleRows(Relation relation,
 	/* ANALYZE needs to fetch all the attributes */
 	referenced = bms_make_singleton(-FirstLowInvalidHeapAttributeNumber);
 	initStringInfo(&buffer);
-	kds = arrowFdwFillupRecordBatch(relation,
-									referenced,
-									rb_state,
-									&buffer);
+	/* Load an example KDS buffer */
+	if (ArrowMetadataVersionIsParquet(rb_state->af_state->version))
+		kds = parquetFillupRowGroup(relation, referenced, rb_state, &buffer);
+	else
+		kds = arrowFdwFillupRecordBatch(relation, referenced, rb_state, &buffer);
+	/* Extract the tuple */
 	values = alloca(sizeof(Datum) * tupdesc->natts);
 	isnull = alloca(sizeof(bool)  * tupdesc->natts);
 	for (count = 0; count < nsamples; count++)

@@ -921,10 +921,7 @@ struct kern_data_store;
 
 __EXTERN struct kern_data_store *
 parquetReadOneRowGroup(const char *filename,
-					   int row_group_index,
 					   const struct kern_data_store *kds_head,
-					   int num_columns,
-					   int *columns_index,
 					   void *(*malloc_callback)(void *malloc_private,
 												size_t malloc_size),
 					   void *malloc_private);

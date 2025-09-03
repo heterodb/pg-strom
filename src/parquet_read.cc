@@ -485,8 +485,7 @@ __checkParquetFileColumn(const std::shared_ptr<arrow::Field> &field,
  */
 static bool
 checkParquetFileSchema(parquetFileEntry *entry,
-					   const kern_data_store *kds_head,
-					   std::vector<int> &referenced)
+					   const kern_data_store *kds_head)
 {
 	std::shared_ptr<arrow::Schema> arrow_schema;
 	// Get Schema definition
@@ -496,20 +495,27 @@ checkParquetFileSchema(parquetFileEntry *entry,
 			return false;
 	}
 	// Type compatibility checks (only referenced attributes)
-	for (auto cell = referenced.begin(); cell != referenced.end(); cell++)
+	for (int j=0; j < kds_head->ncols; j++)
 	{
-		int		j = (*cell);
+		int		field_index = kds_head->colmeta[j].field_index;
 
-		if (j >= 0 && j < arrow_schema->num_fields() && j < kds_head->ncols)
+		if (field_index < 0)
+			continue;
+		if (field_index < arrow_schema->num_fields())
 		{
-			if (!__checkParquetFileColumn(arrow_schema->field(j), kds_head, j))
+			auto	field = arrow_schema->field(field_index);
+
+			if (!__checkParquetFileColumn(field, kds_head, j))
+			{
+				__Elog("field_index = %d not compatible", field_index);
 				return false;	/* not compatible */
+			}
 		}
 		else
 		{
-			__Elog("not compatible Schema: column index %d out of range (%d or %d)",
-				   j, kds_head->ncols, arrow_schema->num_fields());
-			return false;	/* out of range */
+			__Elog("not compatible Schema: field index %d out of range [%d]",
+				   field_index, arrow_schema->num_fields());
+			return false;	/* out of range*/
 		}
 	}
 	return true;
@@ -633,6 +639,7 @@ parquetReadArrowTable(std::shared_ptr<arrow::Table> table,
 	/*
 	 * estimate the buffer length
 	 */
+	assert(kds_head->format == KDS_FORMAT_PARQUET);
 	for (int k=0; k < table->num_columns(); k++)
 	{
 		auto	column = table->column(k);
@@ -706,6 +713,8 @@ parquetReadArrowTable(std::shared_ptr<arrow::Table> table,
 			}
 		}
 	}
+	kds->format = KDS_FORMAT_ARROW;
+
 	return kds;
 }
 
@@ -717,19 +726,16 @@ parquetReadArrowTable(std::shared_ptr<arrow::Table> table,
  */
 kern_data_store *
 parquetReadOneRowGroup(const char *filename,
-					   int row_group_index,
 					   const kern_data_store *kds_head,
-					   int num_columns,
-					   int *columns_index,
 					   void *(*malloc_callback)(void *malloc_private,
 												size_t malloc_size),
 					   void *malloc_private)
 {
-	uint32_t			hash, hindex;
-	struct stat			stat_buf;
-	parquetFileEntry   *entry;
-	kern_data_store	   *kds = NULL;
-	std::vector<int>	referenced(columns_index, columns_index + num_columns);
+	uint32_t	row_group_index = kds_head->parquet_row_group;
+	uint32_t	hash, hindex;
+	struct stat	stat_buf;
+	parquetFileEntry *entry;
+	kern_data_store	*kds = NULL;
 
 	/* initialize the parquet file hash table, only once */
 	__tryInitializeParquetFileHashTable();
@@ -762,12 +768,19 @@ parquetReadOneRowGroup(const char *filename,
 	pq_hash_lru_lock.unlock();
 
 	// quick check of schema compatibility
-	if (checkParquetFileSchema(entry,
-							   kds_head,
-							   referenced) &&
+	if (checkParquetFileSchema(entry, kds_head) &&
 		row_group_index < entry->file_reader->num_row_groups())
 	{
 		std::shared_ptr<arrow::Table> table;
+		std::vector<int>	referenced;
+
+		for (int j=0; j < kds_head->ncols; j++)
+		{
+			auto	cmeta = &kds_head->colmeta[j];
+
+			if (cmeta->field_index >= 0)
+				referenced.push_back(cmeta->field_index);
+		}
 		auto	status = entry->file_reader->ReadRowGroup(row_group_index,
 														  referenced,
 														  &table);
