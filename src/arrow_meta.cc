@@ -35,8 +35,6 @@
 #define ARROW_SIGNATURE_SZ		(sizeof(ARROW_SIGNATURE)-1)
 #define PARQUET_SIGNATURE		"PAR1"
 #define PARQUET_SIGNATURE_SZ	(sizeof(PARQUET_SIGNATURE)-1)
-#define Max(a,b)		((a) > (b) ? (a) : (b))
-#define Min(a,b)		((a) < (b) ? (a) : (b))
 
 /*
  * Error Reporting
@@ -45,6 +43,9 @@
 extern "C" {
 #include "postgres.h"
 }
+#else
+#define Max(a,b)		((a) > (b) ? (a) : (b))
+#define Min(a,b)		((a) < (b) ? (a) : (b))
 #endif
 #define Elog(fmt,...)								\
 	do {											\

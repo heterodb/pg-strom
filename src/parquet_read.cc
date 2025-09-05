@@ -14,6 +14,7 @@
 #include <mutex>
 #include <arrow/api.h>
 #include <arrow/io/api.h>
+#include <arrow/filesystem/api.h>
 #include <arrow/type.h>
 #include <parquet/arrow/reader.h>
 #include <parquet/api/reader.h>
@@ -37,8 +38,8 @@ struct parquetFileEntry
 	struct timeval lru_tv;
 	struct stat	stat_buf;
 	std::string	filename;
-	std::shared_ptr<arrow::io::ReadableFile>	arrow_filp;
-	std::unique_ptr<parquet::arrow::FileReader> file_reader;
+	std::shared_ptr<arrow::io::RandomAccessFile> random_access_file;
+	std::unique_ptr<parquet::arrow::FileReader>	parquet_file_reader;
 };
 using parquetFileEntry	= struct parquetFileEntry;
 
@@ -138,9 +139,15 @@ ParquetFileHashTableWorker(void)
 					if (entry->hash_chain.prev && entry->hash_chain.next)
 						dlist_delete(&entry->hash_chain);
 					dlist_delete(&entry->lru_chain);
-					entry->arrow_filp->Close();
-					__Elog("parquet::arrow::FileReader('%s') was closed",
-						   entry->filename.c_str());
+
+					auto status = entry->random_access_file->Close();
+					if (!status.ok())
+						__Elog("failed on Close('%s') of parquet::arrow::FileReader: %s",
+							   entry->filename.c_str(),
+							   status.ToString().c_str());
+					else
+						__Elog("parquet::arrow::FileReader('%s') was closed",
+							   entry->filename.c_str());
 					delete(entry);
 				}
 				pq_hash_lock[hindex].unlock();
@@ -490,7 +497,7 @@ checkParquetFileSchema(parquetFileEntry *entry,
 	std::shared_ptr<arrow::Schema> arrow_schema;
 	// Get Schema definition
 	{
-		auto status = entry->file_reader->GetSchema(&arrow_schema);
+		auto status = entry->parquet_file_reader->GetSchema(&arrow_schema);
 		if (!status.ok())
 			return false;
 	}
@@ -575,50 +582,48 @@ lookupParquetFileEntry(const char *filename, struct stat *stat_buf, uint32_t has
 static parquetFileEntry *
 buildParquetFileEntry(const char *filename, struct stat *stat_buf, uint32_t hash)
 {
-	auto entry = new parquetFileEntry();
+	parquetFileEntry   *entry;
+
+	entry = new(std::nothrow) parquetFileEntry();
+	if (!entry)
+	{
+		__Elog("out of memory");
+		return NULL;
+	}
 	entry->hash = hash;
-    entry->refcnt = 1;
+	entry->refcnt = 1;
 	entry->filename = std::string(filename);
 	memcpy(&entry->stat_buf, stat_buf, sizeof(struct stat));
+	/* open a RandomAccessFile */
+	{
+		arrow::fs::LocalFileSystem fs;
 
-	// open the parquet file
-	{
-		auto rv = arrow::io::ReadableFile::Open(entry->filename);
+		auto rv = fs.OpenInputFile(entry->filename);
 		if (!rv.ok())
 		{
-			__Elog("failed on arrow::io::ReadableFile::Open('%s')", filename);
-			goto error;
+			__Elog("unable to open '%s' using arrow::fs::LocalFileSystem: %s",
+				   entry->filename.c_str(),
+				   rv.status().ToString().c_str());
+            delete(entry);
+            return NULL;
 		}
-		entry->arrow_filp = rv.ValueOrDie();
+		entry->random_access_file = *rv;;
 	}
-#if PARQUET_VERSION_MAJOR >= 19
+	/* Open a Parquet File Reader */
 	{
-		auto rv = parquet::arrow::OpenFile(entry->arrow_filp);
+		auto rv = parquet::arrow::OpenFile(entry->random_access_file,
+										   arrow::default_memory_pool());
 		if (!rv.ok())
 		{
-			__Elog("failed on parquet::arrow::OpenFile('%s')", filename);
-			goto error;
+			__Elog("failed on parquet::arrow::OpenFile('%s'): %s",
+				   entry->filename.c_str(),
+				   rv.status().ToString().c_str());
+			delete(entry);
+			return NULL;
 		}
-		entry->file_reader = std::move(rv.ValueOrDie());
+		entry->parquet_file_reader = std::move(*rv);
 	}
-#else
-	{
-		/* OpenFile() API was changed at Arrow v19 (issue #44784) */
-		auto rv = parquet::arrow::OpenFile(entry->arrow_filp,
-										   ::arrow::default_memory_pool(),
-										   &entry->file_reader);
-		if (!rv.ok())
-		{
-			__Elog("failed on parquet::arrow::OpenFile('%s')", filename);
-			goto error;
-		}
-	}
-#endif
 	return entry;
-error:
-	if (entry)
-		delete(entry);
-	return NULL;
 }
 
 /*
@@ -769,7 +774,7 @@ parquetReadOneRowGroup(const char *filename,
 
 	// quick check of schema compatibility
 	if (checkParquetFileSchema(entry, kds_head) &&
-		row_group_index < entry->file_reader->num_row_groups())
+		row_group_index < entry->parquet_file_reader->num_row_groups())
 	{
 		std::shared_ptr<arrow::Table> table;
 		std::vector<int>	referenced;
@@ -781,9 +786,9 @@ parquetReadOneRowGroup(const char *filename,
 			if (cmeta->field_index >= 0)
 				referenced.push_back(cmeta->field_index);
 		}
-		auto	status = entry->file_reader->ReadRowGroup(row_group_index,
-														  referenced,
-														  &table);
+		auto status = entry->parquet_file_reader->ReadRowGroup(row_group_index,
+															   referenced,
+															   &table);
 		if (status.ok())
 		{
 			kds = parquetReadArrowTable(table, referenced,
