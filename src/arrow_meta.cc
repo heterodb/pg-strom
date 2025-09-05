@@ -10,13 +10,13 @@
  * it under the terms of the PostgreSQL License.
  */
 #include "arrow_defs.h"
-#include <arrow/api.h>			/* dnf install libarrow-devel */
+#include <arrow/api.h>			/* dnf install arrow-devel, or apt install libarrow-dev */
 #include <arrow/io/api.h>
 #include <arrow/ipc/api.h>
 #include <arrow/ipc/reader.h>
 #include <arrow/util/decimal.h>
 #ifdef HAS_PARQUET
-#include <parquet/arrow/schema.h>
+#include <parquet/arrow/schema.h>	/* dnf install parquet-devel, or apt install libparquet-dev */
 #include <parquet/metadata.h>
 #include <parquet/statistics.h>
 #include <parquet/file_reader.h>

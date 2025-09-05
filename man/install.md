@@ -910,6 +910,28 @@ You can install PostgreSQL as following steps:
 !!! Note
     On the Red Hat Enterprise Linux, the package name `postgresql` conflicts to the default one at the distribution, thus, unable to install the packages from PGDG. So, disable the `postgresql` module by the distribution, using `dnf -y module disable postgresql`.
 }
+@ja:##libarrow/libparquetのインストール
+@en:##libarrow/libparquet Installation
+
+@ja{
+PG-Strom v6.1以降では、ビルドとインストールに`libarrow`と`libparquet`が必要です。
+
+Linuxディストリビューションの提供しているパッケージは古い場合があるため、[開発者コミュニティのガイダンス](https://arrow.apache.org/install/)にしたがって、`arrow-devel`パッケージと`parquet-devel`パッケージをインストールしてください。
+
+ここまでのインストール手順との重複を除く、最小インストールに必要なステップは以下の通りです。
+}
+@en{
+PG-Strom v6.1 and later requires `libarrow` and `libparquet` for building and installation.
+
+Since the packages provided by the Linux distribution may be outdated, please follow the [developer community guidance](https://arrow.apache.org/install/) and install the `arrow-devel` and `parquet-devel` packages.
+
+The steps required for a minimal installation, excluding any overlaps with the installation steps above, are as follows.
+}
+```
+$ sudo dnf install -y https://packages.apache.org/artifactory/arrow/almalinux/$(cut -d: -f5 /etc/system-release-cpe | cut -d. -f1)/apache-arrow-release-latest.rpm
+$ sudo dnf install -y arrow-devel
+$ sudo dnf install -y parquet-devel
+```
 
 @ja:## PG-Stromのインストール
 @en:## PG-Strom Installation

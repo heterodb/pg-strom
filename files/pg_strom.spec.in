@@ -42,6 +42,8 @@ BuildRequires: postgresql15-devel
 Requires: postgresql15-server
 Requires: heterodb-extra >= %{__heterodb_extra_min_version}
 Requires: %{name}
+Requires: arrow-devel
+Requires: parquet-devel
 Requires(post): %{_sbindir}/update-alternatives
 Requires(postun): %{_sbindir}/update-alternatives
 
@@ -67,6 +69,8 @@ BuildRequires: postgresql16-devel
 Requires: postgresql16-server
 Requires: heterodb-extra >= %{__heterodb_extra_min_version}
 Requires: %{name}
+Requires: arrow-devel
+Requires: parquet-devel
 Requires(post): %{_sbindir}/update-alternatives
 Requires(postun): %{_sbindir}/update-alternatives
 
@@ -92,6 +96,8 @@ BuildRequires: postgresql17-devel
 Requires: postgresql17-server
 Requires: heterodb-extra >= %{__heterodb_extra_min_version}
 Requires: %{name}
+Requires: arrow-devel
+Requires: parquet-devel
 Requires(post): %{_sbindir}/update-alternatives
 Requires(postun): %{_sbindir}/update-alternatives
 
