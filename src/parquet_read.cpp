@@ -27,6 +27,17 @@
 #include "arrow_defs.h"
 
 /*
+ * Error Reporting
+ */
+#ifdef PGSTROM_DEBUG_BUILD
+#define __Elog(fmt,...)							\
+	fprintf(stderr, "(%s:%d) " fmt "\n",		\
+			__FILE__,__LINE__, ##__VA_ARGS__)
+#else
+#define __Elog(fmt,...)
+#endif
+
+/*
  * parquetFileEntry
  */
 struct parquetFileEntry
@@ -40,6 +51,36 @@ struct parquetFileEntry
 	std::string	filename;
 	std::shared_ptr<arrow::io::RandomAccessFile> random_access_file;
 	std::unique_ptr<parquet::arrow::FileReader>	parquet_file_reader;
+	/* constructor */
+	parquetFileEntry(const char *__filename,
+					 const struct stat *__stat_buf,
+					 uint32_t __hash)
+	{
+		hash = __hash;
+		refcnt = 1;
+		memset(&hash_chain, 0, sizeof(dlist_node));
+		memset(&lru_chain, 0, sizeof(dlist_node));
+		memset(&lru_tv, 0, sizeof(struct timeval));
+		memcpy(&stat_buf, __stat_buf, sizeof(struct stat));
+		filename = std::string(__filename);
+		random_access_file = nullptr;
+		parquet_file_reader = nullptr;
+	}
+	/* destructor */
+	~parquetFileEntry()
+	{
+		if (random_access_file)
+		{
+			auto status = random_access_file->Close();
+			if (!status.ok())
+				__Elog("failed on Close('%s') of parquet::arrow::FileReader: %s",
+					   filename.c_str(),
+					   status.ToString().c_str());
+			else
+				__Elog("parquet::arrow::FileReader('%s') was closed",
+					   filename.c_str());
+		}
+	}
 };
 using parquetFileEntry	= struct parquetFileEntry;
 
@@ -88,17 +129,6 @@ dlist_move_tail(dlist_head *head, dlist_node *node)
 }
 
 /*
- * Error Reporting
- */
-#ifdef PGSTROM_DEBUG_BUILD
-#define __Elog(fmt,...)							\
-	fprintf(stderr, "(%s:%d)" fmt "\n",			\
-			__FILE__,__LINE__, ##__VA_ARGS__)
-#else
-#define __Elog(fmt,...)
-#endif
-
-/*
  * ParquetFileHashTableWorker
  */
 static void
@@ -139,15 +169,6 @@ ParquetFileHashTableWorker(void)
 					if (entry->hash_chain.prev && entry->hash_chain.next)
 						dlist_delete(&entry->hash_chain);
 					dlist_delete(&entry->lru_chain);
-
-					auto status = entry->random_access_file->Close();
-					if (!status.ok())
-						__Elog("failed on Close('%s') of parquet::arrow::FileReader: %s",
-							   entry->filename.c_str(),
-							   status.ToString().c_str());
-					else
-						__Elog("parquet::arrow::FileReader('%s') was closed",
-							   entry->filename.c_str());
 					delete(entry);
 				}
 				pq_hash_lock[hindex].unlock();
@@ -582,30 +603,27 @@ lookupParquetFileEntry(const char *filename, struct stat *stat_buf, uint32_t has
 static parquetFileEntry *
 buildParquetFileEntry(const char *filename, struct stat *stat_buf, uint32_t hash)
 {
-	parquetFileEntry   *entry;
-
-	entry = new(std::nothrow) parquetFileEntry();
+	parquetFileEntry *entry = new(std::nothrow) parquetFileEntry(filename,
+																 stat_buf,
+																 hash);
 	if (!entry)
 	{
 		__Elog("out of memory");
 		return NULL;
 	}
-	entry->hash = hash;
-	entry->refcnt = 1;
-	entry->filename = std::string(filename);
-	memcpy(&entry->stat_buf, stat_buf, sizeof(struct stat));
+
 	/* open a RandomAccessFile */
 	{
 		arrow::fs::LocalFileSystem fs;
 
-		auto rv = fs.OpenInputFile(entry->filename);
+		auto rv = fs.OpenInputFile(std::string(filename));
 		if (!rv.ok())
 		{
 			__Elog("unable to open '%s' using arrow::fs::LocalFileSystem: %s",
-				   entry->filename.c_str(),
+				   filename,
 				   rv.status().ToString().c_str());
-            delete(entry);
-            return NULL;
+			delete(entry);
+			return NULL;
 		}
 		entry->random_access_file = *rv;;
 	}
@@ -616,7 +634,7 @@ buildParquetFileEntry(const char *filename, struct stat *stat_buf, uint32_t hash
 		if (!rv.ok())
 		{
 			__Elog("failed on parquet::arrow::OpenFile('%s'): %s",
-				   entry->filename.c_str(),
+				   filename,
 				   rv.status().ToString().c_str());
 			delete(entry);
 			return NULL;

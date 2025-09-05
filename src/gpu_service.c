@@ -3650,7 +3650,8 @@ __expand_gpupreagg_prepfunc_buffer(kern_session_info *session,
 		session->xpucode_groupby_keycomp)
 	{
 		/* GROUP-BY */
-		size_t	num_buffers = Min(2 * session->groupby_ngroups_estimation + 100, INT_MAX);
+		size_t	num_buffers = Min(2 * (size_t)session->groupby_ngroups_estimation + 100,
+								  (size_t)INT_MAX);
 		size_t	prepfn_usage = (size_t)session->groupby_prepfn_bufsz * num_buffers;
 
 		if (shmem_dynamic_sz + prepfn_usage > shmem_dynamic_limit)

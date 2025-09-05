@@ -153,7 +153,7 @@ install-tsv2arrow: tsv2arrow
 tsv2arrow: $(TSV2ARROW_OBJS)
 	$(CXX) $(CPPFLAGS) -o $@ $< $(TSV2ARROW_LDFLAGS)
 
-.cc.o:
+.cpp.o:
 	$(CXX) $(CPPFLAGS) -c -o $@ $<
 
 .c.o:
