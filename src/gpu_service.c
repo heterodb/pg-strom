@@ -3518,6 +3518,43 @@ gpuservLoadKdsArrow(gpuClient *gclient,
 }
 
 /*
+ * gpuservLoadKdsParquet
+ *
+ * fill up KDS_FORMAT_PARQUET using libarrow/libparquet
+ */
+static void *
+__loadKdsParquetMallocCallback(void *data, size_t bytesize)
+{
+	gpuMemChunk	  **p_chunk = (gpuMemChunk **)data;
+	gpuMemChunk	   *m_chunk = gpuMemAllocManaged(bytesize);
+
+	if (!m_chunk)
+		return NULL;
+	*p_chunk = m_chunk;
+
+	return (void *)m_chunk->m_devptr;
+}
+
+static gpuMemChunk *
+gpuservLoadKdsParquet(gpuClient *gclient,
+					  kern_data_store *kds_head,
+					  const char *pathname,
+					  uint32_t *p_npages_vfs_read)
+{
+	gpuMemChunk *m_chunk;
+	kern_data_store *kds;
+
+	kds = parquetReadOneRowGroup(pathname,
+								 kds_head,
+								 __loadKdsParquetMallocCallback,
+								 &m_chunk);
+	if (!kds)
+		return NULL;
+	Assert(m_chunk->m_devptr == (CUdeviceptr)kds);
+	return m_chunk;
+}
+
+/*
  * gpuservMigrationKdsBuffer
  *
  * Migrate a KDS buffer to other GPU
@@ -3613,7 +3650,8 @@ __expand_gpupreagg_prepfunc_buffer(kern_session_info *session,
 		session->xpucode_groupby_keycomp)
 	{
 		/* GROUP-BY */
-		size_t	num_buffers = Min(2 * session->groupby_ngroups_estimation + 100, INT_MAX);
+		size_t	num_buffers = Min(2 * (size_t)session->groupby_ngroups_estimation + 100,
+								  (size_t)INT_MAX);
 		size_t	prepfn_usage = (size_t)session->groupby_prepfn_bufsz * num_buffers;
 
 		if (shmem_dynamic_sz + prepfn_usage > shmem_dynamic_limit)
@@ -4158,6 +4196,16 @@ gpuservHandleGpuTaskExec(gpuContext *gcontext,
 				return;
 			m_kds_src = s_chunk->m_devptr;
 		}
+	}
+	else if (kds_src->format == KDS_FORMAT_PARQUET)
+	{
+		s_chunk = gpuservLoadKdsParquet(gclient,
+										kds_src,
+										kds_src_pathname,
+										&npages_vfs_read);
+		if (!s_chunk)
+			return;
+		m_kds_src = s_chunk->m_devptr;
 	}
 	else
 	{

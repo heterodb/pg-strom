@@ -84,6 +84,7 @@ typedef struct ArrowFileState
 	const char *filename;
 	const char *dpu_path;	/* relative pathname, if DPU */
 	struct stat	stat_buf;
+	ArrowMetadataVersion version; /* used to determine whether Arrow or Parquet */
 	List	   *rb_list;	/* list of RecordBatchState */
 	uint32_t	ncols;
 	struct {
@@ -201,6 +202,7 @@ typedef struct arrowMetadataCacheBlock
 	dlist_node	lru_chain;	/* link to lru_list */
 	struct timeval lru_tv;	/* last access time */
 	struct stat	stat_buf;	/* result of stat(2) */
+	ArrowMetadataVersion version; /* used to determine whether Arrow or Parquet */
 	arrowMetadataKeyValueCache *custom_metadata;
 	arrowMetadataCache mcache_head;	/* the first arrowMetadataCache (record batch)
 									 * in this file */
@@ -1540,6 +1542,8 @@ __setupArrowFileStateByCache(ArrowFileState *af_state,
 {
 	arrowMetadataCache *mcache = &mc_block->mcache_head;
 
+	/* restore the ArrowMetadataVersion (may be Parquet file) */
+	af_state->version = mc_block->version;
 	while (mcache)
 	{
 		RecordBatchState *rb_state;
@@ -1576,6 +1580,7 @@ __setupArrowFileStateByCache(ArrowFileState *af_state,
  */
 typedef struct
 {
+	ArrowMetadataVersion version;
 	ArrowBuffer	   *buffer_curr;
 	ArrowBuffer	   *buffer_tail;
 	ArrowFieldNode *fnode_curr;
@@ -1999,45 +2004,61 @@ __buildRecordBatchFieldState(setupRecordBatchContext *con,
 			elog(ERROR, "Bug? ArrowSchema contains unsupported types");
 	}
 
-	/* setup nullmap buffer */
-	buffer_curr = con->buffer_curr++;
-	if (buffer_curr >= con->buffer_tail)
-		elog(ERROR, "RecordBatch has less buffers than expected");
-	if (rb_field->null_count > 0)
+	if (ArrowMetadataVersionIsParquet(con->version))
 	{
-		rb_field->nullmap_offset = buffer_curr->offset;
-		rb_field->nullmap_length = buffer_curr->length;
-		if (rb_field->nullmap_length < BITMAPLEN(rb_field->nitems))
-			elog(ERROR, "nullmap length is smaller than expected");
-		if (rb_field->nullmap_offset != MAXALIGN(rb_field->nullmap_offset))
-			elog(ERROR, "nullmap is not aligned well");
+		/*
+		 * If the ArrowFileInfo is a parsed Parquet file (i.e., you are using
+		 * emulation mode that converts to Arrow at runtime), Buffer does not
+		 * contain any meaningful content. It simply has a Buffer array with
+		 * the same number of Fields as it does, and stores the compressed chunk
+		 * positions and self-reported sizes, so there is no point in checking
+		 * consistency like when reading Arrow.
+		 */
+		Assert(con->buffer_curr == NULL &&
+			   con->buffer_tail == NULL);
 	}
-
-	/* setup values buffer */
-	if (least_values_length > 0)
+	else
 	{
+		/* setup nullmap buffer */
 		buffer_curr = con->buffer_curr++;
 		if (buffer_curr >= con->buffer_tail)
 			elog(ERROR, "RecordBatch has less buffers than expected");
-		rb_field->values_offset = buffer_curr->offset;
-		rb_field->values_length = buffer_curr->length;
-		if (rb_field->values_length < least_values_length)
-			elog(ERROR, "values array is smaller than expected");
-		if (rb_field->values_offset != MAXALIGN(rb_field->values_offset))
-			elog(ERROR, "values array is not aligned well");
-	}
+		if (rb_field->null_count > 0)
+		{
+			rb_field->nullmap_offset = buffer_curr->offset;
+			rb_field->nullmap_length = buffer_curr->length;
+			if (rb_field->nullmap_length < BITMAPLEN(rb_field->nitems))
+				elog(ERROR, "nullmap length is smaller than expected");
+			if (rb_field->nullmap_offset != MAXALIGN(rb_field->nullmap_offset))
+				elog(ERROR, "nullmap is not aligned well");
+		}
 
-	/* setup extra buffer */
-	if (has_extra_buffer)
-	{
-		Assert(least_values_length > 0);
-		buffer_curr = con->buffer_curr++;
-		if (buffer_curr >= con->buffer_tail)
-			elog(ERROR, "RecordBatch has less buffers than expected");
-		rb_field->extra_offset = buffer_curr->offset;
-		rb_field->extra_length = buffer_curr->length;
-		if (rb_field->extra_offset != MAXALIGN(rb_field->extra_offset))
-			elog(ERROR, "extra buffer is not aligned well");
+		/* setup values buffer */
+		if (least_values_length > 0)
+		{
+			buffer_curr = con->buffer_curr++;
+			if (buffer_curr >= con->buffer_tail)
+				elog(ERROR, "RecordBatch has less buffers than expected");
+			rb_field->values_offset = buffer_curr->offset;
+			rb_field->values_length = buffer_curr->length;
+			if (rb_field->values_length < least_values_length)
+				elog(ERROR, "values array is smaller than expected");
+			if (rb_field->values_offset != MAXALIGN(rb_field->values_offset))
+				elog(ERROR, "values array is not aligned well");
+		}
+
+		/* setup extra buffer */
+		if (has_extra_buffer)
+		{
+			Assert(least_values_length > 0);
+			buffer_curr = con->buffer_curr++;
+			if (buffer_curr >= con->buffer_tail)
+				elog(ERROR, "RecordBatch has less buffers than expected");
+			rb_field->extra_offset = buffer_curr->offset;
+			rb_field->extra_length = buffer_curr->length;
+			if (rb_field->extra_offset != MAXALIGN(rb_field->extra_offset))
+				elog(ERROR, "extra buffer is not aligned well");
+		}
 	}
 
 	/* child fields, if any */
@@ -2079,6 +2100,7 @@ __buildRecordBatchStateOne(ArrowSchema *schema,
 	rb_state->nfields   = nfields;
 
 	memset(&con, 0, sizeof(setupRecordBatchContext));
+	con.version     = af_state->version;
 	con.buffer_curr = rbatch->buffers;
 	con.buffer_tail = rbatch->buffers + rbatch->_num_buffers;
 	con.fnode_curr  = rbatch->nodes;
@@ -2136,6 +2158,8 @@ __setupArrowFileStateByFile(ArrowFileState *af_state,
 		elog(DEBUG2, "arrow file '%s' contains no RecordBatch", filename);
 		return false;
 	}
+	/* save the version to determine whether Arrow or Parquet */
+	af_state->version = af_info->footer.version;
 	/* set up ArrowFileState */
 	arrow_bstats = buildArrowStatsBinary(&af_info->footer, p_stat_attrs);
 	for (int i=0; i < af_info->footer._num_recordBatches; i++)
@@ -2267,6 +2291,7 @@ __buildArrowMetadataCacheNoLock(ArrowFileState *af_state,
 				goto bailout;
 			memcpy(&mc_block_head->stat_buf,
 				   &af_state->stat_buf, sizeof(struct stat));
+			mc_block_head->version = af_info->footer.version;
 			mc_block_head->usage = MAXALIGN(offsetof(arrowMetadataCacheBlock,
 													 mcache_head) +
 											sizeof(arrowMetadataCache));
@@ -3489,21 +3514,32 @@ __arrowKdsAssignVirtualColumns(kern_data_store *kds,
 	}
 }
 
-static strom_io_vector *
-arrowFdwLoadRecordBatch(Relation relation,
-						Bitmapset *referenced,
-						RecordBatchState *rb_state,
-						StringInfo chunk_buffer)
+static kern_data_store *
+__arrowFdwSetupKDSHead(Relation relation,
+					   Bitmapset *referenced,
+					   RecordBatchState *rb_state,
+					   StringInfo chunk_buffer)
 {
 	ArrowFileState *af_state = rb_state->af_state;
 	TupleDesc	tupdesc = RelationGetDescr(relation);
 	size_t		head_off = chunk_buffer->len;
+	char		kds_format = KDS_FORMAT_ARROW;
 	kern_data_store *kds;
+
+	/*
+	 * KDS buffer is marked as KDS_FORMAT_PARQUET if source file is
+	 * apache parquet format; that does not support GPU-Direct SQL,
+	 * and needs to load data chunks by CPU (libarrow/libparquet).
+	 * Thus, it shall not have i/o vector, but filename and row-group
+	 * index.
+	 */
+	if (ArrowMetadataVersionIsParquet(af_state->version))
+		kds_format = KDS_FORMAT_PARQUET;
 
 	/* setup KDS and I/O-vector */
 	enlargeStringInfo(chunk_buffer, estimate_kern_data_store(tupdesc));
 	kds = (kern_data_store *)(chunk_buffer->data + head_off);
-	setup_kern_data_store(kds, tupdesc, 0, KDS_FORMAT_ARROW);
+	setup_kern_data_store(kds, tupdesc, 0, kds_format);
 	kds->nitems = rb_state->rb_nitems;
 	kds->table_oid = RelationGetRelid(relation);
 	chunk_buffer->len += KDS_HEAD_LENGTH(kds);
@@ -3515,10 +3551,16 @@ arrowFdwLoadRecordBatch(Relation relation,
 
 		if (field_index >= 0)
 		{
+			int		k = j - FirstLowInvalidHeapAttributeNumber;
+
 			Assert(field_index < rb_state->nfields);
 			__arrowKdsAssignAttrOptions(kds,
 										&kds->colmeta[j],
 										&rb_state->fields[field_index]);
+			if (bms_is_member(k+1, referenced))
+				kds->colmeta[j].field_index = field_index;
+			else
+				kds->colmeta[j].field_index = -1;	/* not referenced */
 		}
 		else if (field_index == __FIELD_INDEX_SPECIAL__VIRTUAL_PER_FILE)
 		{
@@ -3533,6 +3575,7 @@ arrowFdwLoadRecordBatch(Relation relation,
 			 * so kds must be refreshed.
 			 */
 			kds = (kern_data_store *)(chunk_buffer->data + head_off);
+			kds->colmeta[j].field_index = -1;		/* no physical field */
 		}
 		else if (field_index == __FIELD_INDEX_SPECIAL__VIRTUAL_PER_RECORD_BATCH)
 		{
@@ -3543,14 +3586,29 @@ arrowFdwLoadRecordBatch(Relation relation,
 										   chunk_buffer);
 			/* see the comment above */
 			kds = (kern_data_store *)(chunk_buffer->data + head_off);
+			kds->colmeta[j].field_index = -1;		/* no physical field */
 		}
 		else
 		{
 			elog(ERROR, "Bug? unexpected field-index (%d)", field_index);
 		}
 	}
+	kds->parquet_row_group = rb_state->rb_index;
 	kds->arrow_virtual_usage = (chunk_buffer->len
 								- (head_off + KDS_HEAD_LENGTH(kds)));
+	return kds;
+}
+
+static inline strom_io_vector *
+arrowFdwLoadRecordBatch(Relation relation,
+						Bitmapset *referenced,
+						RecordBatchState *rb_state,
+						StringInfo chunk_buffer)
+{
+	kern_data_store *kds = __arrowFdwSetupKDSHead(relation,
+												  referenced,
+												  rb_state,
+												  chunk_buffer);
 	return arrowFdwSetupIOvector(rb_state, referenced, kds);
 }
 
@@ -3621,6 +3679,59 @@ arrowFdwFillupRecordBatch(Relation relation,
 
 	pfree(iovec);
 
+	return kds;
+}
+
+/*
+ * parquetFillupRowGroup
+ */
+static void *
+__parquetFillupAllocBuffer(void *__priv, size_t sz)
+{
+	StringInfo	buf = __priv;
+	void	   *result;
+
+	PG_TRY();
+	{
+		enlargeStringInfo(buf, sz);
+		result = buf->data + buf->len;
+	}
+	PG_CATCH();
+	{
+		/* should not raise longjump during C++ code execution */
+		FlushErrorState();
+		result = NULL;
+	}
+	PG_END_TRY();
+
+	return result;
+}
+
+static kern_data_store *
+parquetFillupRowGroup(Relation relation,
+					  Bitmapset *referenced,
+					  RecordBatchState *rb_state,
+					  StringInfo chunk_buffer)
+{
+	kern_data_store *kds_head;
+	kern_data_store *kds;
+
+	/* prepare the KDS buffer */
+	resetStringInfo(chunk_buffer);
+	__arrowFdwSetupKDSHead(relation, referenced, rb_state, chunk_buffer);
+	kds_head = alloca(chunk_buffer->len);
+	memcpy(kds_head, chunk_buffer->data, chunk_buffer->len);
+	Assert(kds_head->format == KDS_FORMAT_PARQUET);
+
+	/* read a row-group of the Parquet file */
+	resetStringInfo(chunk_buffer);
+	kds = parquetReadOneRowGroup(rb_state->af_state->filename,
+								 kds_head,
+								 __parquetFillupAllocBuffer, chunk_buffer);
+	if (!kds)
+		elog(ERROR, "Unable to load row-group %d of the parquet file '%s'",
+			 rb_state->rb_index,
+			 rb_state->af_state->filename);
 	return kds;
 }
 
@@ -4759,10 +4870,10 @@ pgstromScanChunkArrowFdw(pgstromTaskState *pts,
 	StringInfo		chunk_buffer = &arrow_state->chunk_buffer;
 	RecordBatchState *rb_state;
 	ArrowFileState *af_state;
-	strom_io_vector *iovec;
 	XpuCommand *xcmd;
-	uint32_t	kds_src_offset;
-	uint32_t	kds_src_iovec;
+	kern_data_store *kds_src;
+	uint32_t	kds_src_offset = 0;
+	uint32_t	kds_src_iovec = 0;
 	uint32_t	kds_src_pathname;
 	int32_t		scan_repeat_id;
 
@@ -4781,17 +4892,27 @@ pgstromScanChunkArrowFdw(pgstromTaskState *pts,
 	appendBinaryStringInfo(chunk_buffer,
 						   pts->xcmd_buf.data,
 						   pts->xcmd_buf.len);
-	/* kds_src + iovec */
+	/* kds_src (arrow or parquet) */
 	kds_src_offset = chunk_buffer->len;
-	iovec = arrowFdwLoadRecordBatch(pts->css.ss.ss_currentRelation,
-									arrow_state->referenced,
-									rb_state,
-									chunk_buffer);
-	kds_src_iovec = __appendBinaryStringInfo(chunk_buffer,
-											 iovec,
-											 offsetof(strom_io_vector,
-													  ioc[iovec->nr_chunks]));
-	/* arrow filename */
+	kds_src = __arrowFdwSetupKDSHead(pts->css.ss.ss_currentRelation,
+									 arrow_state->referenced,
+									 rb_state,
+									 chunk_buffer);
+	if (kds_src->format == KDS_FORMAT_ARROW)
+	{
+		/* related i/o vector */
+		strom_io_vector *iovec = arrowFdwSetupIOvector(rb_state,
+													   arrow_state->referenced,
+													   kds_src);
+		size_t		iovec_sz = offsetof(strom_io_vector, ioc[iovec->nr_chunks]);
+		kds_src_iovec = __appendBinaryStringInfo(chunk_buffer,
+												 iovec, iovec_sz);
+	}
+	else
+	{
+		Assert(kds_src->format == KDS_FORMAT_PARQUET);
+	}
+	/* arrow/parquet filename */
 	kds_src_pathname = chunk_buffer->len;
 	if (!pts->ds_entry)
 		appendStringInfoString(chunk_buffer, af_state->filename);
@@ -4842,11 +4963,22 @@ ArrowIterateForeignScan(ForeignScanState *node)
 		rb_state = __arrowFdwNextRecordBatch(arrow_state, 1, NULL);
 		if (!rb_state)
 			return NULL;
-		arrow_state->curr_kds
-			= arrowFdwFillupRecordBatch(node->ss.ss_currentRelation,
+		if (ArrowMetadataVersionIsParquet(rb_state->af_state->version))
+		{
+			arrow_state->curr_kds
+				= parquetFillupRowGroup(node->ss.ss_currentRelation,
 										arrow_state->referenced,
 										rb_state,
 										&arrow_state->chunk_buffer);
+		}
+		else
+		{
+			arrow_state->curr_kds
+				= arrowFdwFillupRecordBatch(node->ss.ss_currentRelation,
+											arrow_state->referenced,
+											rb_state,
+											&arrow_state->chunk_buffer);
+		}
 	}
 	Assert(kds && arrow_state->curr_index < kds->nitems);
 	if (kds_arrow_fetch_tuple(slot, kds,
@@ -5181,10 +5313,12 @@ RecordBatchAcquireSampleRows(Relation relation,
 	/* ANALYZE needs to fetch all the attributes */
 	referenced = bms_make_singleton(-FirstLowInvalidHeapAttributeNumber);
 	initStringInfo(&buffer);
-	kds = arrowFdwFillupRecordBatch(relation,
-									referenced,
-									rb_state,
-									&buffer);
+	/* Load an example KDS buffer */
+	if (ArrowMetadataVersionIsParquet(rb_state->af_state->version))
+		kds = parquetFillupRowGroup(relation, referenced, rb_state, &buffer);
+	else
+		kds = arrowFdwFillupRecordBatch(relation, referenced, rb_state, &buffer);
+	/* Extract the tuple */
 	values = alloca(sizeof(Datum) * tupdesc->natts);
 	isnull = alloca(sizeof(bool)  * tupdesc->natts);
 	for (count = 0; count < nsamples; count++)

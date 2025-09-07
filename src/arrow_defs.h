@@ -103,6 +103,20 @@ typedef enum
 	ArrowMessageHeader__SparseTensor	= 5,
 } ArrowMessageHeader;
 
+static inline const char *
+ArrowMessageHeaderAsCString(ArrowMessageHeader code)
+{
+	switch (code)
+	{
+		case ArrowMessageHeader__Schema:			return "Schema";
+		case ArrowMessageHeader__DictionaryBatch:	return "DictionaryBatch";
+		case ArrowMessageHeader__RecordBatch:		return "RecordBatch";
+		case ArrowMessageHeader__Tensor:			return "Tensor";
+		case ArrowMessageHeader__SparseTensor:		return "SparseTensor";
+		default:									return "???";
+	}
+}
+
 /*
  * Endianness : short
  */
@@ -150,6 +164,36 @@ typedef enum
 	ArrowType__LargeUtf8		= 20,
 	ArrowType__LargeList		= 21,
 } ArrowTypeTag;
+
+static inline const char *
+ArrowTypeTagAsCString(ArrowTypeTag code)
+{
+	switch (code)
+	{
+		case ArrowType__Null:			return "Null";
+		case ArrowType__Int:			return "Int";
+		case ArrowType__FloatingPoint:	return "FloatingPoint";
+		case ArrowType__Binary:			return "Binary";
+		case ArrowType__Utf8:			return "Utf8";
+		case ArrowType__Bool:			return "Bool";
+		case ArrowType__Decimal:		return "Decimal";
+		case ArrowType__Date:			return "Date";
+		case ArrowType__Time:			return "Time";
+		case ArrowType__Timestamp:		return "Timestamp";
+		case ArrowType__Interval:		return "Interval";
+		case ArrowType__List:			return "List";
+		case ArrowType__Struct:			return "Struct";
+		case ArrowType__Union:			return "Union";
+		case ArrowType__FixedSizeBinary:return "FixedSizeBinary";
+		case ArrowType__FixedSizeList:	return "FixedSizeList";
+		case ArrowType__Map:			return "Map";
+		case ArrowType__Duration:		return "Duration";
+		case ArrowType__LargeBinary:	return "LargeBinary";
+		case ArrowType__LargeUtf8:		return "LargeUtf8";
+		case ArrowType__LargeList:		return "LargeList";
+		default:						return "???";
+	}
+}
 
 /*
  * DateUnit : short
@@ -260,6 +304,54 @@ ArrowUnionModeAsCString(ArrowUnionMode mode)
 }
 
 /*
+ * CompressionType : byte
+ */
+typedef enum		ArrowCompressionType
+{
+	ArrowCompressionType__UNCOMPRESSED,
+    ArrowCompressionType__SNAPPY,
+    ArrowCompressionType__GZIP,
+    ArrowCompressionType__BROTLI,
+    ArrowCompressionType__ZSTD,
+    ArrowCompressionType__LZ4,
+    ArrowCompressionType__LZ4_FRAME,
+    ArrowCompressionType__LZO,
+    ArrowCompressionType__BZ2,
+    ArrowCompressionType__LZ4_HADOOP,
+	ArrowCompressionType__UNKNOWN,
+} ArrowCompressionType;
+
+static inline const char *
+ArrowCompressionTypeAsCString(ArrowCompressionType codec)
+{
+	switch (codec)
+	{
+		case ArrowCompressionType__UNCOMPRESSED:
+			return "UNCOMPRESSED";
+		case ArrowCompressionType__SNAPPY:
+			return "SNAPPY";
+		case ArrowCompressionType__GZIP:
+			return "GZIP";
+		case ArrowCompressionType__BROTLI:
+			return "BROTLI";
+		case ArrowCompressionType__ZSTD:
+			return "ZSTD";
+		case ArrowCompressionType__LZ4:
+			return "LZ4";
+		case ArrowCompressionType__LZ4_FRAME:
+			return "LZ4_FRAME";
+		case ArrowCompressionType__LZO:
+			return "LZO";
+		case ArrowCompressionType__BZ2:
+			return "BZ2";
+		case ArrowCompressionType__LZ4_HADOOP:
+			return "LZ4_HADOOP";
+		default:
+			return "???";
+	}
+}
+
+/*
  * ArrowNodeTag
  */
 typedef enum
@@ -300,6 +392,48 @@ typedef enum
 	ArrowNodeTag__Footer,
 	ArrowNodeTag__BodyCompression,
 } ArrowNodeTag;
+
+static inline const char *
+ArrowNodeTagAsCString(ArrowNodeTag code)
+{
+	switch (code)
+	{
+		case ArrowNodeTag__Null:			return "Null";
+		case ArrowNodeTag__Int:				return "Int";
+		case ArrowNodeTag__FloatingPoint:	return "FloatingPoint";
+		case ArrowNodeTag__Utf8:			return "Utf8";
+		case ArrowNodeTag__Binary:			return "Binary";
+		case ArrowNodeTag__Bool:			return "Bool";
+		case ArrowNodeTag__Decimal:			return "Decimal";
+		case ArrowNodeTag__Date:			return "Date";
+		case ArrowNodeTag__Time:			return "Time";
+		case ArrowNodeTag__Timestamp:		return "Timestamp";
+		case ArrowNodeTag__Interval:		return "Interval";
+		case ArrowNodeTag__List:			return "List";
+		case ArrowNodeTag__Struct:			return "Struct";
+		case ArrowNodeTag__Union:			return "Union";
+		case ArrowNodeTag__FixedSizeBinary:	return "FixedSizeBinary";
+		case ArrowNodeTag__FixedSizeList:	return "FixedSizeList";
+		case ArrowNodeTag__Map:				return "Map";
+		case ArrowNodeTag__Duration:		return "Duration";
+		case ArrowNodeTag__LargeBinary:		return "LargeBinary";
+		case ArrowNodeTag__LargeUtf8:		return "LargeUtf8";
+		case ArrowNodeTag__LargeList:		return "LargeList";
+		case ArrowNodeTag__KeyValue:		return "KeyValue";
+		case ArrowNodeTag__DictionaryEncoding: return "DictionaryEncoding";
+		case ArrowNodeTag__Field:			return "Field";
+		case ArrowNodeTag__FieldNode:		return "FieldNode";
+		case ArrowNodeTag__Buffer:			return "Buffer";
+		case ArrowNodeTag__Schema:			return "Schema";
+		case ArrowNodeTag__RecordBatch:		return "RecordBatch";
+		case ArrowNodeTag__DictionaryBatch:	return "DictionaryBatch";
+		case ArrowNodeTag__Message:			return "Message";
+		case ArrowNodeTag__Block:			return "Block";
+		case ArrowNodeTag__Footer:			return "Footer";
+		case ArrowNodeTag__BodyCompression:	return "BodyCompression";
+		default:							return "???";
+	}
+}
 
 /*
  * ArrowTypeOptions - our own definition
@@ -565,11 +699,28 @@ typedef struct		ArrowField
 	ArrowKeyValue  *custom_metadata;
 	int				_num_custom_metadata;
 #ifdef HAS_PARQUET
-	/* valid only parquet format (used for dumpArrowNode in JSON) */
-	const char	   *parquet_extra_attrs;
-	int				_parquet_extra_attrs_len;
+	/* Parquet specific properties*/
+	struct {
+		int16_t		max_definition_level;
+		int16_t		max_repetition_level;
+		int16_t		physical_type;		/* parquet::Type */
+		int16_t		converted_type;		/* parquet::ConvertedType */
+		int16_t		logical_type;		/* parquet::LogicalType::Type */
+		int16_t		logical_time_unit;	/* parquet::LogicalType::TimeUnit */
+		int16_t		logical_decimal_precision;
+		int16_t		logical_decimal_scale;
+	} parquet;
 #endif
 } ArrowField;
+
+#ifdef HAS_PARQUET
+typedef struct		ParquetEncodingStats
+{
+	int16_t		page_type;	/* parquet::PageType::type */
+	int16_t		encoding;	/* parquet::Encoding::type */
+	int			count;
+} ParquetEncodingStats;
+#endif
 
 /*
  * FieldNode
@@ -589,31 +740,28 @@ typedef struct		ArrowFieldNode
 	const char	   *stat_max_value;
 	int				_stat_max_value_len;
 #ifdef HAS_PARQUET
-	/* valid only parquet format (used for dumpArrowNode in JSON) */
-	const char	   *parquet_extra_attrs;
-	int				_parquet_extra_attrs_len;
+	/*
+	 * In Parquet format, each RowGroup (equivalent to a RecordBatch in Arrow) has
+	 * attached to it the same number of ColumnChunks as the number of fields.
+	 * Unlike the Arrow format, an indefinite number of buffers are attached depending
+	 * on the data type.
+	 * Therefore, when reading Parquet format, there are no buffers in the RecordBatch,
+	 * and various ColumnChunk metadata is stored in the FieldNode.
+	 */
+	struct {
+		int64_t		total_compressed_size;
+		int64_t		total_uncompressed_size;
+		int64_t		data_page_offset;
+		int64_t		dictionary_page_offset;
+		int64_t		index_page_offset;
+		ArrowCompressionType compression_type;
+		int			_num_encodings;
+		int16_t	   *encodings;
+		int			_num_encoding_stats;
+		ParquetEncodingStats *encoding_stats;
+	} parquet;
 #endif
 } ArrowFieldNode;
-
-/*
- * CompressionType : byte
- */
-typedef enum		ArrowCompressionType
-{
-	ArrowCompressionType__LZ4_FRAME = 0,
-	ArrowCompressionType__ZSTD = 1,
-} ArrowCompressionType;
-
-static inline const char *
-ArrowCompressionTypeAsCString(ArrowCompressionType codec)
-{
-	switch (codec)
-	{
-		case ArrowCompressionType__LZ4_FRAME:	return "LZ4_FRAME";
-		case ArrowCompressionType__ZSTD:		return "ZSTD";
-		default:								return "???";
-	}
-}
 
 /*
  * BodyCompressionMethod : byte
@@ -671,7 +819,7 @@ typedef struct		ArrowRecordBatch
 	/* vector of FieldNode */
 	ArrowFieldNode  *nodes;
 	int				_num_nodes;
-	/* vector of Buffer */
+	/* vector of Buffer (only Arrow files) */
 	ArrowBuffer	    *buffers;
 	int				_num_buffers;
 	/* optional compression of the message body */
@@ -766,6 +914,18 @@ __EXTERN void	copyArrowNode(ArrowNode *dest, const ArrowNode *src);
 __EXTERN bool	equalArrowNode(const ArrowNode *a, const ArrowNode *b);
 __EXTERN int	readArrowFileInfo(const char *filename, ArrowFileInfo *af_info);
 
+/*
+ * parquet_read.cc (C++ interface)
+ */
+struct kern_data_store;
+
+__EXTERN struct kern_data_store *
+parquetReadOneRowGroup(const char *filename,
+					   const struct kern_data_store *kds_head,
+					   void *(*malloc_callback)(void *malloc_private,
+												size_t malloc_size),
+					   void *malloc_private);
 #undef __EXTERN
+
 #endif		/* !__CUDACC__ */
 #endif		/* _ARROW_DEFS_H_ */

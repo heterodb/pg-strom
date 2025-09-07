@@ -10,7 +10,7 @@ STROM_OBJS = main.o githash.o extra.o codegen.o executor.o fallback.o \
              gpu_device.o gpu_service.o dpu_device.o \
              gpu_scan.o gpu_join.o gpu_preagg.o \
              relscan.o brin.o gist.o gpu_cache.o select_into.o \
-             arrow_fdw.o arrow_meta.o \
+             arrow_fdw.o arrow_meta.o parquet_read.o \
              misc.o float2.o tinyint.o aggfuncs.o
 GENERATED-HEADERS = gpu_devattrs.h githash.c
 STROM_HEADERS = arrow_defs.h arrow_ipc.h float2.h
@@ -94,6 +94,7 @@ EXTRA_CLEAN = $(CUDA_OBJS) $(GENERATED-HEADERS) \
               $(shell ls -d pgstrom-gpucode-V*-*.fatbin 2>/dev/null)
 EXTENSION = pg_strom
 PG_CPPFLAGS := $(PGSTROM_FLAGS) -I $(CUDA_IPATH)
+PG_CXXFLAGS := -std=c++17 -Wno-sign-compare
 SHLIB_LINK += -L $(CUDA_LPATH) -lcuda
 
 PGXS := $(shell $(PG_CONFIG) --pgxs)

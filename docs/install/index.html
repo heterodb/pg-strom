@@ -8,7 +8,7 @@
     <title>Install - PG-Strom Manual</title>
     <link rel="stylesheet" href="../css/theme.css" />
     <link rel="stylesheet" href="../css/theme_extra.css" />
-        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/10.5.0/styles/github.min.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
         <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet" />
         <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet" />
         <link href="../custom.css" rel="stylesheet" />
@@ -20,12 +20,11 @@
         var mkdocs_page_url = null;
       </script>
     
-    <script src="../js/jquery-3.6.0.min.js" defer></script>
     <!--[if lt IE 9]>
       <script src="../js/html5shiv.min.js"></script>
     <![endif]-->
-      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/10.5.0/highlight.min.js"></script>
-      <script>hljs.initHighlightingOnLoad();</script> 
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
 </head>
 
 <body class="wy-body-for-nav" role="document">
@@ -49,7 +48,7 @@
                 </li>
               </ul>
               <ul class="current">
-                <li class="toctree-l1 current"><a class="reference internal current" href="./">Install</a>
+                <li class="toctree-l1 current"><a class="reference internal current" href="#">Install</a>
     <ul class="current">
     <li class="toctree-l2"><a class="reference internal" href="#checklist">Checklist</a>
     </li>
@@ -98,6 +97,8 @@
         </ul>
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#postgresql-installation">PostgreSQL Installation</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#libarrowlibparquet-installation">libarrow/libparquet Installation</a>
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#pg-strom-installation">PG-Strom Installation</a>
         <ul>
@@ -203,8 +204,8 @@
       <div class="wy-nav-content">
         <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
   <ul class="wy-breadcrumbs">
-    <li><a href=".." class="icon icon-home" alt="Docs"></a> &raquo;</li>
-      <li>Install</li>
+    <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
+      <li class="breadcrumb-item active">Install</li>
     <li class="wy-breadcrumbs-aside">
     </li>
   </ul>
@@ -635,6 +636,14 @@ Like the configuration of EPEL, you can install a small package to set up yum re
 <p class="admonition-title">Note</p>
 <p>On the Red Hat Enterprise Linux, the package name <code>postgresql</code> conflicts to the default one at the distribution, thus, unable to install the packages from PGDG. So, disable the <code>postgresql</code> module by the distribution, using <code>dnf -y module disable postgresql</code>.</p>
 </div>
+<h2 id="libarrowlibparquet-installation">libarrow/libparquet Installation</h2>
+<p>PG-Strom v6.1 and later requires <code>libarrow</code> and <code>libparquet</code> for building and installation.</p>
+<p>Since the packages provided by the Linux distribution may be outdated, please follow the <a href="https://arrow.apache.org/install/">developer community guidance</a> and install the <code>arrow-devel</code> and <code>parquet-devel</code> packages.</p>
+<p>The steps required for a minimal installation, excluding any overlaps with the installation steps above, are as follows.</p>
+<pre><code>$ sudo dnf install -y https://packages.apache.org/artifactory/arrow/almalinux/$(cut -d: -f5 /etc/system-release-cpe | cut -d. -f1)/apache-arrow-release-latest.rpm
+$ sudo dnf install -y arrow-devel
+$ sudo dnf install -y parquet-devel
+</code></pre>
 <h2 id="pg-strom-installation">PG-Strom Installation</h2>
 <h3 id="rpm-installation">RPM Installation</h3>
 <p>PG-Strom and related packages are distributed from <a href="https://heterodb.github.io/swdc/">HeteroDB Software Distribution Center</a>.
@@ -849,14 +858,15 @@ PATH='/usr/local/cuda/bin:/usr/bin:/bin'
     
   </span>
 </div>
-    <script>var base_url = '..';</script>
-    <script src="../js/theme_extra.js" defer></script>
-    <script src="../js/theme.js" defer></script>
-      <script src="../search/main.js" defer></script>
-    <script defer>
-        window.onload = function () {
+    <script src="../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "..";</script>
+    <script src="../js/theme_extra.js"></script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/main.js"></script>
+    <script>
+        jQuery(function () {
             SphinxRtdTheme.Navigation.enable(true);
-        };
+        });
     </script>
 
 </body>

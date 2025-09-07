@@ -10,13 +10,13 @@
  * it under the terms of the PostgreSQL License.
  */
 #include "arrow_defs.h"
-#include <arrow/api.h>			/* dnf install libarrow-devel */
+#include <arrow/api.h>			/* dnf install arrow-devel, or apt install libarrow-dev */
 #include <arrow/io/api.h>
 #include <arrow/ipc/api.h>
 #include <arrow/ipc/reader.h>
 #include <arrow/util/decimal.h>
 #ifdef HAS_PARQUET
-#include <parquet/arrow/schema.h>
+#include <parquet/arrow/schema.h>	/* dnf install parquet-devel, or apt install libparquet-dev */
 #include <parquet/metadata.h>
 #include <parquet/statistics.h>
 #include <parquet/file_reader.h>
@@ -43,6 +43,9 @@
 extern "C" {
 #include "postgres.h"
 }
+#else
+#define Max(a,b)		((a) > (b) ? (a) : (b))
+#define Min(a,b)		((a) < (b) ? (a) : (b))
 #endif
 #define Elog(fmt,...)								\
 	do {											\
@@ -334,6 +337,86 @@ __dumpArrowDictionaryEncoding(std::ostringstream &json,
 	json << "," << NewLine
 		 <<"\"isOrdered\" : " << (node->isOrdered ? "true" : "false");
 }
+static inline const char *
+__ParquetPhysicalTypeAsCString(int code)
+{
+	switch (code)
+	{
+		case parquet::Type::BOOLEAN:	return "BOOLEAN";
+		case parquet::Type::INT32:		return "INT32";
+		case parquet::Type::INT64:		return "INT64";
+		case parquet::Type::INT96:		return "INT96";
+		case parquet::Type::FLOAT:		return "FLOAT";
+		case parquet::Type::DOUBLE:		return "DOUBLE";
+		case parquet::Type::BYTE_ARRAY:	return "BYTE_ARRAY";
+		case parquet::Type::FIXED_LEN_BYTE_ARRAY: return "FIXED_LEN_BYTE_ARRAY";
+		default:						return "???";
+	}
+}
+static inline const char *
+__ParquetConvertedTypeAsCString(int code)
+{
+	switch (code)
+	{
+		case parquet::ConvertedType::NONE:		return "NONE";
+		case parquet::ConvertedType::UTF8:		return "UTF8";
+		case parquet::ConvertedType::MAP:		return "MAP";
+		case parquet::ConvertedType::MAP_KEY_VALUE: return "MAP_KEY_VALUE";
+		case parquet::ConvertedType::LIST:		return "LIST";
+		case parquet::ConvertedType::ENUM:		return "ENUM";
+		case parquet::ConvertedType::DECIMAL:	return "DECIMAL";
+		case parquet::ConvertedType::DATE:		return "DATE";
+		case parquet::ConvertedType::TIME_MILLIS:		return "TIME_MILLIS";
+		case parquet::ConvertedType::TIME_MICROS:		return "TIME_MICROS";
+		case parquet::ConvertedType::TIMESTAMP_MILLIS:	return "TIMESTAMP_MILLIS";
+		case parquet::ConvertedType::TIMESTAMP_MICROS:	return "TIMESTAMP_MICROS";
+		case parquet::ConvertedType::UINT_8:	return "UINT_8";
+		case parquet::ConvertedType::UINT_16:	return "UINT_16";
+		case parquet::ConvertedType::UINT_32:	return "UINT_32";
+		case parquet::ConvertedType::UINT_64:	return "UINT_64";
+		case parquet::ConvertedType::INT_8:		return "INT_8";
+		case parquet::ConvertedType::INT_16:	return "INT_16";
+		case parquet::ConvertedType::INT_32:	return "INT_32";
+		case parquet::ConvertedType::INT_64:	return "INT_64";
+		case parquet::ConvertedType::JSON:		return "JSON";
+		case parquet::ConvertedType::BSON:		return "BSON";
+		case parquet::ConvertedType::INTERVAL:	return "INTERVAL";
+		default:								return "???";
+	}
+}
+static inline const char *
+__ParquetLogicalTypeAsCString(int code)
+{
+	switch (code)
+	{
+		case parquet::LogicalType::Type::STRING:	return "STRING";
+		case parquet::LogicalType::Type::MAP:		return "MAP";
+		case parquet::LogicalType::Type::LIST:		return "LIST";
+		case parquet::LogicalType::Type::ENUM:		return "ENUM";
+		case parquet::LogicalType::Type::DECIMAL:	return "DECIMAL";
+		case parquet::LogicalType::Type::DATE:		return "DATE";
+		case parquet::LogicalType::Type::TIME:		return "TIME";
+		case parquet::LogicalType::Type::TIMESTAMP:	return "TIMESTAMP";
+		case parquet::LogicalType::Type::INTERVAL:	return "INTERVAL";
+		case parquet::LogicalType::Type::INT:		return "INT";
+		case parquet::LogicalType::Type::NIL:		return "NIL";
+		case parquet::LogicalType::Type::JSON:		return "JSON";
+		case parquet::LogicalType::Type::BSON:		return "BSON";
+		case parquet::LogicalType::Type::UUID:		return "UUID";
+		default:									return "???";
+	}
+}
+static inline const char *
+__ParquetLogicalTimeUnitAsCString(int code)
+{
+	switch (code)
+	{
+		case parquet::LogicalType::TimeUnit::MILLIS:	return "ms";
+		case parquet::LogicalType::TimeUnit::MICROS:	return "us";
+		case parquet::LogicalType::TimeUnit::NANOS:		return "ns";
+		default:										return "???";
+	}
+}
 static inline void
 __dumpArrowField(std::ostringstream &json,
 				 const ArrowField *node,
@@ -343,7 +426,11 @@ __dumpArrowField(std::ostringstream &json,
 						 node->_num_children > 0 ||
 						 node->_num_custom_metadata > 0);
 #ifdef HAS_PARQUET
-	if (node->parquet_extra_attrs)
+	if (node->parquet.max_definition_level != 0 ||
+		node->parquet.max_repetition_level != 0 ||
+		node->parquet.physical_type  != (int16_t)parquet::Type::UNDEFINED ||
+		node->parquet.converted_type != (int16_t)parquet::ConvertedType::UNDEFINED ||
+		node->parquet.logical_type   != (int16_t)parquet::LogicalType::Type::UNDEFINED)
 		multiline = true;
 #endif
 	json << "\"Field\"," << (multiline ? NewLine : " ")
@@ -391,21 +478,96 @@ __dumpArrowField(std::ostringstream &json,
 		json << " ]";
 	}
 #if HAS_PARQUET
-	if (node->parquet_extra_attrs)
+	if (node->parquet.max_definition_level != 0 ||
+        node->parquet.max_repetition_level != 0 ||
+		node->parquet.physical_type  != (int16_t)parquet::Type::UNDEFINED ||
+        node->parquet.converted_type != (int16_t)parquet::ConvertedType::UNDEFINED ||
+        node->parquet.logical_type   != (int16_t)parquet::LogicalType::Type::UNDEFINED)
 	{
-		char   *buffer = (char *)alloca(node->_parquet_extra_attrs_len + 1);
-		char   *tok, *pos;
-
-		strcpy(buffer, node->parquet_extra_attrs);
-		for (tok = strtok_r(buffer, "\t", &pos);
-			 tok != NULL;
-			 tok = strtok_r(NULL, "\t", &pos))
+		const char *indent = "              ";
+		json << "," << NewLine
+			 << "\"parquet\" : { "
+			 << "\"max_definition_level\" : " << node->parquet.max_definition_level
+			 << "," << NewLine << indent
+			 << "\"max_repetition_level\" : " << node->parquet.max_repetition_level;
+		if (node->parquet.physical_type  != (int16_t)parquet::Type::UNDEFINED)
+			json << "," << NewLine << indent
+				 << "\"physical_type\" : \""<< __ParquetPhysicalTypeAsCString(node->parquet.physical_type) << "\"";
+		if (node->parquet.converted_type != (int16_t)parquet::ConvertedType::UNDEFINED)
+			json << "," << NewLine << indent
+				 << "\"converted_type\" : \"" << __ParquetConvertedTypeAsCString(node->parquet.converted_type) << "\"";
+		if (node->parquet.logical_type != (int16_t)parquet::LogicalType::Type::UNDEFINED)
 		{
-			json << "," << NewLine << tok;
+			json << "," << NewLine << indent
+				 << "\"logical_type\" : \"" << __ParquetLogicalTypeAsCString(node->parquet.logical_type) << "\"";
+			if (node->parquet.logical_type == parquet::LogicalType::Type::TIME ||
+				node->parquet.logical_type == parquet::LogicalType::Type::TIMESTAMP)
+			{
+				json << "," << NewLine << indent
+					 << "\"logical_time_unit\" : \"" << __ParquetLogicalTimeUnitAsCString(node->parquet.logical_time_unit) << "\"";
+			}
+			else if (node->parquet.logical_type == parquet::LogicalType::Type::DECIMAL)
+			{
+				json << "," << NewLine << indent
+					 << "\"logical_decimal_precision\" : " << node->parquet.logical_decimal_precision
+					 << "," << NewLine << indent
+					 << "\"logical_decimal_scale\" : " << node->parquet.logical_decimal_scale;
+			}
 		}
+		json << "}";
 	}
 #endif
 }
+
+#ifdef HAS_PARQUET
+/*
+ * Parquet Encoding Type
+ */
+static inline const char *
+__ParquetEncodingTypeAsCString(int code)
+{
+	switch (code)
+	{
+		case parquet::Encoding::type::PLAIN:
+			return "PLAIN";
+		case parquet::Encoding::type::PLAIN_DICTIONARY:
+			return "PLAIN_DICTIONARY";
+		case parquet::Encoding::type::RLE:
+			return "RLE";
+		case parquet::Encoding::type::BIT_PACKED:
+			return "BIT_PACKED";
+		case parquet::Encoding::type::DELTA_BINARY_PACKED:
+			return "DELTA_BINARY_PACKED";
+		case parquet::Encoding::type::DELTA_LENGTH_BYTE_ARRAY:
+			return "DELTA_LENGTH_BYTE_ARRAY";
+		case parquet::Encoding::type::DELTA_BYTE_ARRAY:
+			return "DELTA_BYTE_ARRAY";
+		case parquet::Encoding::type::RLE_DICTIONARY:
+			return "RLE_DICTIONARY";
+		case parquet::Encoding::type::BYTE_STREAM_SPLIT:
+			return "BYTE_STREAM_SPLIT";
+		default:
+			return "???";
+	}
+}
+
+/*
+ * Parquet PageType
+ */
+static inline const char *
+__ParquetPageTypeAsCString(int code)
+{
+	switch (code)
+	{
+		case parquet::PageType::type::DATA_PAGE:		return "DATA_PAGE";
+		case parquet::PageType::type::INDEX_PAGE:		return "INDEX_PAGE";
+		case parquet::PageType::type::DICTIONARY_PAGE:	return "DICTIONARY_PAGE";
+		case parquet::PageType::type::DATA_PAGE_V2:		return "DATA_PAGE_V2";
+		default:										return "???";
+	}
+}
+#endif
+
 static inline void
 __dumpArrowFieldNode(std::ostringstream &json,
 					 const ArrowFieldNode *node,
@@ -414,7 +576,14 @@ __dumpArrowFieldNode(std::ostringstream &json,
 	bool	multiline = (node->_stat_min_value_len +
 						 node->_stat_max_value_len > 48);
 #ifdef HAS_PARQUET
-	if (node->parquet_extra_attrs)
+	if (node->parquet.dictionary_page_offset != 0 ||
+		node->parquet.data_page_offset != 0 ||
+		node->parquet.index_page_offset != 0 ||
+		node->parquet.total_compressed_size != 0 ||
+		node->parquet.total_uncompressed_size != 0 ||
+		node->parquet.compression_type != ArrowCompressionType__UNKNOWN ||
+		node->parquet._num_encodings > 0 ||
+		node->parquet._num_encoding_stats > 0)
 		multiline = true;
 #endif
 	json << "\"FieldNode\", " << (multiline ? NewLine : " ")
@@ -431,17 +600,63 @@ __dumpArrowFieldNode(std::ostringstream &json,
 			 << "\"stat_max_value\" : " << __escape_json(node->stat_max_value);
 	}
 #ifdef HAS_PARQUET
-	if (node->parquet_extra_attrs)
+	if (node->parquet.dictionary_page_offset != 0 ||
+		node->parquet.data_page_offset != 0 ||
+		node->parquet.index_page_offset != 0 ||
+		node->parquet.total_compressed_size != 0 ||
+		node->parquet.total_uncompressed_size != 0 ||
+		node->parquet.compression_type != ArrowCompressionType__UNKNOWN ||
+		node->parquet._num_encodings > 0 ||
+		node->parquet._num_encoding_stats > 0)
 	{
-		char   *buffer = (char *)alloca(node->_parquet_extra_attrs_len);
-		char   *tok, *pos;
+		const char *indent = "             ";
 
-		strcpy(buffer, node->parquet_extra_attrs);
-		for (tok = strtok_r(buffer, "\t", &pos);
-			 tok != NULL;
-			 tok = strtok_r(NULL, "\t", &pos))
+		assert(multiline);
+		json << "," << NewLine
+			 << "\"parquet\" : {"
+			 << "\"total_compressed_size\" : " << node->parquet.total_compressed_size << ","
+			 << NewLine << indent
+			 << "\"total_uncompressed_size\" : " << node->parquet.total_uncompressed_size << ","
+			 << NewLine << indent
+			 << "\"data_page_offset\" : " << node->parquet.data_page_offset;
+		if (node->parquet.index_page_offset != 0)
+			json << "," << NewLine << indent
+				 << "\"index_page_offset\" : " << node->parquet.index_page_offset;
+		if (node->parquet.dictionary_page_offset != 0)
+			json << "," << NewLine << indent
+				 << "\"dictionary_page_offset\" : " << node->parquet.dictionary_page_offset;
+		json << "," << NewLine << indent
+			 << "\"compression_type\" : \"" << ArrowCompressionTypeAsCString(node->parquet.compression_type) << "\"";
+		if (node->parquet._num_encodings > 0)
 		{
-			json << "," << NewLine << tok;
+			json << "," << NewLine << indent
+				 << "\"encodings\" : [";
+			for (int k=0; k < node->parquet._num_encodings; k++)
+			{
+				const char *enc = __ParquetEncodingTypeAsCString(node->parquet.encodings[k]);
+				if (k > 0)
+					json << ", ";
+				json << "\"" << enc << "\"";
+			}
+			json << "]";
+		}
+		if (node->parquet._num_encoding_stats > 0)
+		{
+			const char *__indent = "                    ";
+			json << "," << NewLine << indent
+				 << "\"encoding_stats\" : [";
+			for (int k=0; k < node->parquet._num_encoding_stats; k++)
+			{
+				auto	est = &node->parquet.encoding_stats[k];
+				if (k > 0)
+					json << "," << NewLine << indent << __indent;
+				json << "{ \"page_type\" : \""
+					 << __ParquetPageTypeAsCString(est->page_type)
+					 << "\", \"encoding\" : \""
+					 << __ParquetEncodingTypeAsCString(est->encoding)
+					 << "\", \"count\" : " << est->count << "}";
+			}
+			json << "]";
 		}
 	}
 #endif
@@ -665,7 +880,6 @@ __dumpArrowBodyCompression(std::ostringstream &json,
 		 << "\"codec\" : \"" << codec << "\"," << NewLine
 		 << "\"method\" : \"" << method << "\"";
 }
-
 static void
 __dumpArrowNode(std::ostringstream &json, const ArrowNode *node, std::string NewLine)
 {
@@ -819,10 +1033,9 @@ __copyArrowNode(ArrowNode *dest, const ArrowNode *src);
 	} while(0)
 #define COPY_VECTOR(FIELD,NODETYPE)									\
 	do {															\
-        if ((src)->_num_##FIELD == 0)								\
-        {															\
+		(dest)->_num_##FIELD = (src)->_num_##FIELD;					\
+        if ((dest)->_num_##FIELD == 0)								\
             (dest)->FIELD = NULL;									\
-        }															\
         else														\
         {															\
 			(dest)->FIELD = (NODETYPE *)							\
@@ -831,7 +1044,6 @@ __copyArrowNode(ArrowNode *dest, const ArrowNode *src);
                 __copyArrowNode(&(dest)->FIELD[j].node,				\
 								&(src)->FIELD[j].node);				\
         }															\
-        (dest)->_num_##FIELD = (src)->_num_##FIELD;					\
     } while(0)
 
 static inline void
@@ -888,7 +1100,7 @@ __copyArrowTypeUnion(ArrowTypeUnion *dest, const ArrowTypeUnion *src)
 {
 	__copyArrowNode(&dest->node, &src->node);
 	COPY_SCALAR(mode);
-	if (!src->typeIds)
+	if (src->_num_typeIds == 0)
 		dest->typeIds = NULL;
 	else
 	{
@@ -968,7 +1180,14 @@ __copyArrowField(ArrowField *dest, const ArrowField *src)
 	COPY_VECTOR(children, ArrowField);
 	COPY_VECTOR(custom_metadata, ArrowKeyValue);
 #ifdef HAS_PARQUET
-	COPY_CSTRING(parquet_extra_attrs);
+	COPY_SCALAR(parquet.max_definition_level);
+	COPY_SCALAR(parquet.max_repetition_level);
+	COPY_SCALAR(parquet.physical_type);
+	COPY_SCALAR(parquet.converted_type);
+	COPY_SCALAR(parquet.logical_type);
+	COPY_SCALAR(parquet.logical_time_unit);
+	COPY_SCALAR(parquet.logical_decimal_precision);
+	COPY_SCALAR(parquet.logical_decimal_scale);
 #endif
 }
 
@@ -980,7 +1199,34 @@ __copyArrowFieldNode(ArrowFieldNode *dest, const ArrowFieldNode *src)
 	COPY_CSTRING(stat_min_value);
 	COPY_CSTRING(stat_max_value);
 #ifdef HAS_PARQUET
-	COPY_CSTRING(parquet_extra_attrs);
+	COPY_SCALAR(parquet.total_compressed_size);
+	COPY_SCALAR(parquet.total_uncompressed_size);
+	COPY_SCALAR(parquet.data_page_offset);
+	COPY_SCALAR(parquet.dictionary_page_offset);
+	COPY_SCALAR(parquet.index_page_offset);
+	COPY_SCALAR(parquet.compression_type);
+	if (src->parquet._num_encodings == 0)
+		dest->parquet.encodings = NULL;
+	else
+	{
+		dest->parquet.encodings = (int16_t *)
+			__palloc(sizeof(int16_t) * src->parquet._num_encodings);
+		memcpy(dest->parquet.encodings,
+			   src->parquet.encodings,
+			   sizeof(int16_t) * src->parquet._num_encodings);
+	}
+	dest->parquet._num_encodings = src->parquet._num_encodings;
+	if (src->parquet._num_encoding_stats == 0)
+		dest->parquet.encoding_stats = NULL;
+	else
+	{
+		dest->parquet.encoding_stats = (ParquetEncodingStats *)
+			__palloc(sizeof(ParquetEncodingStats) * src->parquet._num_encoding_stats);
+		memcpy(dest->parquet.encoding_stats,
+			   src->parquet.encoding_stats,
+			   sizeof(ParquetEncodingStats) * src->parquet._num_encoding_stats);
+	}
+	dest->parquet._num_encoding_stats = src->parquet._num_encoding_stats;
 #endif
 }
 
@@ -990,7 +1236,7 @@ __copyArrowSchema(ArrowSchema *dest, const ArrowSchema *src)
 	COPY_SCALAR(endianness);
 	COPY_VECTOR(fields, ArrowField);
 	COPY_VECTOR(custom_metadata, ArrowKeyValue);
-	if (!src->features)
+	if (src->_num_features == 0)
 		dest->features = NULL;
 	else
 	{
@@ -1371,6 +1617,17 @@ __equalArrowField(const ArrowField *a,
 								  &b->custom_metadata[i].node))
 				return false;
 		}
+#ifdef HAS_PARQUET
+		if (a->parquet.max_definition_level != b->parquet.max_definition_level ||
+			a->parquet.max_repetition_level != b->parquet.max_repetition_level ||
+			a->parquet.physical_type        != b->parquet.physical_type ||
+			a->parquet.converted_type       != b->parquet.converted_type ||
+			a->parquet.logical_type         != b->parquet.logical_type ||
+			a->parquet.logical_time_unit    != b->parquet.logical_time_unit ||
+			a->parquet.logical_decimal_precision != b->parquet.logical_decimal_precision ||
+			a->parquet.logical_decimal_scale != b->parquet.logical_decimal_scale)
+			return false;
+#endif
 		return true;
 	}
 	return false;
@@ -1380,8 +1637,39 @@ static inline bool
 __equalArrowFieldNode(const ArrowFieldNode *a,
 					  const ArrowFieldNode *b)
 {
-	return (a->length == b->length &&
-			a->null_count == b->null_count);
+	if (a->length == b->length &&
+		a->null_count == b->null_count &&
+		a->_stat_min_value_len == b->_stat_min_value_len &&
+		(a->_stat_min_value_len == 0 ||
+		 memcmp(a->stat_min_value,
+				b->stat_min_value, a->_stat_min_value_len) == 0) &&
+		a->_stat_max_value_len == b->_stat_max_value_len &&
+		(a->_stat_max_value_len == 0 ||
+		 memcmp(a->stat_max_value,
+				b->stat_max_value, a->_stat_max_value_len) == 0))
+	{
+#ifdef HAS_PARQUET
+		if (a->parquet.total_compressed_size   != b->parquet.total_compressed_size ||
+			a->parquet.total_uncompressed_size != b->parquet.total_uncompressed_size ||
+			a->parquet.data_page_offset        != b->parquet.data_page_offset ||
+			a->parquet.dictionary_page_offset  != b->parquet.dictionary_page_offset ||
+			a->parquet.index_page_offset       != b->parquet.index_page_offset ||
+			a->parquet.compression_type        != b->parquet.compression_type ||
+			a->parquet._num_encodings          != b->parquet._num_encodings ||
+			a->parquet._num_encoding_stats     != b->parquet._num_encoding_stats ||
+			(a->parquet._num_encodings > 0 &&
+			 memcmp(a->parquet.encodings,
+					b->parquet.encodings,
+					sizeof(int16_t) * a->parquet._num_encodings) != 0) ||
+			(a->parquet._num_encoding_stats > 0 &&
+			 memcmp(a->parquet.encoding_stats,
+					b->parquet.encoding_stats,
+					sizeof(ParquetEncodingStats) * a->parquet._num_encoding_stats) != 0))
+			return false;
+#endif
+		return true;
+	}
+	return false;
 }
 
 static inline bool
@@ -1751,6 +2039,10 @@ readArrowFieldNode(ArrowFieldNode *node,
 	INIT_ARROW_NODE(node, FieldNode);
 	node->length     = fnode->length();
 	node->null_count = fnode->null_count();
+	/* max_value/min_value shall be set later */
+#ifdef HAS_PARQUET
+	node->parquet.compression_type = ArrowCompressionType__UNKNOWN;
+#endif
 }
 
 static void
@@ -2114,6 +2406,11 @@ readArrowField(ArrowField *node,
 							  __kv->value()->str());
 		}
 	}
+#if HAS_PARQUET
+	node->parquet.physical_type = parquet::Type::UNDEFINED;
+	node->parquet.converted_type = parquet::ConvertedType::UNDEFINED;
+	node->parquet.logical_type = parquet::LogicalType::Type::UNDEFINED;
+#endif
 }
 
 static void
@@ -2759,135 +3056,37 @@ __readParquetFieldMetadata(ArrowField *node,
 	/* add extra stuff of parquet */
 	if (cdesc)
 	{
-		std::ostringstream json;
-		std::string temp;
-		char	   *extra_attrs;
+		auto	logical_type = cdesc->logical_type();
 
-		json << "\"physical_type\" : ";
-		switch (cdesc->physical_type())
+		node->parquet.max_definition_level   = cdesc->max_definition_level();
+		node->parquet.max_repetition_level   = cdesc->max_repetition_level();
+		node->parquet.physical_type  = (int16_t)cdesc->physical_type();
+		node->parquet.converted_type = (int16_t)cdesc->converted_type();
+		if (logical_type)
 		{
-			case parquet::Type::BOOLEAN:
-				json << "\"BOOLEAN\"";
-				break;
-			case parquet::Type::INT32:
-				json << "\"INT32\"";
-				break;
-			case parquet::Type::INT64:
-				json << "\"INT64\"";
-				break;
-			case parquet::Type::INT96:
-				json << "\"INT96\"";
-				break;
-			case parquet::Type::FLOAT:
-				json << "\"FLOAT\"";
-				break;
-			case parquet::Type::DOUBLE:
-				json << "\"DOUBLE\"";
-				break;
-			case parquet::Type::BYTE_ARRAY:
-				json << "\"BYTE_ARRAY\"";
-				break;
-			case parquet::Type::FIXED_LEN_BYTE_ARRAY:
-				json << "\"FIXED_LEN_BYTE_ARRAY(" << cdesc->type_length() << ")\"";
-				break;
-			default:
-				json << "\"???\"";
-				break;
+			node->parquet.logical_type = (int16_t)logical_type->type();
+			switch (logical_type->type())
+			{
+				case parquet::LogicalType::Type::DECIMAL: {
+					auto decimal_type = std::static_pointer_cast<const parquet::DecimalLogicalType>(logical_type);
+					node->parquet.logical_decimal_precision = decimal_type->precision();
+					node->parquet.logical_decimal_scale = decimal_type->scale();
+					break;
+				}
+				case parquet::LogicalType::Type::TIME: {
+					auto time_type = std::static_pointer_cast<const parquet::TimeLogicalType>(logical_type);
+					node->parquet.logical_time_unit = time_type->time_unit();
+					break;
+				}
+				case parquet::LogicalType::Type::TIMESTAMP: {
+					auto ts_type = std::static_pointer_cast<const parquet::TimestampLogicalType>(logical_type);
+					node->parquet.logical_time_unit = ts_type->time_unit();
+					break;
+				}
+				default:
+					break;
+			}
 		}
-
-		json << "\t\"converted_type\" : ";
-		switch (cdesc->converted_type())
-		{
-			case parquet::ConvertedType::type::NONE:
-				json << "\"NONE\"";
-				break;
-			case parquet::ConvertedType::type::UTF8:
-				json << "\"UTF8\"";
-				break;
-			case parquet::ConvertedType::type::MAP:
-				json << "\"MAP\"";
-				break;
-			case parquet::ConvertedType::type::MAP_KEY_VALUE:
-				json << "\"MAP_KEY_VALUE\"";
-				break;
-			case parquet::ConvertedType::type::LIST:
-				json << "\"LIST\"";
-				break;
-			case parquet::ConvertedType::type::ENUM:
-				json << "\"ENUM\"";
-				break;
-			case parquet::ConvertedType::type::DECIMAL:
-				json << "\"DECIMAL("
-					 << cdesc->type_precision()
-					 << ","
-					 << cdesc->type_scale() << ")\"";
-				break;
-			case parquet::ConvertedType::type::DATE:
-				json << "\"DATE\"";
-				break;
-			case parquet::ConvertedType::type::TIME_MILLIS:
-				json << "\"TIME[ms]\"";
-				break;
-			case parquet::ConvertedType::type::TIME_MICROS:
-				json << "\"TIME[us]\"";
-				break;
-			case parquet::ConvertedType::type::TIMESTAMP_MILLIS:
-				json << "\"TIMESTAMP[ms]\"";
-				break;
-			case parquet::ConvertedType::type::TIMESTAMP_MICROS:
-				json << "\"TIMESTAMP[us]\"";
-				break;
-			case parquet::ConvertedType::type::UINT_8:
-				json << "\"UINT_8\"";
-				break;
-			case parquet::ConvertedType::type::UINT_16:
-				json << "\"UINT_16\"";
-				break;
-			case parquet::ConvertedType::type::UINT_32:
-				json << "\"UINT_32\"";
-				break;
-			case parquet::ConvertedType::type::UINT_64:
-				json << "\"UINT_64\"";
-				break;
-			case parquet::ConvertedType::type::INT_8:
-				json << "\"INT_8\"";
-				break;
-			case parquet::ConvertedType::type::INT_16:
-				json << "\"INT_16\"";
-				break;
-			case parquet::ConvertedType::type::INT_32:
-				json << "\"INT_32\"";
-				break;
-			case parquet::ConvertedType::type::INT_64:
-				json << "\"INT_64\"";
-				break;
-			case parquet::ConvertedType::type::JSON:
-				json << "\"JSON\"";
-				break;
-			case parquet::ConvertedType::type::BSON:
-				json << "\"BSON\"";
-				break;
-			case parquet::ConvertedType::type::INTERVAL:
-				json << "\"INTERVAL\"";
-				break;
-			default:
-				json << "\"???\"";
-				break;
-		}
-
-		auto l_type = cdesc->logical_type();
-		if (l_type)
-			json << "\t\"logical_type\" : \"" << l_type->ToString() <<"\"";
-
-		json << "\t\"max_definition_level\" : " << cdesc->max_definition_level()
-			 << "\t\"max_repetition_level\" : " << cdesc->max_repetition_level();
-
-		temp = json.str();
-		extra_attrs = (char *)__palloc(temp.size() + 1);
-		memcpy(extra_attrs, temp.data(), temp.size());
-		extra_attrs[temp.size()] = '\0';
-		node->parquet_extra_attrs = extra_attrs;
-		node->_parquet_extra_attrs_len = std::strlen(extra_attrs);
 	}
 }
 
@@ -3016,54 +3215,35 @@ __readParquetMinMaxStats(ArrowFieldNode *field,
 }
 
 /*
- * __parquetEncodingAsCString
+ * __arrowCompressionTypeFromMetadata
  */
-static inline const char *
-__parquetEncodingAsCString(parquet::Encoding::type code)
+static inline ArrowCompressionType
+__arrowCompressionTypeFromMetadata(arrow::Compression::type code)
 {
 	switch (code)
 	{
-		case parquet::Encoding::type::PLAIN:
-			return "PLAIN";
-		case parquet::Encoding::type::PLAIN_DICTIONARY:
-			return "PLAIN_DICTIONARY";
-		case parquet::Encoding::type::RLE:
-			return "RLE";
-		case parquet::Encoding::type::BIT_PACKED:
-			return "BIT_PACKED";
-		case parquet::Encoding::type::DELTA_BINARY_PACKED:
-			return "DELTA_BINARY_PACKED";
-		case parquet::Encoding::type::DELTA_LENGTH_BYTE_ARRAY:
-			return "DELTA_LENGTH_BYTE_ARRAY";
-		case parquet::Encoding::type::DELTA_BYTE_ARRAY:
-			return "DELTA_BYTE_ARRAY";
-		case parquet::Encoding::type::RLE_DICTIONARY:
-			return "RLE_DICTIONARY";
-		case parquet::Encoding::type::BYTE_STREAM_SPLIT:
-			return "BYTE_STREAM_SPLIT";
+		case arrow::Compression::type::UNCOMPRESSED:
+			return ArrowCompressionType__UNCOMPRESSED;
+		case arrow::Compression::type::SNAPPY:
+			return ArrowCompressionType__SNAPPY;
+		case arrow::Compression::type::GZIP:
+			return ArrowCompressionType__GZIP;
+		case arrow::Compression::type::BROTLI:
+			return ArrowCompressionType__BROTLI;
+		case arrow::Compression::type::ZSTD:
+			return ArrowCompressionType__ZSTD;
+		case arrow::Compression::type::LZ4:
+			return ArrowCompressionType__LZ4;
+		case arrow::Compression::type::LZ4_FRAME:
+			return ArrowCompressionType__LZ4_FRAME;
+		case arrow::Compression::type::LZO:
+			return ArrowCompressionType__LZO;
+		case arrow::Compression::type::BZ2:
+			return ArrowCompressionType__BZ2;
+		case arrow::Compression::type::LZ4_HADOOP:
+			return ArrowCompressionType__LZ4_HADOOP;
 		default:
-			return "unknown";
-	}
-}
-
-/*
- * __parquetPageTypeAsCString
- */
-static inline const char *
-__parquetPageTypeAsCString(parquet::PageType::type code)
-{
-	switch (code)
-	{
-		case parquet::PageType::type::DATA_PAGE:
-			return "DATA_PAGE";
-		case parquet::PageType::type::INDEX_PAGE:
-			return "INDEX_PAGE";
-		case parquet::PageType::type::DICTIONARY_PAGE:
-			return "DICTIONARY_PAGE";
-		case parquet::PageType::type::DATA_PAGE_V2:
-			return "DATA_PAGE_V2";
-		default:
-			return "unknown";
+			return ArrowCompressionType__UNKNOWN;
 	}
 }
 
@@ -3096,16 +3276,12 @@ __readParquetRowGroupMetadata(ArrowMessage *rbatch_message,
 	rbatch->_num_nodes = rg_meta->num_columns();
 	rbatch->nodes = (ArrowFieldNode *)
 		__palloc(sizeof(ArrowFieldNode) * rbatch->_num_nodes);
-	rbatch->_num_nodes = rg_meta->num_columns();
-	rbatch->buffers = (ArrowBuffer *)
-		__palloc(sizeof(ArrowBuffer) * rbatch->_num_nodes);
 	for (int j=0; j < rg_meta->num_columns(); j++)
 	{
 		auto	col_meta = rg_meta->ColumnChunk(j);
 		auto	field = &rbatch->nodes[j];
-		auto	buffer = &rbatch->buffers[j];
-		std::ostringstream json;
-		std::string temp;
+		auto	encodings = col_meta->encodings();
+		auto	encoding_stats = col_meta->encoding_stats();
 
 		INIT_ARROW_NODE(field, FieldNode);
 		field->length = col_meta->num_values();
@@ -3121,49 +3297,38 @@ __readParquetRowGroupMetadata(ArrowMessage *rbatch_message,
 		/*
 		 * Some additional Parquet specific attrobutes for dump only
 		 */
-		json << "\"totalUncompressedSize\" : " << col_meta->total_uncompressed_size();
-		if (col_meta->has_dictionary_page())
-			json << "\t\"dictionaryPageOffset\" : " << col_meta->dictionary_page_offset();
-		if (col_meta->has_index_page())
-			json << "\t\"indexPageOffset\" : " << col_meta->index_page_offset();
-		auto	encodings = col_meta->encodings();
-		if (!encodings.empty())
+		field->parquet.dictionary_page_offset  = col_meta->dictionary_page_offset();
+		field->parquet.data_page_offset        = col_meta->data_page_offset();
+		field->parquet.index_page_offset       = col_meta->index_page_offset();
+		field->parquet.total_compressed_size   = col_meta->total_compressed_size();
+		field->parquet.total_uncompressed_size = col_meta->total_uncompressed_size();
+		field->parquet.compression_type        =
+			__arrowCompressionTypeFromMetadata(col_meta->compression());
+		field->parquet._num_encodings = encodings.size();
+		if (field->parquet._num_encodings > 0)
 		{
-			json << "\t\"encodings\" : [";
-			for (auto cell = encodings.begin(); cell != encodings.end(); cell++)
-			{
-				json << (cell != encodings.begin() ? ", " : " ")
-					 << "\"" <<__parquetEncodingAsCString(*cell) << "\"";
-			}
-			json << " ]";
+			field->parquet.encodings = (int16_t *)
+				__palloc(sizeof(int16_t) * field->parquet._num_encodings);
+			for (int k=0; k < field->parquet._num_encodings; k++)
+				field->parquet.encodings[k] = (int16_t)encodings[k];
 		}
-
-		auto	encoding_stats = col_meta->encoding_stats();
-		if (!encoding_stats.empty())
+		field->parquet._num_encoding_stats = encoding_stats.size();
+		if (field->parquet._num_encoding_stats > 0)
 		{
-			json << "\t\"encodingStats\" : [";
-			for (auto cell = encoding_stats.begin(); cell != encoding_stats.end(); cell++)
+			field->parquet.encoding_stats = (ParquetEncodingStats *)
+				__palloc(sizeof(ParquetEncodingStats) * field->parquet._num_encoding_stats);
+			for (int k=0; k < field->parquet._num_encoding_stats; k++)
 			{
-				auto	est = (*cell);
+				auto	dst = &field->parquet.encoding_stats[k];
+				auto	src = encoding_stats[k];
 
-				json << (cell != encoding_stats.begin() ? ", " : " ");
-				json << "{ \"page_type\" : "
-					 << "\"" << __parquetPageTypeAsCString(est.page_type) << "\""
-					 << ", \"encoding\" : "
-					 << "\"" << __parquetEncodingAsCString(est.encoding) << "\""
-					 << ", \"count\" : " << est.count << " }";
+				dst->page_type = (int16_t)src.page_type;
+				dst->encoding  = (int16_t)src.encoding;
+				dst->count     = src.count;
 			}
-			json << " ]";
 		}
-		temp = json.str();
-		field->parquet_extra_attrs = __pstrdup(temp.c_str());
-		field->_parquet_extra_attrs_len = std::strlen(field->parquet_extra_attrs);
-
-		INIT_ARROW_NODE(buffer, Buffer);
-		buffer->offset = col_meta->data_page_offset();
-		buffer->length = col_meta->total_compressed_size();
-
-		bodyLength = buffer->offset + buffer->length;
+		bodyLength = Max(bodyLength, (col_meta->data_page_offset() +
+									  col_meta->total_compressed_size()));
 	}
 
 	/*

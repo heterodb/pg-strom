@@ -5,13 +5,13 @@
  */
 #ifndef _ARROW_TOOLS_H_
 #define _ARROW_TOOLS_H_
-#include <arrow/api.h>				/* dnf install libarrow-devel */
+#include <arrow/api.h>				/* dnf install arrow-devel, or apt install libarrow-dev */
 #include <arrow/io/api.h>
 #include <arrow/ipc/api.h>
 #include <arrow/ipc/reader.h>
 #include <arrow/util/value_parsing.h>
 #ifdef HAS_PARQUET
-#include <parquet/arrow/reader.h>	/* dnf install parquet-libs-devel */
+#include <parquet/arrow/reader.h>	/* dnf install parquet-devel, or apt install libparquet-dev */
 #include <parquet/file_reader.h>
 #include <parquet/schema.h>
 #include <parquet/statistics.h>
