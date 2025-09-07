@@ -1007,6 +1007,74 @@ dumpArrowNode(const ArrowNode *node)
 	}
 	return result;
 }
+
+/*
+ * dumpArrowFileInfo
+ */
+char *
+dumpArrowFileInfo(const ArrowFileInfo *af_info)
+{
+	char   *emsg = NULL;
+	char   *result;
+	try {
+		std::ostringstream json;
+		std::string temp;
+
+		json << "{ \"filename\" : \"" << af_info->filename << "\",\n"
+			 << "  \"filesize\" : "   << af_info->stat_buf.st_size << ",\n"
+			 << "  \"footer\" : ";
+		__dumpArrowNode(json, (const ArrowNode *)&af_info->footer,
+						std::string("\n               "));
+		if (af_info->_num_dictionaries > 0)
+		{
+			json << ",\n"
+				 << "  \"dictionaries\" : [\n          ";
+			for (int k=0; k < af_info->_num_dictionaries; k++)
+			{
+				if (k > 0)
+					json << ",\n          ";
+				__dumpArrowNode(json, (const ArrowNode *)&af_info->dictionaries[k],
+								std::string("\n          "));
+			}
+			json << "]";
+		}
+		if (af_info->_num_recordBatches > 0)
+		{
+			json << ",\n"
+				 << "  \"record-batches\" : [\n          ";
+			for (int k=0; k < af_info->_num_recordBatches; k++)
+			{
+				if (k > 0)
+					json << ",\n";
+				__dumpArrowNode(json, (const ArrowNode *)&af_info->recordBatches[k],
+								std::string("\n          "));
+			}
+			json << "]";
+		}
+		json << "\n}\n";
+		/* result as cstring */
+		temp = json.str();
+		result = (char *)__palloc(temp.size() + 1);
+		memcpy(result, temp.data(), temp.size());
+		result[temp.size()] = '\0';
+	}
+	catch (const std::exception &e) {
+		const char *estr = e.what();
+		emsg = (char *)alloca(std::strlen(estr)+1);
+		strcpy(emsg, estr);
+	}
+	/* error report */
+	if (emsg)
+	{
+#ifdef PGSTROM_DEBUG_BUILD
+		elog(ERROR, "%s", emsg);
+#else
+		fputs(emsg, stderr);
+		exit(1);
+#endif
+	}
+	return result;
+}
 #undef __SPACES
 
 // ============================================================
