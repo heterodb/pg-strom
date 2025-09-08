@@ -14,7 +14,7 @@ HAS_PARQUET = $(shell pkgconf --exists parquet>/dev/null 2>&1 && echo -n yes)
 ALL_PROGS = arrow2csv_legacy
 ifeq ($(HAS_PG_CONFIG),yes)
 ALL_PROGS += pg2arrow
-ALL_PROGS += pg2arrow_legacy
+ALL_PROGS += pg2arrow_next
 endif
 ifeq ($(HAS_MYSQL_CONFIG),yes)
 ALL_PROGS += mysql2arrow_legacy
@@ -52,7 +52,7 @@ endif
 ifeq ($(DEBUG),1)
 CFLAGS += -g -O0
 endif
-CPPFLAGS = -std=c++17 $(CFLAGS)
+
 PG2ARROW_LDFLAGS = $(shell $(PG_CONFIG) --ldflags) \
                 -L $(shell $(PG_CONFIG) --libdir) -lpq
 ifeq ($(HAS_LIBARROW),yes)
@@ -68,6 +68,7 @@ TSV2ARROW_LDFLAGS += $(shell pkgconf --libs arrow)
 ARROW2CSV_LDFLAGS += $(shell pkgconf --libs arrow)
 endif
 endif
+CPPFLAGS += -std=c++17 $(CFLAGS)
 
 PREFIX		?= /usr/local
 BINDIR		?= $(PREFIX)/bin
@@ -78,19 +79,19 @@ all: $(ALL_PROGS)
 # Only if pg_config is available
 #
 ifeq ($(HAS_PG_CONFIG),yes)
-pg2arrow: $(PG2ARROW_OBJS)
+pg2arrow_next: $(PG2ARROW_OBJS)
 	$(CXX) $(CPPFLAGS) -o $@ $(PG2ARROW_OBJS) $(PG2ARROW_LDFLAGS)
 
-install-pg2arrow: pg2arrow
+install-pg2arrow_next: pg2arrow_next
 	mkdir -p $(DESTDIR)$(BINDIR) && \
 	install -m 0755 pg2arrow $(DESTDIR)$(BINDIR)
 
-pg2arrow_legacy: $(PG2ARROW_LEGACY_OBJS)
+pg2arrow: $(PG2ARROW_LEGACY_OBJS)
 	$(CC) -o $@ $(PG2ARROW_LEGACY_OBJS) -lpq -lpthread \
 	$(shell $(PG_CONFIG) --ldflags) \
 	-L $(shell $(PG_CONFIG) --libdir)
 
-install-pg2arrow_legacy: pg2arrow_legacy
+install-pg2arrow: pg2arrow_legacy
 	mkdir -p $(DESTDIR)$(BINDIR) && \
 	install -m 0755 pg2arrow_legacy $(DESTDIR)$(BINDIR)
 
