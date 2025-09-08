@@ -21,16 +21,17 @@
 #include <arrow/io/api.h>
 #include <arrow/ipc/api.h>
 #include <arrow/ipc/reader.h>
-#ifdef HAS_PARQUET
 #include <parquet/arrow/reader.h>	/* dnf install parquet-devel, or apt install libparquet-dev */
 #include <parquet/file_reader.h>
 #include <parquet/schema.h>
 #include <parquet/statistics.h>
 #include <parquet/stream_writer.h>
-#endif
 #include <libpq-fe.h>
 #include "arrow_defs.h"
 
+// ------------------------------------------------
+// Type definitions
+// ------------------------------------------------
 struct compressOption
 {
 	const char	   *colname;	/* may be NULL */
@@ -44,6 +45,9 @@ struct configOption
 	const char	   *value;
 };
 using configOption	= struct configOption;
+
+using	arrowBuilder	= std::shared_ptr<arrow::ArrayBuilder>;
+using	arrowBuilderVector = std::vector<arrowBuilder>;
 
 // ------------------------------------------------
 // Command line options
@@ -79,19 +83,18 @@ static std::vector<configOption>	pgsql_config_options;	/* --set */
 static volatile bool	worker_setup_done  = false;
 static pthread_mutex_t	worker_setup_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t	worker_setup_cond  = PTHREAD_COND_INITIALIZER;
-static pthread_t	   *worker_threads = NULL;
+static std::vector<pthread_t>			worker_threads;
+static std::vector<arrowBuilderVector>	worker_builders;
+static const char	   *snapshot_identifier = NULL;
+static std::shared_ptr<arrow::Schema> arrow_schema;
 
 // ------------------------------------------------
 // Thread local variables
 // ------------------------------------------------
-static __thread PGconn	   *pgsql_conn = NULL;
-static __thread const char *server_timezone = NULL;
-
-
-
-
-
-
+static thread_local	PGconn	   *pgsql_conn = NULL;
+static thread_local PGresult   *pgsql_res = NULL;
+static thread_local int			pgsql_index = 0;
+static thread_local const char *server_timezone = NULL;
 
 // ------------------------------------------------
 // Error Reporting
@@ -126,6 +129,9 @@ static __thread const char *server_timezone = NULL;
 // ------------------------------------------------
 // Misc utility functions
 // ------------------------------------------------
+#define Max(a,b)		((a)>(b) ? (a) : (b))
+#define Min(a,b)		((a)<(b) ? (a) : (b))
+
 static inline void *
 palloc(size_t sz)
 {
@@ -262,6 +268,556 @@ __replace_string(std::string &str,
 		pos += to.length();
 	}
 }
+
+
+
+
+#define WITH_RECURSIVE_PG_BASE_TYPE							\
+	"WITH RECURSIVE pg_base_type AS ("						\
+	"  SELECT 0 depth, oid type_id, oid base_id,"			\
+	"         typname, typnamespace,"						\
+	"         typlen, typbyval, typalign, typtype,"			\
+	"         typrelid, typelem, NULL::int typtypmod"		\
+	"    FROM pg_catalog.pg_type t"							\
+	"   WHERE t.typbasetype = 0"							\
+	" UNION ALL "											\
+	"  SELECT b.depth+1, t.oid type_id, b.base_id,"			\
+	"         b.typname, b.typnamespace,"					\
+	"         b.typlen, b.typbyval, b.typalign, b.typtype,"	\
+	"         b.typrelid, b.typelem,"						\
+	"         CASE WHEN b.typtypmod IS NULL"				\
+	"              THEN t.typtypmod"						\
+	"              ELSE b.typtypmod"						\
+	"         END typtypmod"								\
+	"    FROM pg_catalog.pg_type t, pg_base_type b"			\
+	"   WHERE t.typbasetype = b.type_id"					\
+	")\n"
+
+static void
+pgsql_define_arrow_list_field(arrow::FieldVector &arrow_subfields,
+							  arrowBuilderVector &arrow_builders,
+							  const char *attname,
+							  Oid typelemid);
+static void
+pgsql_define_arrow_composite_field(arrow::FieldVector &arrow_subfields,
+								   arrowBuilderVector &arrow_builders,
+								   Oid typrelid);
+
+/*
+ * pgsql_define_arrow_field
+ */
+static void
+pgsql_define_arrow_field(arrow::FieldVector &arrow_fields,
+						 arrowBuilderVector &arrow_builders,
+						 const char *attname,
+						 Oid atttypid,
+						 int atttypmod,
+						 int attlen,
+						 char attbyval,
+						 char attalign,
+						 char typtype,
+						 Oid typrelid,			/* valid, if composite type */
+						 Oid typelemid,			/* valid, if array type */
+						 const char *nspname,
+						 const char *typname,
+						 const char *extname)	/* extension name, if any */
+{
+	auto	pool = arrow::default_memory_pool();
+	std::shared_ptr<arrow::ArrayBuilder> builder;
+
+	/* array type */
+	if (typelemid != 0)
+	{
+		arrow::FieldVector	arrow_subfields;
+		arrowBuilderVector	arrow_subbuilders;
+
+		pgsql_define_arrow_list_field(arrow_subfields,
+									  arrow_subbuilders,
+									  attname,
+									  typelemid);
+		//make List Builder
+		goto out;
+	}
+	/* composite type */
+	if (typrelid != 0)
+	{
+		arrow::FieldVector	arrow_subfields;
+		arrowBuilderVector	arrow_subbuilders;
+
+		pgsql_define_arrow_composite_field(arrow_subfields,
+										   arrow_subbuilders,
+										   typrelid);
+		//make StructBuilder
+		goto out;
+	}
+	/* enum type */
+	if (typtype == 'e')
+	{
+		Elog("Enum type is not supported yet");
+	}
+	/* several known type provided by extension */
+	if (extname != NULL)
+	{
+		/* contrib/cube (relocatable) */
+		if (strcmp(typname, "cube") == 0 &&
+			strcmp(extname, "cube") == 0)
+		{
+			goto out;
+		}
+	}
+	/* other built-in types */
+	if (strcmp(nspname, "pg_catalog") == 0)
+	{
+		/* well known built-in data types? */
+		if (strcmp(typname, "bool") == 0)
+		{
+			builder = std::make_shared<arrow::BooleanBuilder>
+				(arrow::boolean(), pool);
+		}
+		else if (strcmp(typname, "int1") == 0)
+		{
+			builder = std::make_shared<arrow::Int8Builder>
+				(arrow::int8(), pool);
+		}
+		else if (strcmp(typname, "int2") == 0)
+		{
+			builder = std::make_shared<arrow::Int16Builder>
+				(arrow::int16(), pool);
+		}
+		else if (strcmp(typname, "int4") == 0)
+		{
+			builder = std::make_shared<arrow::Int32Builder>
+				(arrow::int32(), pool);
+		}
+		else if (strcmp(typname, "int8") == 0)
+		{
+			builder = std::make_shared<arrow::Int64Builder>
+				(arrow::int64(), pool);
+		}
+		else if (strcmp(typname, "float2") == 0)
+		{
+			builder = std::make_shared<arrow::HalfFloatBuilder>
+				(arrow::float16(), pool);
+		}
+		else if (strcmp(typname, "float4") == 0)
+		{
+			builder = std::make_shared<arrow::FloatBuilder>
+				(arrow::float32(), pool);
+		}
+		else if (strcmp(typname, "float8") == 0)
+		{
+			builder = std::make_shared<arrow::DoubleBuilder>
+				(arrow::float64(), pool);
+		}
+		else if (strcmp(typname, "numeric") == 0)
+		{
+			//calc prec, scale
+			
+			builder = std::make_shared<arrow::Decimal256Builder>
+				(arrow::decimal256(36,9), pool);
+		}
+		else if (strcmp(typname, "date") == 0)
+		{
+			builder = std::make_shared<arrow::Date32Builder>
+				(arrow::date32(), pool);
+		}
+		else if (strcmp(typname, "time") == 0)
+		{
+			builder = std::make_shared<arrow::Time64Builder>
+				(arrow::time64(arrow::TimeUnit::MICRO), pool);
+		}
+		else if (strcmp(typname, "timestamp") == 0)
+		{
+			builder = std::make_shared<arrow::TimestampBuilder>
+				(arrow::timestamp(arrow::TimeUnit::MICRO), pool);
+		}
+		else if (strcmp(typname, "timestamptz") == 0)
+		{
+			builder = std::make_shared<arrow::TimestampBuilder>
+				(arrow::timestamp(arrow::TimeUnit::MICRO), pool);
+		}
+		else if (strcmp(typname, "interval") == 0)
+		{
+			builder = std::make_shared<arrow::DayTimeIntervalBuilder>
+				(arrow::day_time_interval(), pool);
+		}
+		else if (strcmp(typname, "text") == 0 ||
+				 strcmp(typname, "varchar") == 0)
+		{
+			builder = std::make_shared<arrow::StringBuilder>
+				(arrow::utf8(), pool);
+		}
+		else if (strcmp(typname, "bpchar") == 0)
+		{
+			int		unitsz = Max(atttypmod - 4, 0);
+			builder = std::make_shared<arrow::FixedSizeBinaryBuilder>
+				(arrow::fixed_size_binary(unitsz));
+		}
+	}
+	/* elsewhere, we save the values just bunch of binary data */
+	if (attlen == 1)
+	{
+		builder = std::make_shared<arrow::UInt8Builder>(arrow::uint8(), pool);
+	}
+	else if (attlen == 2)
+	{
+		builder = std::make_shared<arrow::UInt16Builder>(arrow::uint16(), pool);
+	}
+	else if (attlen == 4)
+	{
+		builder = std::make_shared<arrow::UInt32Builder>(arrow::uint32(), pool);
+	}
+	else if (attlen == 8)
+	{
+		builder = std::make_shared<arrow::UInt64Builder>(arrow::uint64(), pool);
+	}
+	else if (attlen == -1)
+	{
+		builder = std::make_shared<arrow::BinaryBuilder>(arrow::binary(), pool);
+	}
+	else
+	{
+		/*
+		 * MEMO: Unfortunately, we have no portable way to pack user defined
+		 * fixed-length binary data types, because their 'send' handler often
+		 * manipulate its internal data representation.
+		 * Please check box_send() for example. It sends four float8 (which
+		 * is reordered to bit-endien) values in 32bytes. We cannot understand
+		 * its binary format without proper knowledge.
+		 */
+		Elog("PostgreSQL type: '%s' is not supported", typname);
+	}
+out:
+	/*
+	 * Append field and builder
+	 */
+	arrow_builders.push_back(builder);
+	arrow_fields.push_back(arrow::field(attname,
+										builder->type(),
+										true));
+}
+
+/*
+ * pgsql_define_arrow_list_field
+ */
+static void
+pgsql_define_arrow_list_field(arrow::FieldVector &arrow_subfields,
+							  arrowBuilderVector &arrow_subbuilders,
+							  const char *attname,
+							  Oid typelemid)
+{
+	PGresult   *res;
+	char	   *namebuf = (char *)alloca(strlen(attname) + 10);
+	char		query[4096];
+
+	sprintf(namebuf, "__%s", attname);
+	snprintf(query, sizeof(query),
+			 WITH_RECURSIVE_PG_BASE_TYPE
+			 "SELECT n.nspname,"
+			 "       b.typname,"
+			 "       CASE WHEN b.typtypmod IS NULL"
+			 "            THEN -1::int"
+			 "            ELSE b.typtypmod"
+			 "       END typtypmod,"
+			 "       b.typlen,"
+			 "       b.typbyval,"
+			 "       b.typalign,"
+			 "       b.typtype,"
+			 "       b.typrelid,"
+			 "       b.typelem,"
+			 "       e.extname,"
+			 "       CASE WHEN e.extrelocatable"
+			 "            THEN e.extnamespace::regnamespace::text"
+			 "            ELSE NULL::text"
+			 "       END extnamespace"
+			 "  FROM pg_catalog.pg_namespace n,"
+			 "       pg_base_type b"
+			 "  LEFT OUTER JOIN"
+			 "      (pg_catalog.pg_depend d JOIN"
+			 "       pg_catalog.pg_extension e ON"
+			 "       d.classid = 'pg_catalog.pg_type'::regclass AND"
+			 "       d.refclassid = 'pg_catalog.pg_extension'::regclass AND"
+			 "       d.refobjid = e.oid AND"
+			 "       d.deptype = 'e')"
+			 "    ON b.base_id = d.objid"
+			 " WHERE b.typnamespace = n.oid"
+			 "   AND b.type_id = %u", typelemid);
+	res = PQexec(pgsql_conn, query);
+	if (PQresultStatus(res) != PGRES_TUPLES_OK)
+		Elog("failed on pg_type system catalog query: %s",
+			 PQresultErrorMessage(res));
+	if (PQntuples(res) != 1)
+		Elog("unexpected number of result rows: %d", PQntuples(res));
+
+	pgsql_define_arrow_field(arrow_subfields,
+							 arrow_subbuilders,
+							 namebuf,
+							 typelemid,						//type_oid
+							 atol(PQgetvalue(res, 0, 2)),	//typtypmod
+							 atol(PQgetvalue(res, 0, 3)),	//b.typlen
+							 *PQgetvalue(res, 0, 4),		//b.typbyval
+							 *PQgetvalue(res, 0, 5),		//b.typalign
+							 *PQgetvalue(res, 0, 6),		//b.typtype
+							 atol(PQgetvalue(res, 0, 7)),	//b.typrelid
+							 atol(PQgetvalue(res, 0, 8)),	//b.typelem
+							 PQgetvalue(res, 0, 0),			//n.nspname
+							 PQgetvalue(res, 0, 1),			//b.typname
+							 (PQgetisnull(res, 0, 9)
+							  ? NULL
+							  : PQgetvalue(res, 0, 9)));	//e.extname
+}
+
+/*
+ * pgsql_define_arrow_composite_field
+ */
+static void
+pgsql_define_arrow_composite_field(arrow::FieldVector &arrow_subfields,
+								   arrowBuilderVector &arrow_subbuilders,
+								   Oid comptype_relid)
+{
+	PGresult   *res;
+	char		query[4096];
+	int			nfields;
+
+	snprintf(query, sizeof(query),
+			 WITH_RECURSIVE_PG_BASE_TYPE
+			 "SELECT a.attname,"
+			 "       a.attnum,"
+			 "       b.base_id atttypid,"
+			 "       CASE WHEN b.typtypmod IS NULL"
+			 "            THEN a.atttypmod"
+			 "            ELSE b.typtypmod"
+			 "       END atttypmod,"
+			 "       b.typlen,"
+			 "       b.typbyval,"
+			 "       b.typalign,"
+			 "       b.typtype,"
+			 "       b.typrelid,"
+			 "       b.typelem,"
+			 "       n.nspname,"
+			 "       b.typname,"
+			 "       e.extname,"
+			 "       CASE WHEN e.extrelocatable"
+			 "            THEN e.extnamespace::regnamespace::text"
+			 "            ELSE NULL::text"
+			 "       END extnamespace"
+			 "  FROM pg_catalog.pg_attribute a,"
+			 "       pg_catalog.pg_namespace n,"
+			 "       pg_base_type b"
+			 "  LEFT OUTER JOIN"
+			 "      (pg_catalog.pg_depend d JOIN"
+			 "       pg_catalog.pg_extension e ON"
+			 "       d.classid = 'pg_catalog.pg_type'::regclass AND"
+			 "       d.refclassid = 'pg_catalog.pg_extension'::regclass AND"
+			 "       d.refobjid = e.oid AND"
+			 "       d.deptype = 'e')"
+			 "    ON b.base_id = d.objid"
+			 " WHERE b.typnamespace = n.oid"
+			 "   AND b.type_id = a.atttypid"
+			 "   AND a.attnum > 0"
+			 "   AND a.attrelid = %u", comptype_relid);
+	res = PQexec(pgsql_conn, query);
+	if (PQresultStatus(res) != PGRES_TUPLES_OK)
+		Elog("failed on pg_type system catalog query: %s",
+			 PQresultErrorMessage(res));
+
+	nfields = PQntuples(res);
+	for (int j=0; j < nfields; j++)
+	{
+		pgsql_define_arrow_field(arrow_subfields,
+								 arrow_subbuilders,
+								 PQgetvalue(res, j, 0),			//attname
+								 atol(PQgetvalue(res, j, 2)),	//atttypid
+								 atol(PQgetvalue(res, j, 3)),	//atttypmod
+								 atol(PQgetvalue(res, j, 4)),	//b.typlen
+								 *PQgetvalue(res, j, 5),		//b.typbyval
+								 *PQgetvalue(res, j, 6),		//b.typalign
+								 *PQgetvalue(res, j, 7),		//b.typtype
+								 atol(PQgetvalue(res, j, 8)),	//b.typrelid
+								 atol(PQgetvalue(res, j, 9)),	//b.typelem
+								 PQgetvalue(res, j, 10),		//n.nspname
+								 PQgetvalue(res, j, 11),		//b.typname
+								 (PQgetisnull(res, j, 12)		//e.extname
+								  ? NULL
+								  : PQgetvalue(res, j, 12)));
+	}
+	PQclear(res);
+}
+
+/*
+ * pgsql_define_arrow_schema
+ */
+static void
+pgsql_define_arrow_schema(arrowBuilderVector &arrow_builders)
+{
+	arrow::FieldVector arrow_fields;
+	int			nfields = PQnfields(pgsql_res);
+
+	for (int j=0; j < nfields; j++)
+	{
+		const char *attname = PQfname(pgsql_res, j);
+		Oid			atttypid = PQftype(pgsql_res, j);
+		int32_t		atttypmod = PQfmod(pgsql_res, j);
+		char		query[4096];
+		PGresult   *res;
+
+		snprintf(query, sizeof(query),
+				 WITH_RECURSIVE_PG_BASE_TYPE
+				 "SELECT n.nspname,"
+				 "       b.typname,"
+				 "       b.typlen,"
+				 "       b.typbyval,"
+				 "       b.typalign,"
+				 "       b.typtype,"
+				 "       b.typrelid,"
+				 "       b.typelem,"
+				 "       b.typtypmod,"
+				 "       e.extname,"
+				 "       CASE WHEN e.extrelocatable"
+				 "            THEN e.extnamespace::regnamespace::text"
+				 "            ELSE NULL::text"
+				 "       END extnamespace"
+				 "  FROM pg_catalog.pg_namespace n,"
+				 "       pg_base_type b"
+				 "  LEFT OUTER JOIN"
+				 "      (pg_catalog.pg_depend d JOIN"
+				 "       pg_catalog.pg_extension e ON"
+				 "       d.classid = 'pg_catalog.pg_type'::regclass AND"
+				 "       d.refclassid = 'pg_catalog.pg_extension'::regclass AND"
+				 "       d.refobjid = e.oid AND"
+				 "       d.deptype = 'e')"
+				 "    ON b.base_id = d.objid"
+				 " WHERE b.typnamespace = n.oid"
+				 "   AND b.type_id = %u", atttypid);
+		res = PQexec(pgsql_conn, query);
+		if (PQresultStatus(res) != PGRES_TUPLES_OK)
+			Elog("failed on pg_type system catalog query: %s",
+				 PQresultErrorMessage(res));
+		if (PQntuples(res) != 1)
+			Elog("unexpected number of result rows: %d", PQntuples(res));
+		/* setup arrow fields */
+		pgsql_define_arrow_field(arrow_fields,
+								 arrow_builders,
+								 attname,						//attname
+								 atttypid,						//atttypid
+								 atttypmod,						//atttypmod
+								 atol(PQgetvalue(res, 0, 2)),	//b.typbyval
+								 *PQgetvalue(res, 0, 3),		//b.attbyval
+								 *PQgetvalue(res, 0, 4),		//b.typalign
+								 *PQgetvalue(res, 0, 5),		//b.typtype
+								 atol(PQgetvalue(res, 0, 6)),	//b.typrelid
+								 atol(PQgetvalue(res, 0, 7)),	//b.typelem
+								 PQgetvalue(res, 0, 0),			//n.nspname
+								 PQgetvalue(res, 0, 1),			//b.typname
+								 PQgetisnull(res, 0, 9)			//e.extname
+								 ? NULL
+								 : PQgetvalue(res, 0, 9));
+		PQclear(res);
+		//TODO: flatten columns
+
+	}
+	arrow_schema = arrow::schema(arrow_fields);
+
+
+
+	
+}
+
+
+
+
+
+
+
+/*
+ * fetch_next_pgsql_command
+ */
+static const char *
+fetch_next_pgsql_command(void)
+{
+	uint32_t	index = __atomic_fetch_add(&pgsql_command_id,
+										   1, __ATOMIC_SEQ_CST);
+	if (index < pgsql_command_list.size())
+		return pgsql_command_list[index].c_str();
+	return NULL;
+}
+
+/*
+ * pgsql_begin_primary_query
+ */
+static void
+pgsql_begin_primary_query(void)
+{
+	for (;;)
+	{
+		const char *command = fetch_next_pgsql_command();
+		char	   *query;
+		PGresult   *res;
+
+		if (!command)
+			Elog("SQL commands cannot generate any valid results");
+		/* begin read-only transaction */
+		res = PQexec(pgsql_conn, "BEGIN READ ONLY");
+		if (PQresultStatus(res) != PGRES_COMMAND_OK)
+			Elog("unable to begin transaction: %s",
+				 PQresultErrorMessage(res));
+		PQclear(res);
+
+		res = PQexec(pgsql_conn, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
+		if (PQresultStatus(res) != PGRES_COMMAND_OK)
+			Elog("unable to switch transaction isolation level: %s",
+				 PQresultErrorMessage(res));
+		PQclear(res);
+
+		/* export snapshot */
+		if (!snapshot_identifier)
+		{
+			res = PQexec(pgsql_conn, "SELECT pg_catalog.pg_export_snapshot()");
+			if (PQresultStatus(res) != PGRES_TUPLES_OK)
+				Elog("unable to export the current transaction snapshot: %s",
+					 PQresultErrorMessage(res));
+			if (PQntuples(res) != 1 || PQnfields(res) != 1)
+				Elog("unexpected result for pg_export_snapshot()");
+			snapshot_identifier = pstrdup(PQgetvalue(res, 0, 0));
+			PQclear(res);
+		}
+		/* declare cursor */
+		query = (char *)alloca(strlen(command) + 200);
+		sprintf(query, "DECLARE my_cursor BINARY CURSOR FOR %s", command);
+		res = PQexec(pgsql_conn, query);
+		if (PQresultStatus(res) != PGRES_COMMAND_OK)
+			Elog("unable to declare a SQL cursor: %s", PQresultErrorMessage(res));
+		PQclear(res);
+
+		/* fetch first results */
+		res = PQexecParams(pgsql_conn,
+						   "FETCH FORWARD 10 FROM my_cursor",
+						   0, NULL, NULL, NULL, NULL,
+						   1);	/* results in binary mode */
+		if (PQresultStatus(res) != PGRES_TUPLES_OK)
+			Elog("SQL execution failed: %s", PQresultErrorMessage(res));
+		if (PQntuples(res) > 0)
+		{
+			pgsql_res = res;
+			pgsql_index = 0;
+			return;
+		}
+		PQclear(res);
+
+		/* Oops, the command returned an empty result. Try one more */
+		res = PQexec(pgsql_conn, "CLOSE my_cursor");
+        if (PQresultStatus(res) != PGRES_COMMAND_OK)
+            Elog("failed on close cursor 'my_cursor': %s",
+                 PQresultErrorMessage(res));
+        PQclear(res);
+	}
+}
+
+
+
+
+
+
 
 
 
@@ -751,9 +1307,7 @@ static void usage(void)
 		<< "                        which is replaced by the comma separated token in\n"
 		<< "                        the PARALLEL_KEYS.\n"
 		<< "     (-k and -n are exclusive, either of them can be given)\n"
-#ifdef HAS_PARQUET
 		<< "  -q, --parquet         Enables Parquet format.\n"
-#endif
 		<< "  -o, --output=FILENAME result file in Apache Arrow format\n"
 		<< "      --append=FILENAME result Apache Arrow file to be appended\n"
 		<< "     (--output and --append are exclusive. If neither of them\n"
@@ -765,10 +1319,8 @@ static void usage(void)
 		<< "                             element values.\n"
 		<< "Format options:\n"
 		<< "  -s, --segment-size=SIZE size of record batch for each [Arrow/Parquet]\n"
-#ifdef HAS_PARQUET
 		<< "  -C, --compress=[COLUMN:]MODE   Specifies the compression mode [Parquet]\n"
 		<< "        MODE := (snappy|gzip|brotli|zstd|lz4|lzo|bz2)\n"
-#endif
 		<< "\n"
 		<< "Connection options:\n"
 		<< "  -h, --host=HOSTNAME  database server host\n"
@@ -802,17 +1354,13 @@ parse_options(int argc, char * const argv[])
 		{"num-workers",     required_argument, NULL, 'n'},
 		{"ctid-target",     required_argument, NULL, 1000},
 		{"parallel-keys",   required_argument, NULL, 'k'},
-#ifdef HAS_PARQUET
 		{"parquet",         no_argument,       NULL, 'q'},
-#endif
 		{"output",          required_argument, NULL, 'o'},
 		{"append",          required_argument, NULL, 1001},
 		{"stat",            required_argument, NULL, 'S'},
 		{"flatten",         optional_argument, NULL, 1002},
 		{"segment-size",    required_argument, NULL, 's'},
-#ifdef HAS_PARQUET
 		{"compress",        required_argument, NULL, 'C'},
-#endif
 		{"host",            required_argument, NULL, 'h'},
 		{"port",            required_argument, NULL, 'p'},
 		{"user",            required_argument, NULL, 'u'},
@@ -886,11 +1434,9 @@ parse_options(int argc, char * const argv[])
 					Elog("--ctid-target and -k, --parallel_keys are mutually exclusive.");
 				parallel_keys = optarg;
 				break;
-#ifdef HAS_PARQUET
 			case 'q':		/* --parquet */
 				parquet_mode = true;
 				break;
-#endif
 			case 'o':		/* --output */
 				if (output_filename)
 					Elog("-o, --output was supplied twice");
@@ -945,7 +1491,6 @@ parse_options(int argc, char * const argv[])
 						Elog("not a valid segment size: %s", optarg);
 				}
 				break;
-#ifdef HAS_PARQUET
 			case 'C':		/* --compress */
 				{
 					char   *pos = strchr(optarg, ':');
@@ -981,7 +1526,6 @@ parse_options(int argc, char * const argv[])
 						Elog("unknown --compress method [%s]", optarg);
 					compression_methods.push_back(comp);
 				}
-#endif
 			case 'h':		/* --host */
 				if (pgsql_hostname)
 					Elog("-h, --host was given twice");
@@ -1146,16 +1690,22 @@ int main(int argc, char * const argv[])
 	/* special case if --schema=FILENAME */
 	if (dump_schema_filename)
 		return dumpArrowSchema(dump_schema_filename);
+	/* allocate per-worker data */
+	worker_threads.resize(1 + num_worker_threads);
+	worker_builders.resize(1 + num_worker_threads);
 	/* open the primary connection */
 	pgsql_conn = pgsql_server_connect();
 	/* build the SQL command to run */
 	build_pgsql_command_list();
 	/* read the original arrow file, if --append mode */
 	if (append_filename)
-	{}
-	// begin the query
-	// check compatibility
-	// define schema
+		Elog("--append is not implemented yet");
+	/* begin the primary query */
+	pgsql_begin_primary_query();
+	/* define the schema from the first results */
+	pgsql_define_arrow_schema(worker_builders[0]);
+
+
 	
 	
 	
