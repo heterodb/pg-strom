@@ -60,7 +60,7 @@ static const char  *pgsql_database = NULL;			/* -d, --database */
 static int			pgsql_command_id = 0;
 static std::vector<std::string> pgsql_command_list;
 static const char  *raw_pgsql_command = NULL;		/* -c, --command */
-static int			num_worker_threads = 0;			/* -n, --num-workers */
+static uint32_t		num_worker_threads = 1;			/* -n, --num-workers */
 static const char  *ctid_target_table = NULL;	/*     --ctid-target */
 static const char  *parallel_keys;					/* -k, --parallel-keys */
 static bool			parquet_mode = false;			/* -q, --parquet */
@@ -93,7 +93,8 @@ static std::shared_ptr<arrow::Schema> arrow_schema;
 // ------------------------------------------------
 static thread_local	PGconn	   *pgsql_conn = NULL;
 static thread_local PGresult   *pgsql_res = NULL;
-static thread_local int			pgsql_index = 0;
+static thread_local uint32_t	pgsql_res_index = 0;
+static thread_local uint32_t	worker_id = -1;
 static thread_local const char *server_timezone = NULL;
 
 // ------------------------------------------------
@@ -743,74 +744,114 @@ fetch_next_pgsql_command(void)
 }
 
 /*
- * pgsql_begin_primary_query
+ * __pgsql_begin_next_query
  */
-static void
-pgsql_begin_primary_query(void)
+#define CURSOR_NAME		"my_cursor"
+static bool
+__pgsql_begin_next_query(uint32_t fetch_ntuples)
 {
+	PGresult   *res;
+
+	/* clear resources in the last query */
+	if (pgsql_res)
+	{
+		PQclear(pgsql_res);
+		pgsql_res = NULL;
+		pgsql_res_index = 0;
+		/* CLOSE the cursor */
+		res = PQexec(pgsql_conn, "CLOSE " CURSOR_NAME);
+		if (PQresultStatus(res) != PGRES_COMMAND_OK)
+			Elog("failed on CLOSE '" CURSOR_NAME "': %s",
+				 PQresultErrorMessage(res));
+		PQclear(res);
+	}
+
+	assert(fetch_ntuples > 0);
 	for (;;)
 	{
 		const char *command = fetch_next_pgsql_command();
 		char	   *query;
-		PGresult   *res;
 
 		if (!command)
-			Elog("SQL commands cannot generate any valid results");
-		/* begin read-only transaction */
-		res = PQexec(pgsql_conn, "BEGIN READ ONLY");
-		if (PQresultStatus(res) != PGRES_COMMAND_OK)
-			Elog("unable to begin transaction: %s",
-				 PQresultErrorMessage(res));
-		PQclear(res);
-
-		res = PQexec(pgsql_conn, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
-		if (PQresultStatus(res) != PGRES_COMMAND_OK)
-			Elog("unable to switch transaction isolation level: %s",
-				 PQresultErrorMessage(res));
-		PQclear(res);
-
-		/* export snapshot */
-		if (!snapshot_identifier)
-		{
-			res = PQexec(pgsql_conn, "SELECT pg_catalog.pg_export_snapshot()");
-			if (PQresultStatus(res) != PGRES_TUPLES_OK)
-				Elog("unable to export the current transaction snapshot: %s",
-					 PQresultErrorMessage(res));
-			if (PQntuples(res) != 1 || PQnfields(res) != 1)
-				Elog("unexpected result for pg_export_snapshot()");
-			snapshot_identifier = pstrdup(PQgetvalue(res, 0, 0));
-			PQclear(res);
-		}
+			return false;	/* no more SQL commands to run */
 		/* declare cursor */
 		query = (char *)alloca(strlen(command) + 200);
-		sprintf(query, "DECLARE my_cursor BINARY CURSOR FOR %s", command);
+		sprintf(query, "DECLARE " CURSOR_NAME " BINARY CURSOR FOR %s", command);
 		res = PQexec(pgsql_conn, query);
 		if (PQresultStatus(res) != PGRES_COMMAND_OK)
 			Elog("unable to declare a SQL cursor: %s", PQresultErrorMessage(res));
 		PQclear(res);
 
 		/* fetch first results */
+		sprintf(query, "FETCH FORWARD %u FROM " CURSOR_NAME, fetch_ntuples);
 		res = PQexecParams(pgsql_conn,
-						   "FETCH FORWARD 10 FROM my_cursor",
+						   query,
 						   0, NULL, NULL, NULL, NULL,
-						   1);	/* results in binary mode */
+						   1);  /* results in binary mode */
 		if (PQresultStatus(res) != PGRES_TUPLES_OK)
 			Elog("SQL execution failed: %s", PQresultErrorMessage(res));
 		if (PQntuples(res) > 0)
 		{
 			pgsql_res = res;
-			pgsql_index = 0;
-			return;
+			pgsql_res_index = 0;
+			return true;
 		}
 		PQclear(res);
-
 		/* Oops, the command returned an empty result. Try one more */
-		res = PQexec(pgsql_conn, "CLOSE my_cursor");
-        if (PQresultStatus(res) != PGRES_COMMAND_OK)
-            Elog("failed on close cursor 'my_cursor': %s",
-                 PQresultErrorMessage(res));
-        PQclear(res);
+		res = PQexec(pgsql_conn, "CLOSE " CURSOR_NAME);
+		if (PQresultStatus(res) != PGRES_COMMAND_OK)
+			Elog("failed on CLOSE '" CURSOR_NAME "': %s",
+				 PQresultErrorMessage(res));
+		PQclear(res);
 	}
+}
+
+/*
+ * pgsql_begin_primary_query
+ */
+static void
+pgsql_begin_primary_query(void)
+{
+	PGresult   *res;
+
+	/* begin read-only transaction */
+	res = PQexec(pgsql_conn, "BEGIN READ ONLY");
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		Elog("unable to begin transaction: %s",
+			 PQresultErrorMessage(res));
+	PQclear(res);
+
+	res = PQexec(pgsql_conn, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		Elog("unable to switch transaction isolation level: %s",
+			 PQresultErrorMessage(res));
+	PQclear(res);
+
+	/* export snapshot */
+	if (!snapshot_identifier)
+	{
+		res = PQexec(pgsql_conn, "SELECT pg_catalog.pg_export_snapshot()");
+		if (PQresultStatus(res) != PGRES_TUPLES_OK)
+			Elog("unable to export the current transaction snapshot: %s",
+				 PQresultErrorMessage(res));
+		if (PQntuples(res) != 1 || PQnfields(res) != 1)
+			Elog("unexpected result for pg_export_snapshot()");
+		snapshot_identifier = pstrdup(PQgetvalue(res, 0, 0));
+		PQclear(res);
+	}
+	/* fetch first results */
+	if (!__pgsql_begin_next_query(10))
+		Elog("SQL command returned an empty results");
+}
+
+/*
+ * pgsql_begin_next_query
+ */
+static bool
+pgsql_begin_next_query(void)
+{
+	/* fetch results by 100000 rows */
+	return __pgsql_begin_next_query(100000);
 }
 
 
@@ -828,7 +869,75 @@ pgsql_begin_primary_query(void)
 
 
 
+/*
+ * pgsql_process_one_tuple
+ */
+static size_t
+pgsql_process_one_tuple(arrowBuilderVector &arrow_builders,
+						PGresult *res, uint32_t index)
+{
+	uint32_t	nfields = PQnfields(res);
+	size_t		chunk_sz = 0;
 
+	for (uint32_t j=0; j < arrow_builders.size(); j++)
+	{
+		auto	builder = arrow_builders[j];
+		auto	dtype = builder->type();
+		const char *addr = NULL;
+
+		if (j < nfields && PQgetisnull(res, index, j) == 0)
+			addr = PQgetvalue(res, index, j);
+		switch (dtype->id())
+		{
+
+
+			default:
+				Elog("unsupported type");
+		}
+	}
+	return chunk_sz;
+}
+
+/*
+ * pgsql_process_query_results
+ */
+static void
+pgsql_process_query_results(void)
+{
+	assert(worker_id < num_worker_threads);
+	auto	builders = worker_builders[worker_id];
+	for (;;)
+	{
+		uint32_t	ntuples = PQntuples(pgsql_res);
+		PGresult   *res;
+
+		while (pgsql_res_index < ntuples)
+		{
+			size_t	chunk_sz = pgsql_process_one_tuple(builders,
+													   pgsql_res,
+													   pgsql_res_index++);
+			if (chunk_sz >= batch_segment_sz)
+				/* write out one record-batch or row-group*/;
+		}
+		PQclear(pgsql_res);
+		pgsql_res = NULL;
+
+		/* fetch next result rest */
+		res = PQexecParams(pgsql_conn,
+						   "FETCH FORWARD 100000 FROM " CURSOR_NAME,
+						   0, NULL, NULL, NULL, NULL,
+						   1);	/* results in binary mode */
+		if (PQresultStatus(res) != PGRES_TUPLES_OK)
+			Elog("SQL execution failed: %s", PQresultErrorMessage(res));
+		if (PQntuples(res) == 0)
+		{
+			PQclear(res);
+			return;
+		}
+		pgsql_res = res;
+		pgsql_res_index = 0;
+	}
+}
 
 /*
  * build_pgsql_command_list
@@ -836,7 +945,7 @@ pgsql_begin_primary_query(void)
 static void
 build_pgsql_command_list(void)
 {
-	if (num_worker_threads == 0)
+	if (num_worker_threads == 1)
 	{
 		/* simple non-parallel case */
 		std::string	sql = std::string(raw_pgsql_command);
@@ -872,24 +981,24 @@ build_pgsql_command_list(void)
 			strcmp(relkind, "t") != 0)
 			Elog("--parallel-target [%s] must be either table, materialized view, or toast values",
 				 ctid_target_table);
-		for (int worker_id=0; worker_id < num_worker_threads; worker_id++)
+		for (uint32_t __worker=0; __worker < num_worker_threads; __worker++)
 		{
 			std::string	query = std::string(raw_pgsql_command);
 
 			if (worker_id == 0)
 				sprintf(buf, "%s.ctid < '(%ld,0)'::tid",
 						ctid_target_table,
-						unitsz * (worker_id+1));
+						unitsz * (__worker+1));
 			else if (worker_id < num_worker_threads - 1)
 				sprintf(buf, "%s.ctid >= '(%ld,0)' AND %s.ctid < '(%ld,0)'::tid",
 						ctid_target_table,
-						unitsz * worker_id,
+						unitsz * __worker,
 						ctid_target_table,
-						unitsz * (worker_id+1));
+						unitsz * (__worker+1));
 			else
 				sprintf(buf, "%s.ctid >= '(%ld,0)'",
 						ctid_target_table,
-						unitsz * worker_id);
+						unitsz * __worker);
 			__replace_string(query,
 							 std::string("$(CTID_RANGE)"),
 							 std::string(buf));
@@ -918,13 +1027,13 @@ build_pgsql_command_list(void)
 			 strstr(raw_pgsql_command, "$(N_WORKERS)"))
 	{
 		/* replace $(WORKER_ID) and $(N_WORKERS) */
-		for (int worker_id=0; worker_id < num_worker_threads; worker_id++)
+		for (int __worker=0; worker_id < num_worker_threads; __worker++)
 		{
 			std::string	query = std::string(raw_pgsql_command);
 
 			__replace_string(query,
 							 std::string("$(WORKER_ID)"),
-							 std::to_string(worker_id));
+							 std::to_string(__worker));
 			__replace_string(query,
 							 std::string("$(N_WORKERS)"),
 							 std::to_string(num_worker_threads));
@@ -1417,7 +1526,7 @@ parse_options(int argc, char * const argv[])
 
 					if (*end != '\0' || num < 1 || num > 9999)
 						Elog("not a valid -n|--num-workers option: %s", optarg);
-					num_worker_threads = num;
+					num_worker_threads = num + 1;	/* primary + threads */
 				}
 				break;
 			case 1000:		/* --ctid-target */
@@ -1628,7 +1737,7 @@ parse_options(int argc, char * const argv[])
 			Elog("-t (--table) and --ctid-target are mutually exclusive");
 		if (parallel_keys)
 			Elog("-t (--table) and --parallel-keys are mutually exclusive");
-		if (num_worker_threads == 0)
+		if (num_worker_threads == 1)
 			sprintf(buf, "SELECT * FROM %s", simple_table_name);
 		else
 		{
@@ -1641,7 +1750,7 @@ parse_options(int argc, char * const argv[])
 	{
 		assert(!simple_table_name);
 		/* auto setting if --parallel_keys is given */
-		if (parallel_keys && num_worker_threads == 0)
+		if (parallel_keys && num_worker_threads == 1)
 		{
 			const char *pos;
 			int		count = 0;
@@ -1650,11 +1759,11 @@ parse_options(int argc, char * const argv[])
 				count++;
 			num_worker_threads = count+1;
 			Info("-n, --num-workers was not given, so %d was automatically assigned",
-				 num_worker_threads);
+				 num_worker_threads-1);
 		}
-		if (ctid_target_table && num_worker_threads == 0)
+		if (ctid_target_table && num_worker_threads == 1)
 			Elog("--ctid-target must be used with -n, --num-workers together");
-		if (num_worker_threads > 0)
+		if (num_worker_threads > 1)
 		{
 			if (ctid_target_table)
 			{
@@ -1691,8 +1800,9 @@ int main(int argc, char * const argv[])
 	if (dump_schema_filename)
 		return dumpArrowSchema(dump_schema_filename);
 	/* allocate per-worker data */
-	worker_threads.resize(1 + num_worker_threads);
-	worker_builders.resize(1 + num_worker_threads);
+	worker_threads.resize(num_worker_threads);
+	worker_builders.resize(num_worker_threads);
+	worker_id = 0;		//primary thread
 	/* open the primary connection */
 	pgsql_conn = pgsql_server_connect();
 	/* build the SQL command to run */
@@ -1704,6 +1814,11 @@ int main(int argc, char * const argv[])
 	pgsql_begin_primary_query();
 	/* define the schema from the first results */
 	pgsql_define_arrow_schema(worker_builders[0]);
+	do {
+		/* fetch results and write to arrow/parqeut */
+		pgsql_process_query_results();
+		/* try next SQL command, if any */
+	} while (pgsql_begin_next_query());
 
 
 	
