@@ -2197,10 +2197,15 @@ mergeGpuPreAggGroupByBuffer(kern_context *kcxt,
 	}
 	else
 	{
-		/* merge the no-group results */
-		uint32_t	nitems = __volatileRead(&kds_final->nitems);
-
-		if (get_local_id() == 0 && nitems > 0)
+		/* merge the no-group results
+		 *
+		 * kds_final->nitems can be one of 0, 1, or UINT_MAX.
+		 * Only when kds_final->nitems==1, we may have a pending result
+		 * on the groupby_prepfn_buffer to be written out.
+		 * Elsewhere, our thread group has an empty set.
+		 */
+		if (get_local_id() == 0 &&
+			__volatileRead(&kds_final->nitems) == 1)
 		{
 			kern_tupitem *tupitem = KDS_GET_TUPITEM(kds_final, 0);
 
