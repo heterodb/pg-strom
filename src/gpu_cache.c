@@ -307,7 +307,7 @@ is_gpucache_sync_trigger(int16 trig_type,
 static bool
 __parseSyncTriggerOptions(int elevel,
 						  Form_pg_class pg_class,
-						  FormData_pg_attribute *pg_attrs,
+						  TupleDesc pg_tupdesc,
 						  Oid trigger_oid,
 						  const char *trigger_name,
 						  const char *trigger_config,
@@ -456,7 +456,7 @@ out:
 	/* check initial kds_column/kds_extra size */
 	for (int j=0; j < pg_class->relnatts; j++)
 	{
-		Form_pg_attribute attr = &pg_attrs[j];
+		Form_pg_attribute attr = TupleDescAttr(pg_tupdesc, j);
 
 		if (!attr->attnotnull)
 			main_sz += MAXALIGN(BITMAPLEN(max_num_rows));
@@ -520,7 +520,7 @@ out:
 static uint64_t
 gpuCacheTableSignatureCommon(int elevel,
 							 Form_pg_class pg_class,
-							 FormData_pg_attribute *pg_attrs,
+							 TupleDesc pg_tupdesc,
 							 Oid trigger_oid,
 							 const char *trigger_name,
 							 const char *trigger_config,
@@ -530,9 +530,7 @@ gpuCacheTableSignatureCommon(int elevel,
 	int			nattrs = pg_class->relnatts;
 	size_t		len;
 
-
-	len = offsetof(GpuCacheTableSignatureBuffer,
-				   attrs[pg_class->relnatts]);
+	len = offsetof(GpuCacheTableSignatureBuffer, attrs[nattrs]);
 	sig = alloca(len);
 	memset(sig, 0, len);
 	sig->reltablespace  = pg_class->reltablespace;
@@ -540,7 +538,7 @@ gpuCacheTableSignatureCommon(int elevel,
     sig->relnatts       = pg_class->relnatts;
 	for (int j=0; j < nattrs; j++)
 	{
-		Form_pg_attribute attr = &pg_attrs[j];
+		Form_pg_attribute attr = TupleDescAttr(pg_tupdesc, j);
 
 		sig->attrs[j].atttypid 	 = attr->atttypid;
 		sig->attrs[j].atttypmod  = attr->atttypmod;
@@ -552,7 +550,7 @@ gpuCacheTableSignatureCommon(int elevel,
 	}
 	if (!__parseSyncTriggerOptions(elevel,
 								   pg_class,
-								   pg_attrs,
+								   pg_tupdesc,
 								   trigger_oid,
 								   trigger_name,
 								   trigger_config,
@@ -606,7 +604,7 @@ __gpuCacheTableSignature(Relation rel, GpuCacheTableSignatureCache *entry)
 			entry->signature
 				= gpuCacheTableSignatureCommon(WARNING,
 											   rel_form,
-											   tupdesc->attrs,
+											   tupdesc,
 											   trigger_oid,
 											   trigger_name,
 											   trigger_config,
@@ -655,7 +653,6 @@ __gpuCacheTableSignatureSnapshot(Form_pg_class pg_class,
 								 Snapshot snapshot,
 								 GpuCacheOptions *gc_options)
 {
-	FormData_pg_attribute *pg_attrs;
 	Oid			table_oid = pg_class->oid;
 	Oid			trigger_oid = InvalidOid;
 	const char *trigger_name = NULL;
@@ -664,6 +661,8 @@ __gpuCacheTableSignatureSnapshot(Form_pg_class pg_class,
 	ScanKeyData	skey[2];
 	SysScanDesc	sscan;
 	HeapTuple	tuple;
+	TupleDesc	__tupdesc;
+	uint64_t	signature;
 
 	/* pg_class */
 	if (pg_class->relkind != RELKIND_RELATION &&
@@ -730,27 +729,28 @@ __gpuCacheTableSignatureSnapshot(Form_pg_class pg_class,
 				Int16GetDatum(0));
 	sscan = systable_beginscan(srel, AttributeRelidNumIndexId,
 							   true, snapshot, 2, skey);
-	pg_attrs = alloca(sizeof(FormData_pg_attribute) * pg_class->relnatts);
-	memset(pg_attrs, 0, sizeof(FormData_pg_attribute) * pg_class->relnatts);
+	__tupdesc = CreateTemplateTupleDesc(pg_class->relnatts);
 	while ((tuple = systable_getnext(sscan)) != NULL)
 	{
 		Form_pg_attribute attr = (Form_pg_attribute) GETSTRUCT(tuple);
 
 		Assert(attr->attnum > 0 && attr->attnum <= pg_class->relnatts);
-		memcpy(&pg_attrs[attr->attnum-1], attr,
-			   sizeof(FormData_pg_attribute));
+		memcpy(TupleDescAttr(__tupdesc, attr->attnum-1),
+			   attr, ATTRIBUTE_FIXED_PART_SIZE);
 	}
 	systable_endscan(sscan);
 	table_close(srel, AccessShareLock);
 
 	/* parse & validate options */
-	return gpuCacheTableSignatureCommon(WARNING,
-										pg_class,
-										pg_attrs,
-										trigger_oid,
-										trigger_name,
-										trigger_config,
-										gc_options);
+	signature = gpuCacheTableSignatureCommon(WARNING,
+											 pg_class,
+											 __tupdesc,
+											 trigger_oid,
+											 trigger_name,
+											 trigger_config,
+											 gc_options);
+	FreeTupleDesc(__tupdesc);
+	return signature;
 }
 
 static uint64_t
@@ -3003,7 +3003,7 @@ __gpuCacheCallbackOnAlterTrigger(Oid trigger_oid, bool validate_options)
 
 		gpuCacheTableSignatureCommon(ERROR,
 									 RelationGetForm(__rel),
-									 RelationGetDescr(__rel)->attrs,
+									 RelationGetDescr(__rel),
 									 trigger_oid,
 									 trigger_name,
 									 trigger_config,

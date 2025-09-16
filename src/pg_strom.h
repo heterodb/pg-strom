@@ -57,6 +57,9 @@
 #include "commands/dbcommands.h"
 #include "commands/defrem.h"
 #include "commands/event_trigger.h"
+#if PG_VERSION_NUM >= 180000
+#include "commands/explain_format.h"
+#endif
 #include "commands/extension.h"
 #include "commands/tablecmds.h"
 #include "commands/tablespace.h"
@@ -511,8 +514,6 @@ struct pgstromTaskState
 	List			   *fallback_load_dst;	/* dest resno of fallback-slot */
 	bytea			   *kern_fallback_desc;
 	/* request command buffer (+ status for table scan) */
-	TBMIterateResult   *curr_tbm;
-	int32_t				curr_repeat_id;		/* for KDS_FORMAT_ROW */
 	Buffer				curr_vm_buffer;		/* for visibility-map */
 	uint64_t			curr_block_num;		/* for KDS_FORMAT_BLOCK */
 	uint64_t			curr_block_tail;	/* for KDS_FORMAT_BLOCK */
@@ -692,9 +693,6 @@ extern size_t	setup_kern_data_store(kern_data_store *kds,
 									  size_t length,
 									  char format);
 extern XpuCommand *pgstromRelScanChunkDirect(pgstromTaskState *pts,
-											 struct iovec *xcmd_iov,
-											 int *xcmd_iovcnt);
-extern XpuCommand *pgstromRelScanChunkNormal(pgstromTaskState *pts,
 											 struct iovec *xcmd_iov,
 											 int *xcmd_iovcnt);
 extern void		pgstrom_init_relscan(void);

@@ -1106,7 +1106,7 @@ found:
 		(dfunc->func_flags & DEVFUNC__LOCALE_AWARE) != 0)
 	{
 		/* see texteq, bpchareq */
-		if (!lc_collate_is_c(func_collid))
+		if (!__collate_is_c(func_collid))
 			return NULL;	/* not supported */
 	}
 	return dfunc;
