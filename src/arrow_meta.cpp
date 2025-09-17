@@ -3260,11 +3260,14 @@ __readParquetMinMaxStats(ArrowFieldNode *field,
 			auto cdescr = __stat->descr();
 
 			assert(cdescr->physical_type() == stats->physical_type());
-			if (cdescr->converted_type() == parquet::ConvertedType::type::DECIMAL)
+			if (cdescr->converted_type() == parquet::ConvertedType::type::DECIMAL ||
+				(cdescr->logical_type() && cdescr->logical_type()->is_decimal()))
 			{
 				/* only Decimal128 */
-				auto	min_rv = arrow::Decimal128::FromBigEndian(__stat->min().ptr, cdescr->type_length());
-				auto	max_rv = arrow::Decimal128::FromBigEndian(__stat->max().ptr, cdescr->type_length());
+				auto	min_rv = arrow::Decimal128::FromBigEndian(__stat->min().ptr,
+																  cdescr->type_length());
+				auto	max_rv = arrow::Decimal128::FromBigEndian(__stat->max().ptr,
+																  cdescr->type_length());
 				if (!min_rv.ok() || !max_rv.ok())
 					return;
 				min_datum = min_rv.ValueOrDie().ToString(cdescr->type_scale());
@@ -3348,15 +3351,14 @@ __readParquetRowGroupMetadata(ArrowMessage *rbatch_message,
 	{
 		auto	col_meta = rg_meta->ColumnChunk(j);
 		auto	field = &rbatch->nodes[j];
+		auto	stats = col_meta->statistics();
 		auto	encodings = col_meta->encodings();
 		auto	encoding_stats = col_meta->encoding_stats();
 
 		INIT_ARROW_NODE(field, FieldNode);
 		field->length = col_meta->num_values();
-		if (col_meta->is_stats_set())
+		if (stats)
 		{
-			const auto  stats = col_meta->statistics();
-
 			if (stats->HasNullCount())
 				field->null_count = stats->null_count();
 			if (stats->HasMinMax())
