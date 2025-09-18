@@ -2,7 +2,7 @@
 
 SET max_parallel_workers_per_gather = 24;
 SET pg_strom.enabled = off;
-SET parallel_setup_cost = 100000;
+#SET parallel_setup_cost = 100000;
 
 --Q1_1
 
