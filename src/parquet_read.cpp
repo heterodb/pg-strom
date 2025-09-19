@@ -44,8 +44,8 @@ struct parquetFileEntry
 {
 	uint32_t	hash;
 	int			refcnt;
-	dlist_node	hash_chain;
-	dlist_node	lru_chain;
+	__dlist_node<parquetFileEntry> hash_chain;
+	__dlist_node<parquetFileEntry> lru_chain;
 	struct timeval lru_tv;
 	struct stat	stat_buf;
 	std::string	filename;
@@ -58,8 +58,8 @@ struct parquetFileEntry
 	{
 		hash = __hash;
 		refcnt = 1;
-		memset(&hash_chain, 0, sizeof(dlist_node));
-		memset(&lru_chain, 0, sizeof(dlist_node));
+		hash_chain.owner = this;
+		lru_chain.owner = this;
 		memset(&lru_tv, 0, sizeof(struct timeval));
 		memcpy(&stat_buf, __stat_buf, sizeof(struct stat));
 		filename = std::string(__filename);
@@ -87,46 +87,10 @@ using parquetFileEntry	= struct parquetFileEntry;
 #define PQ_HASH_NSLOTS	797
 static uint32_t			pq_hash_initialized = 0;
 static std::mutex		pq_hash_lock[PQ_HASH_NSLOTS];
-static dlist_head		pq_hash_slot[PQ_HASH_NSLOTS];
+static __dlist_node<parquetFileEntry> pq_hash_slot[PQ_HASH_NSLOTS];
 static std::mutex		pq_hash_lru_lock;
-static dlist_head		pq_hash_lru_list;
+static __dlist_node<parquetFileEntry> pq_hash_lru_list;
 static std::thread	   *pq_hash_worker = NULL;
-
-/* copy from ilist.h */
-#define dlist_foreach(iter, lhead)										\
-	for ((iter).end = &(lhead)->head,									\
-		 (iter).cur = (iter).end->next ? (iter).end->next : (iter).end;	\
-		 (iter).cur != (iter).end;										\
-		 (iter).cur = (iter).cur->next)
-#define dlist_container(type, membername, ptr)							\
-	((type *) ((char *) (ptr) - offsetof(type, membername)))
-
-static inline void
-dlist_init(dlist_head *head)
-{
-    head->head.next = head->head.prev = &head->head;
-}
-static inline void
-dlist_delete(dlist_node *node)
-{
-	node->prev->next = node->next;
-	node->next->prev = node->prev;
-}
-static inline void
-dlist_push_tail(dlist_head *head, dlist_node *node)
-{
-	node->next = &head->head;
-	node->prev = head->head.prev;
-	node->prev->next = node;
-	head->head.prev = node;
-}
-static inline void
-dlist_move_tail(dlist_head *head, dlist_node *node)
-{
-	if (node->prev && node->next)
-		dlist_delete(node);
-	dlist_push_tail(head, node);
-}
 
 /*
  * ParquetFileHashTableWorker
@@ -137,14 +101,12 @@ ParquetFileHashTableWorker(void)
 	for (;;)
 	{
 		struct timeval	curr;
-		dlist_iter		iter;
+		parquetFileEntry *entry;
 
 		gettimeofday(&curr, NULL);
 		pq_hash_lru_lock.lock();
-		dlist_foreach (iter, &pq_hash_lru_list)
+		__dlist_foreach (entry, &pq_hash_lru_list)
 		{
-			auto	entry = dlist_container(parquetFileEntry, lru_chain, iter.cur);
-
 			if (entry->lru_tv.tv_sec > curr.tv_sec ||
 				(entry->lru_tv.tv_sec  == curr.tv_sec &&
 				 entry->lru_tv.tv_usec > curr.tv_usec) ||
@@ -162,13 +124,8 @@ ParquetFileHashTableWorker(void)
 				pq_hash_lock[hindex].lock();
 				if (entry->refcnt == 0)
 				{
-					// OK, nobody references the entry, so we can drop it.
-					// Note that 'hash_chain' may not be valid, if parquet
-					// file was modified on the disk and detached from the
-					// hash-table.
-					if (entry->hash_chain.prev && entry->hash_chain.next)
-						dlist_delete(&entry->hash_chain);
-					dlist_delete(&entry->lru_chain);
+					__dlist_delete(&entry->hash_chain);
+					__dlist_delete(&entry->lru_chain);
 					delete(entry);
 				}
 				pq_hash_lock[hindex].unlock();
@@ -191,9 +148,6 @@ retry:
 	curr_val = __atomic_cas_uint32(&pq_hash_initialized, 0, UINT_MAX);
 	if (curr_val == 0)
 	{
-		for (int i=0; i < PQ_HASH_NSLOTS; i++)
-			dlist_init(&pq_hash_slot[i]);
-		dlist_init(&pq_hash_lru_list);
 		pq_hash_worker = new std::thread(ParquetFileHashTableWorker);
 		pq_hash_worker->detach();
 		__atomic_exchange_uint32(&pq_hash_initialized, 1);	/* done */
@@ -570,12 +524,10 @@ static parquetFileEntry *
 lookupParquetFileEntry(const char *filename, struct stat *stat_buf, uint32_t hash)
 {
 	uint32_t	hindex = hash % PQ_HASH_NSLOTS;
-	dlist_iter	iter;
+	parquetFileEntry *entry;
 
-	dlist_foreach (iter, &pq_hash_slot[hindex])
+	__dlist_foreach (entry, &pq_hash_slot[hindex])
 	{
-		auto	entry = dlist_container(parquetFileEntry,
-										hash_chain, iter.cur);
 		if (entry->stat_buf.st_dev == stat_buf->st_dev &&
 			entry->stat_buf.st_ino == stat_buf->st_ino)
 		{
@@ -588,8 +540,7 @@ lookupParquetFileEntry(const char *filename, struct stat *stat_buf, uint32_t has
 				return entry;
 			}
 			// oops, the parquet file was modified on the disk, so must be re-read.
-			dlist_delete(&entry->hash_chain);
-			memset(&entry->hash_chain, 0, sizeof(dlist_node));
+			__dlist_delete(&entry->hash_chain);
 			assert(entry->lru_chain.prev && entry->lru_chain.next);
 			break;
 		}
@@ -779,7 +730,7 @@ parquetReadOneRowGroup(const char *filename,
 	{
 		entry = buildParquetFileEntry(filename, &stat_buf, hash);
 		if (entry)
-			dlist_push_tail(&pq_hash_slot[hindex], &entry->hash_chain);
+			__dlist_push_tail(&pq_hash_slot[hindex], &entry->hash_chain);
 	}
 	pq_hash_lock[hindex].unlock();
 	if (!entry)
@@ -787,7 +738,7 @@ parquetReadOneRowGroup(const char *filename,
 	// update LRU state (under the pq_hash_lru_lock)
 	pq_hash_lru_lock.lock();
 	gettimeofday(&entry->lru_tv, NULL);
-	dlist_move_tail(&pq_hash_lru_list, &entry->lru_chain);	
+	__dlist_move_tail(&pq_hash_lru_list, &entry->lru_chain);
 	pq_hash_lru_lock.unlock();
 
 	// quick check of schema compatibility
