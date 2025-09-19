@@ -2804,15 +2804,6 @@ typedef struct dlist_node
 	struct dlist_node *prev;
 	struct dlist_node *next;
 } dlist_node;
-typedef struct dlist_head
-{
-	dlist_node		head;
-} dlist_head;
-typedef struct dlist_iter
-{
-	dlist_node *cur;
-	dlist_node *end;
-} dlist_iter;
 #endif
 
 typedef struct
@@ -3924,6 +3915,69 @@ __preagg_fetch_xdatum_as_float64(float8_t *p_fval, const xpu_datum_t *xdatum)
 	return true;
 }
 
+/* ----------------------------------------------------------------
+ *
+ * C++ Specific Utility functions
+ *
+ * ----------------------------------------------------------------
+ */
+#ifdef __cplusplus
+/*
+ * Template based Double Linked List
+ */
+template <typename T>
+struct __dlist_node
+{
+	T	   *owner;		/* NULL if dlist head */
+	struct __dlist_node<T> *prev;
+	struct __dlist_node<T> *next;
+	__dlist_node()
+	{
+		owner = NULL;
+		prev = next = this;
+	}
+};
+#define __dlist_foreach(entry, lhead)								\
+	for (auto __iter = (lhead)->next, __iter_next = __iter->next;	\
+		 (entry = __iter->owner) != NULL;							\
+		 __iter = __iter_next, entry = __iter->owner)
+
+template <typename T>
+INLINE_FUNCTION(void)
+__dlist_delete(__dlist_node<T> *node)
+{
+	assert(node->owner != NULL);	/* should not list head */
+	if (node->next && node->prev)
+	{
+		node->prev->next = node->next;
+		node->next->prev = node->prev;
+	}
+	else
+	{
+		assert(!node->next && node->prev);
+	}
+	node->prev = node->next = NULL;
+}
+
+template <typename T>
+INLINE_FUNCTION(void)
+__dlist_push_tail(__dlist_node<T> *head, __dlist_node<T> *node)
+{
+	assert(!head->owner && node->owner);
+	node->prev = head->prev;
+	head->prev->next = node;
+	head->prev = node;
+	node->next = head;
+}
+
+template <typename T>
+INLINE_FUNCTION(void)
+__dlist_move_tail(__dlist_node<T> *head, __dlist_node<T> *node)
+{
+	__dlist_delete(node);
+	__dlist_push_tail(head, node);
+}
+#endif
 /* ----------------------------------------------------------------
  *
  * Misc functions

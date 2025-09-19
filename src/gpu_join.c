@@ -877,7 +877,7 @@ try_add_sorted_gpujoin_path(PlannerInfo *root,
 	List	   *sortkeys_kind = NIL;
 	List	   *sortkeys_refs = NIL;
 	List	   *inner_target_list = NIL;
-	ListCell   *lc1, *lc2;
+	ListCell   *lc1, *lc2, *lc3;
 	size_t		unitsz, buffer_sz, devmem_sz;
 	int			nattrs;
 	Cost		per_tuple_cost;
@@ -942,76 +942,66 @@ try_add_sorted_gpujoin_path(PlannerInfo *root,
 	{
 		PathKey	   *pk = lfirst(lc1);
 		EquivalenceClass *ec = pk->pk_eclass;
-		EquivalenceMember *em;
-		Expr	   *em_expr;
-		devtype_info *dtype;
-		Oid			type_oid;
-		bool		found = false;
+		int			kind = KSORT_KEY_KIND__VREF;
 
-		if (list_length(ec->ec_members) != 1 ||
-			ec->ec_sources != NIL ||
-			ec->ec_derives != NIL)
+		if (__PathKeyUseNullsFirstCompare(pk))
+			kind |= KSORT_KEY_ATTR__NULLS_FIRST;
+		if (__PathKeyUseLessThanCompare(pk))
+			kind |= KSORT_KEY_ATTR__ORDER_ASC;
+		else if (!__PathKeyUseGreaterThanCompare(pk))
 		{
-			elog(DEBUG1, "gpusort: EquivalenceClass has not a supported form: %s",
-				 nodeToString(ec));
-			return;		/* not supported */
+			elog(DEBUG1, "Bug? PathKey has neither ASC nor DESC sorting order");
+			return;     /* should not happen */
 		}
+		/* walk on the ec_members to find out identical key expression */
+		foreach (lc2, ec->ec_members)
+		{
+			EquivalenceMember *em = lfirst(lc2);
+			Expr   *em_expr = em->em_expr;
+			Oid		type_oid;
+			devtype_info *dtype;
 
-		/* strip Relabel for equal() comparison */
-		em = (EquivalenceMember *)linitial(ec->ec_members);
-		for (em_expr = em->em_expr;
-			 IsA(em_expr, RelabelType);
-			 em_expr = ((RelabelType *)em_expr)->arg);
-		/* check whether the em_expr is fully executable on device */
-		if (!pgstrom_xpu_expression(em_expr,
-									pp_info->xpu_task_flags,
-									pp_info->scan_relid,
-									inner_target_list, NULL))
-		{
-			elog(DEBUG1, "gpusort: expression '%s' is not device executable",
-				 nodeToString(em_expr));
-			return;		/* not supported */
-		}
-		type_oid = exprType((Node *)em_expr);
-		dtype = pgstrom_devtype_lookup(type_oid);
-		if (!dtype || (dtype->type_flags & DEVTYPE__HAS_COMPARE) == 0)
-		{
-			elog(DEBUG1, "gpusort: type '%s' has no device executable compare handler",
-				 format_type_be(type_oid));
-			return;		/* not supported */
-		}
-		/* lookup the sorting keys */
-		foreach (lc2, final_target->exprs)
-		{
-			Node   *f_expr = lfirst(lc2);
-
-			if (equal(f_expr, em_expr))
+			/* strip Relabel for equal() comparison */
+			while (IsA(em_expr, RelabelType))
+				em_expr = ((RelabelType *)em_expr)->arg;
+			/* check whether the em_expr is fully executable on device */
+			if (!pgstrom_xpu_expression(em_expr,
+										pp_info->xpu_task_flags,
+										pp_info->scan_relid,
+										inner_target_list, NULL))
 			{
-				int		kind = KSORT_KEY_KIND__VREF;
-
-				if (pk->pk_nulls_first)
-					kind |= KSORT_KEY_ATTR__NULLS_FIRST;
-				if (pk->pk_strategy == BTLessStrategyNumber)
-					kind |= KSORT_KEY_ATTR__ORDER_ASC;
-				else if (pk->pk_strategy != BTLessStrategyNumber)
+				elog(DEBUG1, "gpusort: expression '%s' is not device executable",
+					 nodeToString(em_expr));
+				continue;	/* not supported */
+			}
+			type_oid = exprType((Node *)em_expr);
+			dtype = pgstrom_devtype_lookup(type_oid);
+			if (!dtype || (dtype->type_flags & DEVTYPE__HAS_COMPARE) == 0)
+			{
+				elog(DEBUG1, "gpusort: type '%s' has no device executable compare handler",
+					 format_type_be(type_oid));
+				continue;	/* not supported */
+			}
+			/* lookup the sorting keys on the final buffer */
+			foreach (lc3, final_target->exprs)
+			{
+				Node   *f_expr = lfirst(lc3);
+				if (equal(f_expr, em_expr))
 				{
-					elog(DEBUG1, "Bug? PathKey has unexpected pk_strategy (%d)",
-						 (int)pk->pk_strategy);
-					return;		/* should not happen */
+					sortkeys_expr = lappend(sortkeys_expr, f_expr);
+					sortkeys_kind = lappend_int(sortkeys_kind, kind);
+					sortkeys_refs = lappend_int(sortkeys_refs, ec->ec_sortref);
+					goto found_one_key;
 				}
-				sortkeys_expr = lappend(sortkeys_expr, f_expr);
-				sortkeys_kind = lappend_int(sortkeys_kind, kind);
-				sortkeys_refs = lappend_int(sortkeys_refs, ec->ec_sortref);
-				found = true;
-				break;
 			}
 		}
-		if (!found)
-		{
-			elog(DEBUG1, "gpusort: sortkey '%s' was not found on the final targetlist (%s)",
-				 nodeToString(em_expr), nodeToString(final_target->exprs));
-			return;		/* not found */
-		}
+		elog(DEBUG1, "gpusort: sortkey '%s' was not found on the final targetlist (%s)",
+			 nodeToString(ec->ec_members),
+			 nodeToString(final_target->exprs));
+		return;
+	found_one_key:
+		Assert(list_length(sortkeys_expr) == list_length(sortkeys_kind) &&
+			   list_length(sortkeys_expr) == list_length(sortkeys_refs));
 	}
 	/* duplicate GpuScan/GpuJoin path and attach GPU-Sort */
 	gpusort_cost = (2.0 * pgstrom_gpu_operator_cost *
@@ -1115,14 +1105,14 @@ static AppendRelInfo **
 __make_fake_apinfo_array(PlannerInfo *root,
 						 RelOptInfo *parent_joinrel,
 						 RelOptInfo *outer_rel,
-						 RelOptInfo *inner_rel)
+						 RelOptInfo *inner_rel,
+						 int *p_nappinfos)
 {
 	AppendRelInfo **ap_info_array;
 	Relids	__relids;
-	int		i;
+	int		i, nappinfos = root->simple_rel_array_size;
 
-	ap_info_array = palloc0(sizeof(AppendRelInfo *) *
-							root->simple_rel_array_size);
+	ap_info_array = palloc0(sizeof(AppendRelInfo *) * nappinfos);
 	__relids = bms_union(outer_rel->relids,
 						 inner_rel->relids);
 	for (i = bms_next_member(__relids, -1);
@@ -1195,6 +1185,7 @@ __make_fake_apinfo_array(PlannerInfo *root,
 		}
 		ap_info_array[i] = ap_info;
 	}
+	*p_nappinfos = nappinfos;
 	return ap_info_array;
 }
 
@@ -1218,6 +1209,7 @@ __lookup_or_build_leaf_joinrel(PlannerInfo *root,
 		RelOptKind	reloptkind_saved = inner_rel->reloptkind;
 		bool		partitionwise_saved = parent_joinrel->consider_partitionwise_join;
 		AppendRelInfo **ap_array_saved = root->append_rel_array;
+		int			nappinfos;
 
 		/* a small hack to avoid assert() */
 		inner_rel->reloptkind = RELOPT_OTHER_MEMBER_REL;
@@ -1228,13 +1220,16 @@ __lookup_or_build_leaf_joinrel(PlannerInfo *root,
 			root->append_rel_array = __make_fake_apinfo_array(root,
 															  parent_joinrel,
 															  outer_rel,
-															  inner_rel);
+															  inner_rel,
+															  &nappinfos);
 			leaf_joinrel = build_child_join_rel(root,
 												outer_rel,
 												inner_rel,
 												parent_joinrel,
 												restrictlist,
-												sjinfo);
+												sjinfo,
+												nappinfos,
+												root->append_rel_array);
 		}
 		PG_CATCH();
 		{
@@ -2192,7 +2187,8 @@ execInnerPreloadOneDepth(MemoryContext memcxt,
 		oldcxt = MemoryContextSwitchTo(memcxt);
 		mtup = heap_form_minimal_tuple(slot->tts_tupleDescriptor,
 									   slot->tts_values,
-									   slot->tts_isnull);
+									   slot->tts_isnull,
+									   0);
 		if (preload_buf->nitems >= preload_buf->nrooms)
 		{
 			uint32_t	nrooms_new = 2 * preload_buf->nrooms + 4000;

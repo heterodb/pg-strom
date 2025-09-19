@@ -1590,9 +1590,6 @@ pgstromCreateTaskState(CustomScan *cscan,
 	Assert(pp_info->num_rels == num_rels);
 	pts->num_scan_repeats = 1;
 	pts->num_rels = num_rels;
-	pts->curr_tbm = palloc0(offsetof(TBMIterateResult, offsets) +
-							sizeof(OffsetNumber) * MaxHeapTuplesPerPage);
-	pts->curr_repeat_id = -1;
 
 	return (Node *)pts;
 }

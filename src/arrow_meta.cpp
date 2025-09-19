@@ -29,7 +29,7 @@
 #include "flatbuffers/File_generated.h"			/* copied from arrow */
 #include "flatbuffers/Message_generated.h"		/* copied from arrow */
 #include "flatbuffers/Schema_generated.h"		/* copied from arrow */
-#include "flatbuffers/SparseTensor_generated.h"	/* copied from arrow */
+#include "flatbuffers/SparseTensor_generated.h"		/* copied from arrow */
 #include "flatbuffers/Tensor_generated.h"		/* copied from arrow */
 #define ARROW_SIGNATURE			"ARROW1"
 #define ARROW_SIGNATURE_SZ		(sizeof(ARROW_SIGNATURE)-1)
@@ -985,6 +985,74 @@ dumpArrowNode(const ArrowNode *node)
 		std::string temp;
 
 		__dumpArrowNode(json, node, std::string("\n  "));
+		temp = json.str();
+		result = (char *)__palloc(temp.size() + 1);
+		memcpy(result, temp.data(), temp.size());
+		result[temp.size()] = '\0';
+	}
+	catch (const std::exception &e) {
+		const char *estr = e.what();
+		emsg = (char *)alloca(std::strlen(estr)+1);
+		strcpy(emsg, estr);
+	}
+	/* error report */
+	if (emsg)
+	{
+#ifdef PGSTROM_DEBUG_BUILD
+		elog(ERROR, "%s", emsg);
+#else
+		fputs(emsg, stderr);
+		exit(1);
+#endif
+	}
+	return result;
+}
+
+/*
+ * dumpArrowFileInfo
+ */
+char *
+dumpArrowFileInfo(const ArrowFileInfo *af_info)
+{
+	char   *emsg = NULL;
+	char   *result;
+	try {
+		std::ostringstream json;
+		std::string temp;
+
+		json << "{ \"filename\" : \"" << af_info->filename << "\",\n"
+			 << "  \"filesize\" : "   << af_info->stat_buf.st_size << ",\n"
+			 << "  \"footer\" : ";
+		__dumpArrowNode(json, (const ArrowNode *)&af_info->footer,
+						std::string("\n               "));
+		if (af_info->_num_dictionaries > 0)
+		{
+			json << ",\n"
+				 << "  \"dictionaries\" : [\n          ";
+			for (int k=0; k < af_info->_num_dictionaries; k++)
+			{
+				if (k > 0)
+					json << ",\n          ";
+				__dumpArrowNode(json, (const ArrowNode *)&af_info->dictionaries[k],
+								std::string("\n          "));
+			}
+			json << "]";
+		}
+		if (af_info->_num_recordBatches > 0)
+		{
+			json << ",\n"
+				 << "  \"record-batches\" : [\n          ";
+			for (int k=0; k < af_info->_num_recordBatches; k++)
+			{
+				if (k > 0)
+					json << ",\n";
+				__dumpArrowNode(json, (const ArrowNode *)&af_info->recordBatches[k],
+								std::string("\n          "));
+			}
+			json << "]";
+		}
+		json << "\n}\n";
+		/* result as cstring */
 		temp = json.str();
 		result = (char *)__palloc(temp.size() + 1);
 		memcpy(result, temp.data(), temp.size());
@@ -2070,13 +2138,13 @@ readArrowTypeFloatingPoint(ArrowTypeFloatingPoint *node,
 	INIT_ARROW_TYPE_NODE(node, FloatingPoint);
 	switch (__type->precision())
 	{
-		case org::apache::arrow::flatbuf::Precision::HALF:
+		case org::apache::arrow::flatbuf::Precision_HALF:
 			node->precision = ArrowPrecision__Half;
 			break;
-		case org::apache::arrow::flatbuf::Precision::SINGLE:
+		case org::apache::arrow::flatbuf::Precision_SINGLE:
 			node->precision = ArrowPrecision__Single;
 			break;
-		case org::apache::arrow::flatbuf::Precision::DOUBLE:
+		case org::apache::arrow::flatbuf::Precision_DOUBLE:
 			node->precision = ArrowPrecision__Double;
 			break;
 		default:
@@ -2104,10 +2172,10 @@ readArrowTypeDate(ArrowTypeDate *node,
 	INIT_ARROW_TYPE_NODE(node, Date);
 	switch (__type->unit())
 	{
-		case org::apache::arrow::flatbuf::DateUnit::DAY:
+		case org::apache::arrow::flatbuf::DateUnit_DAY:
 			node->unit = ArrowDateUnit__Day;
 			break;
-		case org::apache::arrow::flatbuf::DateUnit::MILLISECOND:
+		case org::apache::arrow::flatbuf::DateUnit_MILLISECOND:
 			node->unit = ArrowDateUnit__MilliSecond;
 			break;
 		default:
@@ -2123,16 +2191,16 @@ readArrowTypeTime(ArrowTypeTime *node,
 	INIT_ARROW_TYPE_NODE(node, Time);
 	switch (__type->unit())
 	{
-		case org::apache::arrow::flatbuf::TimeUnit::SECOND:
+		case org::apache::arrow::flatbuf::TimeUnit_SECOND:
 			node->unit = ArrowTimeUnit__Second;
 			break;
-		case org::apache::arrow::flatbuf::TimeUnit::MILLISECOND:
+		case org::apache::arrow::flatbuf::TimeUnit_MILLISECOND:
 			node->unit = ArrowTimeUnit__MilliSecond;
 			break;
-		case org::apache::arrow::flatbuf::TimeUnit::MICROSECOND:
+		case org::apache::arrow::flatbuf::TimeUnit_MICROSECOND:
 			node->unit = ArrowTimeUnit__MicroSecond;
 			break;
-		case org::apache::arrow::flatbuf::TimeUnit::NANOSECOND:
+		case org::apache::arrow::flatbuf::TimeUnit_NANOSECOND:
 			node->unit = ArrowTimeUnit__NanoSecond;
 			break;
 		default:
@@ -2151,16 +2219,16 @@ readArrowTypeTimestamp(ArrowTypeTimestamp *node,
 	INIT_ARROW_TYPE_NODE(node, Timestamp);
 	switch (__type->unit())
 	{
-		case org::apache::arrow::flatbuf::TimeUnit::SECOND:
+		case org::apache::arrow::flatbuf::TimeUnit_SECOND:
 			node->unit = ArrowTimeUnit__Second;
 			break;
-		case org::apache::arrow::flatbuf::TimeUnit::MILLISECOND:
+		case org::apache::arrow::flatbuf::TimeUnit_MILLISECOND:
 			node->unit = ArrowTimeUnit__MilliSecond;
 			break;
-		case org::apache::arrow::flatbuf::TimeUnit::MICROSECOND:
+		case org::apache::arrow::flatbuf::TimeUnit_MICROSECOND:
 			node->unit = ArrowTimeUnit__MicroSecond;
 			break;
-		case org::apache::arrow::flatbuf::TimeUnit::NANOSECOND:
+		case org::apache::arrow::flatbuf::TimeUnit_NANOSECOND:
 			node->unit = ArrowTimeUnit__NanoSecond;
 			break;
 		default:
@@ -2182,13 +2250,13 @@ readArrowTypeInterval(ArrowTypeInterval *node,
 	INIT_ARROW_TYPE_NODE(node, Interval);
 	switch (__type->unit())
 	{
-		case org::apache::arrow::flatbuf::IntervalUnit::YEAR_MONTH:
+		case org::apache::arrow::flatbuf::IntervalUnit_YEAR_MONTH:
 			node->unit = ArrowIntervalUnit__Year_Month;
 			break;
-		case org::apache::arrow::flatbuf::IntervalUnit::DAY_TIME:
+		case org::apache::arrow::flatbuf::IntervalUnit_DAY_TIME:
 			node->unit = ArrowIntervalUnit__Day_Time;
 			break;
-		case org::apache::arrow::flatbuf::IntervalUnit::MONTH_DAY_NANO:
+		case org::apache::arrow::flatbuf::IntervalUnit_MONTH_DAY_NANO:
 			node->unit = ArrowIntervalUnit__Month_Day_Nano;
 			break;
 		default:
@@ -2203,10 +2271,10 @@ readArrowTypeUnion(ArrowTypeUnion *node,
 	INIT_ARROW_TYPE_NODE(node, Union);
 	switch (__type->mode())
 	{
-		case org::apache::arrow::flatbuf::UnionMode::Sparse:
+		case org::apache::arrow::flatbuf::UnionMode_Sparse:
 			node->mode = ArrowUnionMode__Sparse;
 			break;
-		case org::apache::arrow::flatbuf::UnionMode::Dense:
+		case org::apache::arrow::flatbuf::UnionMode_Dense:
 			node->mode = ArrowUnionMode__Dense;
 			break;
 		default:
@@ -2254,16 +2322,16 @@ readArrowTypeDuration(ArrowTypeDuration *node,
 	INIT_ARROW_TYPE_NODE(node,Duration);
 	switch (__type->unit())
 	{
-		case org::apache::arrow::flatbuf::TimeUnit::SECOND:
+		case org::apache::arrow::flatbuf::TimeUnit_SECOND:
 			node->unit = ArrowTimeUnit__Second;
 			break;
-		case org::apache::arrow::flatbuf::TimeUnit::MILLISECOND:
+		case org::apache::arrow::flatbuf::TimeUnit_MILLISECOND:
 			node->unit = ArrowTimeUnit__MilliSecond;
 			break;
-		case org::apache::arrow::flatbuf::TimeUnit::MICROSECOND:
+		case org::apache::arrow::flatbuf::TimeUnit_MICROSECOND:
 			node->unit = ArrowTimeUnit__MicroSecond;
 			break;
-		case org::apache::arrow::flatbuf::TimeUnit::NANOSECOND:
+		case org::apache::arrow::flatbuf::TimeUnit_NANOSECOND:
 			node->unit = ArrowTimeUnit__NanoSecond;
 			break;
 		default:
@@ -2294,83 +2362,83 @@ readArrowField(ArrowField *node,
 	node->nullable = field->nullable();
 	switch (field->type_type())
 	{
-		case org::apache::arrow::flatbuf::Type::Null:
+		case org::apache::arrow::flatbuf::Type_Null:
 			INIT_ARROW_TYPE_NODE(&node->type, Null);
 			break;
-		case org::apache::arrow::flatbuf::Type::Int:
+		case org::apache::arrow::flatbuf::Type_Int:
 			readArrowTypeInt(&node->type.Int,
 							 field->type_as_Int());
 			break;
-		case org::apache::arrow::flatbuf::Type::FloatingPoint:
+		case org::apache::arrow::flatbuf::Type_FloatingPoint:
 			readArrowTypeFloatingPoint(&node->type.FloatingPoint,
 									   field->type_as_FloatingPoint());
 			break;
-		case org::apache::arrow::flatbuf::Type::Binary:
+		case org::apache::arrow::flatbuf::Type_Binary:
 			INIT_ARROW_TYPE_NODE(&node->type, Binary);
 			break;
-		case org::apache::arrow::flatbuf::Type::Utf8:
+		case org::apache::arrow::flatbuf::Type_Utf8:
 			INIT_ARROW_TYPE_NODE(&node->type, Utf8);
 			break;
-		case org::apache::arrow::flatbuf::Type::Bool:
+		case org::apache::arrow::flatbuf::Type_Bool:
 			INIT_ARROW_TYPE_NODE(&node->type, Bool);
 			break;
-		case org::apache::arrow::flatbuf::Type::Decimal:
+		case org::apache::arrow::flatbuf::Type_Decimal:
 			readArrowTypeDecimal(&node->type.Decimal,
 								 field->type_as_Decimal());
 			break;
-		case org::apache::arrow::flatbuf::Type::Date:
+		case org::apache::arrow::flatbuf::Type_Date:
 			readArrowTypeDate(&node->type.Date,
 							  field->type_as_Date());
 			break;
-		case org::apache::arrow::flatbuf::Type::Time:
+		case org::apache::arrow::flatbuf::Type_Time:
 			readArrowTypeTime(&node->type.Time,
 							  field->type_as_Time());
 			break;
-		case org::apache::arrow::flatbuf::Type::Timestamp:
+		case org::apache::arrow::flatbuf::Type_Timestamp:
 			readArrowTypeTimestamp(&node->type.Timestamp,
 								   field->type_as_Timestamp());
 			break;
-		case org::apache::arrow::flatbuf::Type::Interval:
+		case org::apache::arrow::flatbuf::Type_Interval:
 			readArrowTypeInterval(&node->type.Interval,
 								  field->type_as_Interval());
 			break;
-		case org::apache::arrow::flatbuf::Type::List:
+		case org::apache::arrow::flatbuf::Type_List:
 			INIT_ARROW_TYPE_NODE(&node->type, List);
 			break;
-		case org::apache::arrow::flatbuf::Type::Struct_:
+		case org::apache::arrow::flatbuf::Type_Struct_:
 			INIT_ARROW_TYPE_NODE(&node->type, Struct);
 			break;
-		case org::apache::arrow::flatbuf::Type::Union:
+		case org::apache::arrow::flatbuf::Type_Union:
 			readArrowTypeUnion(&node->type.Union,
 							   field->type_as_Union());
 			break;
-		case org::apache::arrow::flatbuf::Type::FixedSizeBinary:
+		case org::apache::arrow::flatbuf::Type_FixedSizeBinary:
 			readArrowTypeFixedSizeBinary(&node->type.FixedSizeBinary,
 										 field->type_as_FixedSizeBinary());
 			break;
-		case org::apache::arrow::flatbuf::Type::FixedSizeList:
+		case org::apache::arrow::flatbuf::Type_FixedSizeList:
 			readArrowTypeFixedSizeList(&node->type.FixedSizeList,
 									   field->type_as_FixedSizeList());
 			break;
-		case org::apache::arrow::flatbuf::Type::Map:
+		case org::apache::arrow::flatbuf::Type_Map:
 			readArrowTypeMap(&node->type.Map,
 							 field->type_as_Map());
 			break;
-		case org::apache::arrow::flatbuf::Type::Duration:
+		case org::apache::arrow::flatbuf::Type_Duration:
 			readArrowTypeDuration(&node->type.Duration,
 								  field->type_as_Duration());
 			break;
-		case org::apache::arrow::flatbuf::Type::LargeBinary:
+		case org::apache::arrow::flatbuf::Type_LargeBinary:
 			INIT_ARROW_TYPE_NODE(&node->type, LargeBinary);
 			break;
-		case org::apache::arrow::flatbuf::Type::LargeUtf8:
+		case org::apache::arrow::flatbuf::Type_LargeUtf8:
 			INIT_ARROW_TYPE_NODE(&node->type, LargeUtf8);
 			break;
-		case org::apache::arrow::flatbuf::Type::LargeList:
+		case org::apache::arrow::flatbuf::Type_LargeList:
 			INIT_ARROW_TYPE_NODE(&node->type, LargeList);
 			break;
 		default:
-			Elog("unknown org::apache::arrow::flatbuf::Type (%d)",
+			Elog("unknown org::apache::arrow::flatbuf::Type_XXX (%d)",
 				 (int)field->type_type());
 	}
 
@@ -2420,10 +2488,10 @@ readArrowSchemaMessage(ArrowSchema *node,
 	INIT_ARROW_NODE(node, Schema);
 	switch (schema->endianness())
 	{
-		case org::apache::arrow::flatbuf::Endianness::Little:
+		case org::apache::arrow::flatbuf::Endianness_Little:
 			node->endianness = ArrowEndianness__Little;
 			break;
-		case org::apache::arrow::flatbuf::Endianness::Big:
+		case org::apache::arrow::flatbuf::Endianness_Big:
 			node->endianness = ArrowEndianness__Big;
 			break;
 		default:
@@ -2468,13 +2536,13 @@ readArrowSchemaMessage(ArrowSchema *node,
 
 			switch (org::apache::arrow::flatbuf::EnumValuesFeature()[feature_id])
 			{
-				case org::apache::arrow::flatbuf::Feature::UNUSED:
+				case org::apache::arrow::flatbuf::Feature_UNUSED:
 					node->features[i] = ArrowFeature__Unused;
 					break;
-				case org::apache::arrow::flatbuf::Feature::DICTIONARY_REPLACEMENT:
+				case org::apache::arrow::flatbuf::Feature_DICTIONARY_REPLACEMENT:
 					node->features[i] = ArrowFeature__DictionaryReplacement;
 					break;
-				case org::apache::arrow::flatbuf::Feature::COMPRESSED_BODY:
+				case org::apache::arrow::flatbuf::Feature_COMPRESSED_BODY:
 					node->features[i] = ArrowFeature__CompressedBody;
 					break;
 				default:
@@ -2491,10 +2559,10 @@ readArrowBodyCompression(ArrowBodyCompression *node,
 	INIT_ARROW_NODE(node,BodyCompression);
 	switch (compression->codec())
 	{
-		case org::apache::arrow::flatbuf::CompressionType::LZ4_FRAME:
+		case org::apache::arrow::flatbuf::CompressionType_LZ4_FRAME:
 			node->codec = ArrowCompressionType__LZ4_FRAME;
 			break;
-		case org::apache::arrow::flatbuf::CompressionType::ZSTD:
+		case org::apache::arrow::flatbuf::CompressionType_ZSTD:
 			node->codec = ArrowCompressionType__ZSTD;
 			break;
 		default:
@@ -2504,7 +2572,7 @@ readArrowBodyCompression(ArrowBodyCompression *node,
 	}
 	switch (compression->method())
 	{
-		case org::apache::arrow::flatbuf::BodyCompressionMethod::BUFFER:
+		case org::apache::arrow::flatbuf::BodyCompressionMethod_BUFFER:
 			node->method = ArrowBodyCompressionMethod__BUFFER;
 			break;
 		default:
@@ -2577,24 +2645,24 @@ readArrowMessageBlock(ArrowMessage *node,
 	INIT_ARROW_NODE(node, Message);
 	switch (message->header_type())
 	{
-		case org::apache::arrow::flatbuf::MessageHeader::Schema: {
+		case org::apache::arrow::flatbuf::MessageHeader_Schema: {
 			auto	__schema = message->header_as_Schema();
 			readArrowSchemaMessage(&node->body.schema, __schema);
 			break;
 		}
-		case org::apache::arrow::flatbuf::MessageHeader::DictionaryBatch: {
+		case org::apache::arrow::flatbuf::MessageHeader_DictionaryBatch: {
 			auto	__dbatch = message->header_as_DictionaryBatch();
 			readArrowDictionaryBatchMessage(&node->body.dictionaryBatch, __dbatch);
 			break;
 		}
-		case org::apache::arrow::flatbuf::MessageHeader::RecordBatch: {
+		case org::apache::arrow::flatbuf::MessageHeader_RecordBatch: {
 			auto	__rbatch = message->header_as_RecordBatch();
 			readArrowRecordBatchMessage(&node->body.recordBatch, __rbatch);
 			break;
 		}
-		case org::apache::arrow::flatbuf::MessageHeader::Tensor:
+		case org::apache::arrow::flatbuf::MessageHeader_Tensor:
 			Elog("MessageHeader::Tensor is not implemented right now");
-		case org::apache::arrow::flatbuf::MessageHeader::SparseTensor:
+		case org::apache::arrow::flatbuf::MessageHeader_SparseTensor:
 			Elog("MessageHeader::SparseTensor is not implemented right now");
 		default:
 			Elog("corrupted arrow file? unknown message type %d",
@@ -2616,19 +2684,19 @@ readArrowFooter(ArrowFooter *node,
 	/* extract version */
 	switch (__version)
 	{
-		case org::apache::arrow::flatbuf::MetadataVersion::V1:
+		case org::apache::arrow::flatbuf::MetadataVersion_V1:
 			node->version = ArrowMetadataVersion__V1;
 			break;
-		case org::apache::arrow::flatbuf::MetadataVersion::V2:
+		case org::apache::arrow::flatbuf::MetadataVersion_V2:
 			node->version = ArrowMetadataVersion__V2;
 			break;
-		case org::apache::arrow::flatbuf::MetadataVersion::V3:
+		case org::apache::arrow::flatbuf::MetadataVersion_V3:
 			node->version = ArrowMetadataVersion__V3;
 			break;
-		case org::apache::arrow::flatbuf::MetadataVersion::V4:
+		case org::apache::arrow::flatbuf::MetadataVersion_V4:
 			node->version = ArrowMetadataVersion__V4;
 			break;
-		case org::apache::arrow::flatbuf::MetadataVersion::V5:
+		case org::apache::arrow::flatbuf::MetadataVersion_V5:
 			node->version = ArrowMetadataVersion__V5;
 			break;
 		default:
@@ -3192,11 +3260,14 @@ __readParquetMinMaxStats(ArrowFieldNode *field,
 			auto cdescr = __stat->descr();
 
 			assert(cdescr->physical_type() == stats->physical_type());
-			if (cdescr->converted_type() == parquet::ConvertedType::type::DECIMAL)
+			if (cdescr->converted_type() == parquet::ConvertedType::type::DECIMAL ||
+				(cdescr->logical_type() && cdescr->logical_type()->is_decimal()))
 			{
 				/* only Decimal128 */
-				auto	min_rv = arrow::Decimal128::FromBigEndian(__stat->min().ptr, cdescr->type_length());
-				auto	max_rv = arrow::Decimal128::FromBigEndian(__stat->max().ptr, cdescr->type_length());
+				auto	min_rv = arrow::Decimal128::FromBigEndian(__stat->min().ptr,
+																  cdescr->type_length());
+				auto	max_rv = arrow::Decimal128::FromBigEndian(__stat->max().ptr,
+																  cdescr->type_length());
 				if (!min_rv.ok() || !max_rv.ok())
 					return;
 				min_datum = min_rv.ValueOrDie().ToString(cdescr->type_scale());
@@ -3280,15 +3351,14 @@ __readParquetRowGroupMetadata(ArrowMessage *rbatch_message,
 	{
 		auto	col_meta = rg_meta->ColumnChunk(j);
 		auto	field = &rbatch->nodes[j];
+		auto	stats = col_meta->statistics();
 		auto	encodings = col_meta->encodings();
 		auto	encoding_stats = col_meta->encoding_stats();
 
 		INIT_ARROW_NODE(field, FieldNode);
 		field->length = col_meta->num_values();
-		if (col_meta->is_stats_set())
+		if (stats)
 		{
-			const auto  stats = col_meta->statistics();
-
 			if (stats->HasNullCount())
 				field->null_count = stats->null_count();
 			if (stats->HasMinMax())

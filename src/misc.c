@@ -993,7 +993,12 @@ pgstrom_copy_pathnode(const Path *pathnode)
 			{
 				SetOpPath	   *a = (SetOpPath *)pathnode;
 				SetOpPath	   *b = pmemdup(a, sizeof(SetOpPath));
+#if PG_VERSION_NUM < 180000
 				b->subpath = pgstrom_copy_pathnode(a->subpath);
+#else
+				b->leftpath = pgstrom_copy_pathnode(a->leftpath);
+				b->rightpath = pgstrom_copy_pathnode(a->rightpath);
+#endif
 				return &b->path;
 			}
 		case T_RecursiveUnionPath:

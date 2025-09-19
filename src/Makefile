@@ -72,9 +72,11 @@ endif
 HAS_LIBARROW = $(shell pkgconf --exists arrow>/dev/null 2>&1   && echo -n yes)
 HAS_PARQUET  = $(shell pkgconf --exists parquet>/dev/null 2>&1 && echo -n yes)
 ifeq ($(HAS_LIBARROW),yes)
-PGSTROM_FLAGS += -DHAS_LIBARROW=1 $(shell pkgconf --cflags arrow)
+PGSTROM_FLAGS += -DHAS_LIBARROW=1
+PG_CXXFLAGS += $(shell pkgconf --cflags arrow)
 ifeq ($(HAS_PARQUET),yes)
-PGSTROM_FLAGS += -DHAS_PARQUET=1  $(shell pkgconf --cflags parquet)
+PGSTROM_FLAGS += -DHAS_PARQUET=1
+PG_CXXFLAGS += $(shell pkgconf --cflags parquet)
 SHLIB_LINK += $(shell pkgconf --libs parquet)
 else
 SHLIB_LINK += $(shell pkgconf --libs arrow)

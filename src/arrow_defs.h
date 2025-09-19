@@ -913,6 +913,7 @@ __EXTERN char  *dumpArrowNode(const ArrowNode *node);
 __EXTERN void	copyArrowNode(ArrowNode *dest, const ArrowNode *src);
 __EXTERN bool	equalArrowNode(const ArrowNode *a, const ArrowNode *b);
 __EXTERN int	readArrowFileInfo(const char *filename, ArrowFileInfo *af_info);
+__EXTERN char  *dumpArrowFileInfo(const ArrowFileInfo *af_info);
 
 /*
  * parquet_read.cc (C++ interface)

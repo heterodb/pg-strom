@@ -3939,14 +3939,13 @@ ArrowGetForeignPaths(PlannerInfo *root,
 									baserel,
 									NULL,	/* default pathtarget */
 									-1.0,	/* dummy */
+									arrow_fdw_enabled ? 1 : 0,	/* disabled_nodes */
 									-1.0,	/* dummy */
 									-1.0,	/* dummy */
 									NIL,	/* no pathkeys */
 									required_outer,
 									NULL,	/* no extra plan */
-#if PG_VERSION_NUM >= 170000
 									NIL,	/* no restrict-info of Join push-down */
-#endif
 									NIL);	/* no particular private */
 	cost_arrow_fdw_seqscan(&fpath->path,
 						   root,
@@ -3969,14 +3968,13 @@ ArrowGetForeignPaths(PlannerInfo *root,
 										baserel,
 										NULL,	/* default pathtarget */
 										-1.0,	/* dummy */
+										arrow_fdw_enabled ? 1 : 0,	/* disabled_nodes */
 										-1.0,	/* dummy */
 										-1.0,	/* dummy */
 										NIL,	/* no pathkeys */
 										required_outer,
 										NULL,	/* no extra plan */
-#if PG_VERSION_NUM >= 170000
 										NIL,	/* no restrict-info of Join push-down */
-#endif
 										NIL);	/* no particular private */
 		fpath->path.parallel_aware = true;
 		cost_arrow_fdw_seqscan(&fpath->path,
@@ -5727,7 +5725,14 @@ __insertPgAttributeTuple(Relation pg_attr_rel,
 	values[Anum_pg_attribute_attlen - 1] = Int16GetDatum(type_len);
 	values[Anum_pg_attribute_attnum - 1] = Int16GetDatum(attnum);
 	values[Anum_pg_attribute_attndims - 1] = Int32GetDatum(type_ndims);
+#if PG_VERSION_NUM < 180000
+	/*
+	 * MEMO: PG18 removed pg_attribute.attcacheoff because its role was
+	 * moved to CompactAttribute of TupleDesc.
+	 * git: 02a8d0c45253eb54e57b1974c8627e5be3e1d852
+	 */
 	values[Anum_pg_attribute_attcacheoff - 1] = Int32GetDatum(-1);
+#endif
 	values[Anum_pg_attribute_atttypmod - 1] = Int32GetDatum(type_mod);
 	values[Anum_pg_attribute_attbyval - 1] = BoolGetDatum(type_byval);
 	values[Anum_pg_attribute_attstorage - 1] = CharGetDatum(type_storage);

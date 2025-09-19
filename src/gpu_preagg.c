@@ -2265,8 +2265,7 @@ consider_sorted_groupby_path(PlannerInfo *root,
 	List	   *sortkeys_kind = NIL;
 	List	   *sortkeys_refs = NIL;
 	List	   *inner_target_list = NIL;
-	ListCell   *cell;
-	ListCell   *lc1, *lc2;
+	ListCell   *lc1, *lc2, *lc3, *lc4;
 
 	if (!pgstrom_enable_gpusort)
 	{
@@ -2300,96 +2299,89 @@ consider_sorted_groupby_path(PlannerInfo *root,
 		return false;
 	}
 	/* preparation for pgstrom_xpu_expression */
-	foreach (cell, cpath->custom_paths)
+	foreach (lc1, cpath->custom_paths)
 	{
 		inner_target_list = lappend(inner_target_list,
-									((Path *)lfirst(cell))->pathtarget);
+									((Path *)lfirst(lc1))->pathtarget);
 	}
 
-	foreach (cell, sortkeys_upper)
+	foreach (lc1, sortkeys_upper)
 	{
-		PathKey	   *pk = lfirst(cell);
+		PathKey	   *pk = lfirst(lc1);
 		EquivalenceClass *ec = pk->pk_eclass;
-		EquivalenceMember *em;
-		Expr	   *em_expr;
-		bool		found = false;
 
-		if (list_length(ec->ec_members) != 1 ||
-			ec->ec_sources != NIL ||
-			ec->ec_derives != NIL)
+		/* walk on the ec_members to find out identical key expression */
+		foreach (lc2, ec->ec_members)
 		{
-			elog(DEBUG1, "gpusort: unexpected EquivalenceClass properties");
-			return false;		/* not supported */
-		}
-		em = (EquivalenceMember *)linitial(ec->ec_members);
-		/* strip Relabel for equal() comparison */
-		for (em_expr = em->em_expr;
-			 IsA(em_expr, RelabelType);
-			 em_expr = ((RelabelType *)em_expr)->arg);
+			EquivalenceMember *em = lfirst(lc2);
+			Expr   *em_expr = em->em_expr;
 
-		/* ok, lookup the sorting key */
-		forboth (lc1, upper_target->exprs,
-				 lc2, final_target->exprs)
-		{
-			Node   *u_expr = lfirst(lc1);
-			Node   *f_expr = lfirst(lc2);
-
-			if (equal(u_expr, em_expr))
+			/* strip Relabel for equal() comparison */
+			while (IsA(em_expr, RelabelType))
+				em_expr = ((RelabelType *)em_expr)->arg;
+			/* ok, lookup the sorting key */
+			forboth (lc3, upper_target->exprs,
+					 lc4, final_target->exprs)
 			{
-				int		kind = lookup_gpusort_keykind(f_expr, cpath->path.pathtarget);
+				Node   *u_expr = lfirst(lc3);
+				Node   *f_expr = lfirst(lc4);
 
-				if (kind < 0)
+				if (equal(u_expr, em_expr))
 				{
-					elog(DEBUG1, "gpusort: key expression is not supported: %s",
-						 nodeToString(f_expr));
-					return false;	/* not supported */
-				}
-				/* check whether the referenced raw key is device executable */
-				if (kind == KSORT_KEY_KIND__VREF)
-				{
-					devtype_info *dtype;
+					int		kind = lookup_gpusort_keykind(f_expr, cpath->path.pathtarget);
 
-					if (!pgstrom_xpu_expression((Expr *)f_expr,
-												pp_info->xpu_task_flags,
-												pp_info->scan_relid,
-												inner_target_list,
-												NULL))
+					if (kind < 0)
 					{
-						elog(DEBUG1, "gpusort: key expression is not device executable: %s",
+						elog(DEBUG1, "gpusort: key expression is not supported: %s",
 							 nodeToString(f_expr));
-						return false;
+						continue;
 					}
-					/* check compare functions */
-					dtype = pgstrom_devtype_lookup(exprType((Node *)em_expr));
-					if (!dtype || (dtype->type_flags & DEVTYPE__HAS_COMPARE) == 0)
+					/* check whether the referenced raw key is device executable */
+					if (kind == KSORT_KEY_KIND__VREF)
 					{
-						elog(DEBUG1, "gpusort: type '%s' is not device supported",
-							 format_type_be(exprType((Node *)em_expr)));
-						return false;
+						devtype_info *dtype;
+
+						if (!pgstrom_xpu_expression((Expr *)f_expr,
+													pp_info->xpu_task_flags,
+													pp_info->scan_relid,
+													inner_target_list,
+													NULL))
+						{
+							elog(DEBUG1, "gpusort: key expression is not device executable: %s",
+								 nodeToString(f_expr));
+							continue;
+						}
+						/* check compare functions */
+						dtype = pgstrom_devtype_lookup(exprType((Node *)em_expr));
+						if (!dtype || (dtype->type_flags & DEVTYPE__HAS_COMPARE) == 0)
+						{
+							elog(DEBUG1, "gpusort: type '%s' is not device supported",
+								 format_type_be(exprType((Node *)em_expr)));
+							continue;
+						}
 					}
+					if (__PathKeyUseNullsFirstCompare(pk))
+						kind |= KSORT_KEY_ATTR__NULLS_FIRST;
+					if (__PathKeyUseLessThanCompare(pk))
+						kind |= KSORT_KEY_ATTR__ORDER_ASC;
+					else if (__PathKeyUseGreaterThanCompare(pk))
+					{
+						elog(DEBUG1, "Bug? PathKey has neither ASC nor DESC sorting order");
+						return false;	/* should not happen */
+					}
+					/* ok, found the sorting key */
+					sortkeys_expr = lappend(sortkeys_expr, f_expr);
+					sortkeys_kind = lappend_int(sortkeys_kind, kind);
+					sortkeys_refs = lappend_int(sortkeys_refs, ec->ec_sortref);
+					goto found_one_key;
 				}
-				if (pk->pk_nulls_first)
-					kind |= KSORT_KEY_ATTR__NULLS_FIRST;
-				if (pk->pk_strategy == BTLessStrategyNumber)
-					kind |= KSORT_KEY_ATTR__ORDER_ASC;
-				else if (pk->pk_strategy != BTGreaterStrategyNumber)
-				{
-					elog(DEBUG1, "Bug? PathKey has unexpected pk_strategy (%d)",
-						 (int)pk->pk_strategy);
-					return false;	/* should not happen */
-				}
-				sortkeys_expr = lappend(sortkeys_expr, f_expr);
-				sortkeys_kind = lappend_int(sortkeys_kind, kind);
-				sortkeys_refs = lappend_int(sortkeys_refs, ec->ec_sortref);
-				found = true;
-				break;
 			}
 		}
-		if (!found)
-		{
-			elog(DEBUG1, "gpusort: sort-key was not found in the result set");
-			return false;	/* not found */
-		}
+		elog(DEBUG1, "gpusort: sort-key was not found in the result set");
+		return false;	/* not found */
+	found_one_key:
+		Assert(list_length(sortkeys_expr) == list_length(sortkeys_kind) &&
+			   list_length(sortkeys_expr) == list_length(sortkeys_refs));
 	}
 	*p_sortkeys_upper = sortkeys_upper;
 	*p_sortkeys_expr  = sortkeys_expr;
