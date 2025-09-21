@@ -78,8 +78,18 @@ ifeq ($(HAS_PARQUET),yes)
 PGSTROM_FLAGS += -DHAS_PARQUET=1
 PG_CXXFLAGS += $(shell pkgconf --cflags parquet)
 SHLIB_LINK += $(shell pkgconf --libs parquet)
+# Add runtime library path
+PARQUET_LIBDIR = $(shell pkgconf --variable=libdir parquet)
+ifneq ($(PARQUET_LIBDIR),)
+SHLIB_LINK += -Wl,-rpath,$(PARQUET_LIBDIR)
+endif
 else
 SHLIB_LINK += $(shell pkgconf --libs arrow)
+# Add runtime library path for Arrow
+ARROW_LIBDIR = $(shell pkgconf --variable=libdir arrow)
+ifneq ($(ARROW_LIBDIR),)
+SHLIB_LINK += -Wl,-rpath,$(ARROW_LIBDIR)
+endif
 endif
 endif
 

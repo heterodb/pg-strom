@@ -3223,7 +3223,26 @@ __readParquetMinMaxStats(ArrowFieldNode *field,
 	std::string	min_datum;
 	std::string	max_datum;
 
-	switch (stats->physical_type())
+	if (!stats)
+		return;
+
+	// Safely attempt to get physical_type
+	parquet::Type::type phys_type;
+	try {
+		phys_type = stats->physical_type();
+	} catch (const std::exception& e) {
+#ifdef PGSTROM_DEBUG
+		elog(DEBUG1, "Failed to get physical_type from Parquet statistics: %s", e.what());
+#endif
+		return;
+	} catch (...) {
+#ifdef PGSTROM_DEBUG
+		elog(DEBUG1, "Unknown error getting physical_type from Parquet statistics");
+#endif
+		return;
+	}
+
+	switch (phys_type)
 	{
 		case parquet::Type::BOOLEAN: {
 			auto __stat = std::dynamic_pointer_cast<const parquet::BoolStatistics>(stats);
@@ -3359,10 +3378,33 @@ __readParquetRowGroupMetadata(ArrowMessage *rbatch_message,
 		field->length = col_meta->num_values();
 		if (stats)
 		{
-			if (stats->HasNullCount())
-				field->null_count = stats->null_count();
-			if (stats->HasMinMax())
-				__readParquetMinMaxStats(field, stats);
+			// Handle null count statistics
+			try {
+				if (stats->HasNullCount())
+					field->null_count = stats->null_count();
+			} catch (const std::exception& e) {
+#ifdef PGSTROM_DEBUG
+				elog(DEBUG1, "Failed to access null count statistics: %s", e.what());
+#endif
+			} catch (...) {
+#ifdef PGSTROM_DEBUG
+				elog(DEBUG1, "Unknown error accessing null count statistics");
+#endif
+			}
+
+			// Handle min/max statistics separately
+			try {
+				if (stats->HasMinMax())
+					__readParquetMinMaxStats(field, stats);
+			} catch (const std::exception& e) {
+#ifdef PGSTROM_DEBUG
+				elog(DEBUG1, "Failed to access min/max statistics: %s", e.what());
+#endif
+			} catch (...) {
+#ifdef PGSTROM_DEBUG
+				elog(DEBUG1, "Unknown error accessing min/max statistics");
+#endif
+			}
 		}
 		/*
 		 * Some additional Parquet specific attrobutes for dump only
