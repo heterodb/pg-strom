@@ -11,6 +11,7 @@
  */
 #include <iostream>
 #include <ctype.h>
+#include <endian.h>
 #include <fcntl.h>
 #include <getopt.h>
 #include <pthread.h>
@@ -46,8 +47,32 @@ struct configOption
 };
 using configOption	= struct configOption;
 
+using	arrowField		= std::shared_ptr<arrow::Field>;
 using	arrowBuilder	= std::shared_ptr<arrow::ArrayBuilder>;
 using	arrowBuilderVector = std::vector<arrowBuilder>;
+using	arrowArray		= std::shared_ptr<arrow::Array>;
+using	arrowArrayVector = std::vector<arrowArray>;
+
+class pgsqlBinaryHandler
+{
+public:
+	std::string		attname;
+	Oid				atttypid;
+	int				atttypmod;
+	int				attlen;
+	char			attbyval;
+	char			attalign;
+	char			typtype;
+	Oid				typrelid;	/* valid, if composite type */
+	Oid				typelemid;	/* valid, if array type */
+	std::string		nspname;
+	std::string		typname;
+	std::string		extname;
+	arrowBuilder	arrow_builder;
+	virtual size_t putValue(const char *value, int sz) = 0;
+};
+using	pgsqlHandler		= std::shared_ptr<pgsqlBinaryHandler>;
+using	pgsqlHandlerVector	= std::vector<pgsqlHandler>;
 
 // ------------------------------------------------
 // Command line options
@@ -65,7 +90,6 @@ static const char  *ctid_target_table = NULL;	/*     --ctid-target */
 static const char  *parallel_keys;					/* -k, --parallel-keys */
 static bool			parquet_mode = false;			/* -q, --parquet */
 static const char  *output_filename = NULL;			/* -o, --output */
-static const char  *append_filename = NULL;			/* --append */
 static const char  *stat_embedded_columns = NULL;	/* -S, --stat */
 static const char  *flatten_composite_columns = NULL; /* --flatten */
 static size_t		batch_segment_sz = 0;			/* -s, --segment-size */
@@ -84,9 +108,16 @@ static volatile bool	worker_setup_done  = false;
 static pthread_mutex_t	worker_setup_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t	worker_setup_cond  = PTHREAD_COND_INITIALIZER;
 static std::vector<pthread_t>			worker_threads;
-static std::vector<arrowBuilderVector>	worker_builders;
+static std::vector<pgsqlHandlerVector>	worker_handlers;
 static const char	   *snapshot_identifier = NULL;
-static std::shared_ptr<arrow::Schema> arrow_schema;
+static std::shared_ptr<arrow::Schema>					arrow_schema = NULL;
+static std::shared_ptr<arrow::io::FileOutputStream>		arrow_out_stream;
+static std::shared_ptr<arrow::ipc::RecordBatchWriter>	arrow_file_writer;
+static std::shared_ptr<parquet::schema::GroupNode>		parquet_schema;
+static std::unique_ptr<parquet::ParquetFileWriter>		parquet_file_writer;
+static pthread_mutex_t	arrow_file_mutex = PTHREAD_MUTEX_INITIALIZER;
+static uint32_t			arrow_num_chunks = 0;
+static uint64_t			arrow_num_items = 0;
 
 // ------------------------------------------------
 // Thread local variables
@@ -132,6 +163,8 @@ static thread_local const char *server_timezone = NULL;
 // ------------------------------------------------
 #define Max(a,b)		((a)>(b) ? (a) : (b))
 #define Min(a,b)		((a)<(b) ? (a) : (b))
+#define BITMAPLEN(NITEMS)		(((NITEMS) + 7) / 8)
+#define ARROW_ALIGN(LEN)		(((uintptr_t)(LEN) + 63UL) & ~63UL)
 
 static inline void *
 palloc(size_t sz)
@@ -270,8 +303,499 @@ __replace_string(std::string &str,
 	}
 }
 
+// ================================================================
+//
+// Type specific PostgreSQL handlers
+//
+// ================================================================
+#define __BUFFER_USAGE_INLINE_TYPE(builder, unitsz)						\
+	(ARROW_ALIGN((unitsz) * (builder)->length()) +						\
+	 ARROW_ALIGN((builder)->null_count() > 0 ? BITMAPLEN((builder)->length()) : 0))
+#define __BUFFER_USAGE_VARLENA_TYPE(builder)							\
+	(ARROW_ALIGN(sizeof(uint32_t) * ((builder)->length() + 1)) +		\
+	 ARROW_ALIGN((builder)->value_data_length()) +						\
+	 ARROW_ALIGN((builder)->null_count() > 0 ? BITMAPLEN((builder)->length()) : 0))
+#define __BUFFER_USAGE_LARGE_VARLENA_TYPE(builder)						\
+	(ARROW_ALIGN(sizeof(uint64_t) * ((builder)->length() + 1)) +		\
+	 ARROW_ALIGN((builder)->value_data_length()) +						\
+	 ARROW_ALIGN((builder)->null_count() > 0 ? BITMAPLEN((builder)->length()) : 0))
 
+class pgsqlBoolHandler final : public pgsqlBinaryHandler
+{
+public:
+	size_t	putValue(const char *addr, int sz)
+	{
+		auto	builder = std::dynamic_pointer_cast<arrow::BooleanBuilder>(arrow_builder);
+		arrow::Status rv;
 
+		assert(builder != NULL);	//not arrow::BooleanBuilder!!
+		if (!addr)
+			rv = builder->AppendNull();
+		else
+			rv = builder->Append(*addr ? true : false);
+		if (!rv.ok())
+			Elog("unable to append value to '%s' field", attname.c_str());
+		return (ARROW_ALIGN(BITMAPLEN(builder->length())) +
+				ARROW_ALIGN(builder->null_count() > 0 ? BITMAPLEN(builder->length()) : 0));
+	}
+};
+
+class pgsqlInt8Handler final : public pgsqlBinaryHandler
+{
+public:
+	size_t	putValue(const char *addr, int sz)
+	{
+		auto	builder = std::dynamic_pointer_cast<arrow::Int8Builder>(arrow_builder);
+		int8_t	value;
+		arrow::Status rv;
+
+		assert(builder != NULL);	//not arrow::Int8Builder!!
+		if (!addr)
+			rv = builder->AppendNull();
+		else
+		{
+			assert(sz == sizeof(int8_t));
+			value = *((const int8_t *)addr);
+
+			rv = builder->Append(value);
+		}
+		if (!rv.ok())
+			Elog("unable to put value to '%s' field: %s",
+				 attname.c_str(), rv.ToString().c_str());
+		return __BUFFER_USAGE_INLINE_TYPE(builder, sizeof(int8_t));
+	}
+};
+
+class pgsqlInt16Handler final : public pgsqlBinaryHandler
+{
+public:
+	size_t	putValue(const char *addr, int sz)
+	{
+		auto	builder = std::dynamic_pointer_cast<arrow::Int16Builder>(arrow_builder);
+		int16_t	value;
+		arrow::Status rv;
+
+		assert(builder != NULL);	//not arrow::Int16Builder!!
+		if (!addr)
+			rv = builder->AppendNull();
+		else
+		{
+			assert(sz == sizeof(int16_t));
+			value = be16toh(*((const uint16_t *)addr));
+			rv = builder->Append(value);
+		}
+		if (!rv.ok())
+			Elog("unable to put value to '%s' field: %s",
+				 attname.c_str(), rv.ToString().c_str());
+		return __BUFFER_USAGE_INLINE_TYPE(builder, sizeof(int16_t));
+	}
+};
+
+class pgsqlInt32Handler final : public pgsqlBinaryHandler
+{
+public:
+	size_t	putValue(const char *addr, int sz)
+	{
+		auto	builder = std::dynamic_pointer_cast<arrow::Int32Builder>(arrow_builder);
+		int32_t	value;
+		arrow::Status rv;
+
+		assert(builder != NULL);	//not arrow::Int32Builder!!
+		if (!addr)
+			rv = builder->AppendNull();
+		else
+		{
+			assert(sz == sizeof(int32_t));
+			value = be32toh(*((const uint32_t *)addr));
+			rv = builder->Append(value);
+		}
+		if (!rv.ok())
+			Elog("unable to put value to '%s' field: %s",
+				 attname.c_str(), rv.ToString().c_str());
+		return __BUFFER_USAGE_INLINE_TYPE(builder, sizeof(int32_t));
+	}
+};
+
+class pgsqlInt64Handler final : public pgsqlBinaryHandler
+{
+public:
+	size_t	putValue(const char *addr, int sz)
+	{
+		auto	builder = std::dynamic_pointer_cast<arrow::Int64Builder>(arrow_builder);
+		int64_t	value;
+		arrow::Status rv;
+
+		assert(builder != NULL);	//not arrow::Int64Builder!!
+		if (!addr)
+			rv = builder->AppendNull();
+		else
+		{
+			assert(sz == sizeof(int64_t));
+			value = be64toh(*((const uint64_t *)addr));
+			rv = builder->Append(value);
+		}
+		if (!rv.ok())
+			Elog("unable to put value to '%s' field: %s",
+				 attname.c_str(), rv.ToString().c_str());
+		return __BUFFER_USAGE_INLINE_TYPE(builder, sizeof(int64_t));
+	}
+};
+
+class pgsqlFloat16Handler final : public pgsqlBinaryHandler
+{
+public:
+	size_t	putValue(const char *addr, int sz)
+	{
+		auto		builder = std::dynamic_pointer_cast<arrow::HalfFloatBuilder>(arrow_builder);
+		uint16_t	value;
+		arrow::Status rv;
+
+		assert(builder != NULL);	//not arrow::HalfFloatBuilder!!
+		if (!addr)
+			rv = builder->AppendNull();
+		else
+		{
+			assert(sz == sizeof(uint16_t));
+			value = be16toh(*((const uint16_t *)addr));
+			rv = builder->Append(value);
+		}
+		if (!rv.ok())
+			Elog("unable to put value to '%s' field: %s",
+				 attname.c_str(), rv.ToString().c_str());
+		return __BUFFER_USAGE_INLINE_TYPE(builder, sizeof(int64_t));
+	}
+};
+
+class pgsqlFloat32Handler final : public pgsqlBinaryHandler
+{
+public:
+	size_t	putValue(const char *addr, int sz)
+	{
+		auto		builder = std::dynamic_pointer_cast<arrow::FloatBuilder>(arrow_builder);
+		union {
+			uint32_t	u32;
+			float		fval;
+		} value;
+		arrow::Status rv;
+
+		assert(builder != NULL);	//not arrow::FloatBuilder!!
+		if (!addr)
+			rv = builder->AppendNull();
+		else
+		{
+			assert(sz == sizeof(uint32_t));
+			value.u32 = be32toh(*((const uint32_t *)addr));
+			rv = builder->Append(value.fval);
+		}
+		if (!rv.ok())
+			Elog("unable to put value to '%s' field: %s",
+				 attname.c_str(), rv.ToString().c_str());
+		return __BUFFER_USAGE_INLINE_TYPE(builder, sizeof(int64_t));
+	}
+};
+
+class pgsqlFloat64Handler final : public pgsqlBinaryHandler
+{
+public:
+	size_t	putValue(const char *addr, int sz)
+	{
+		auto		builder = std::dynamic_pointer_cast<arrow::DoubleBuilder>(arrow_builder);
+		union {
+			uint64_t	u64;
+			double		fval;
+		} value;
+		arrow::Status rv;
+
+		assert(builder != NULL);	//not arrow::DoubleBuilder!!
+		if (!addr)
+			rv = builder->AppendNull();
+		else
+		{
+			assert(sz == sizeof(uint64_t));
+			value.u64 = be64toh(*((const uint64_t *)addr));
+			rv = builder->Append(value.fval);
+		}
+		if (!rv.ok())
+			Elog("unable to put value to '%s' field: %s",
+				 attname.c_str(), rv.ToString().c_str());
+		return __BUFFER_USAGE_INLINE_TYPE(builder, sizeof(int64_t));
+	}
+};
+
+/* parameters of Numeric type */
+#define NUMERIC_DSCALE_MASK	0x3FFF
+#define NUMERIC_SIGN_MASK	0xC000
+#define NUMERIC_POS			0x0000
+#define NUMERIC_NEG			0x4000
+#define NUMERIC_NAN			0xC000
+#define NUMERIC_PINF		0xD000
+#define NUMERIC_NINF		0xF000
+
+#define NBASE				10000
+#define DEC_DIGITS			4
+
+struct pgsql_numeric_binary {
+	uint16_t	ndigits;	/* number of digits */
+	uint16_t	weight;		/* weight of first digit */
+	uint16_t	sign;		/* NUMERIC_(POS|NEG|NAN) */
+	uint16_t	dscale;		/* display scale */
+	int16_t		digits[1];	/* numeric digists */
+};
+
+class pgsqlNumericHandler final : public pgsqlBinaryHandler
+{
+public:
+	size_t	putValue(const char *addr, int sz)
+	{
+		auto	builder = std::dynamic_pointer_cast<arrow::Decimal128Builder>(arrow_builder);
+		auto	rawdata = (const struct pgsql_numeric_binary *)addr;
+		arrow::Status	rv;
+
+		assert(builder != NULL);	/* not arrow::Decimal128Builder!! */
+		if (!rawdata)
+			rv = builder->AppendNull();
+		else
+		{
+			auto		d_type = std::static_pointer_cast<arrow::Decimal128Type>(builder->type());
+			int32_t		d_scale = d_type->scale();
+			int			ndigits = be16toh(rawdata->ndigits);
+			int			weight = be16toh(rawdata->weight);
+			int			sign = be16toh(rawdata->sign);
+			int			d;
+			arrow::Decimal128 value(0);
+
+			if ((sign & NUMERIC_SIGN_MASK) == NUMERIC_SIGN_MASK)
+				Elog("Decimal128 cannot map NaN, +Inf or -Inf in PostgreSQL Numeric");
+			/* makes integer portion first */
+			for (d=0; d <= weight; d++)
+			{
+				int		dig = (d >= 0 && d < ndigits) ? be16toh(rawdata->digits[d]) : 0;
+				if (dig < 0 || dig >= NBASE)
+					Elog("Numeric digit is corrupted (out of range: %d)", dig);
+				value = NBASE * value + dig;
+			}
+			/* makes floating point portion if any */
+			while (d_scale > 0)
+			{
+				int		dig = (d >= 0 && d < ndigits) ? be16toh(rawdata->digits[d]) : 0;
+				if (dig < 0 || dig >= NBASE)
+					Elog("Numeric digit is corrupted (out of range: %d)", dig);
+				if (d_scale >= DEC_DIGITS)
+					value = NBASE * value + dig;
+				else if (d_scale == 3)
+					value = 1000L * value + dig / 10L;
+				else if (d_scale == 2)
+					value =  100L * value + dig / 100L;
+				else if (d_scale == 1)
+					value =   10L * value + dig / 1000L;
+				else
+					Elog("internal bug");
+				d_scale -= DEC_DIGITS;
+				d++;
+			}
+			/* is it a negative value? */
+			if ((sign & NUMERIC_NEG) != 0)
+				value = -value;
+			/* ok, put this value */
+			rv = builder->Append(value);
+		}
+		if (!rv.ok())
+			Elog("unable to put value to '%s' field: %s",
+				 attname.c_str(), rv.ToString().c_str());
+		return __BUFFER_USAGE_INLINE_TYPE(builder, 16);
+	}
+};
+
+#define UNIX_EPOCH_JDATE		2440588UL	/* 1970-01-01 */
+#define POSTGRES_EPOCH_JDATE	2451545UL	/* 2000-01-01 */
+#define USECS_PER_DAY			86400000000UL
+
+class pgsqlDateHandler final : public pgsqlBinaryHandler
+{
+public:
+	size_t	putValue(const char *addr, int sz)
+	{
+		auto	builder = std::dynamic_pointer_cast<arrow::Date32Builder>(arrow_builder);
+		int32_t	value;
+		arrow::Status rv;
+
+		assert(builder != NULL);	//not arrow::Date32Builder
+		if (!addr)
+			rv = builder->AppendNull();
+		else
+		{
+			auto	d_type = std::static_pointer_cast<arrow::Date32Type>(builder->type());
+			assert(sz == sizeof(uint32_t));
+			assert(d_type->unit() == arrow::DateUnit::DAY);
+			value = be32toh(*((const uint32_t *)addr));
+			value += (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE);
+			rv = builder->Append(value);
+		}
+		if (!rv.ok())
+			Elog("unable to put value to '%s' field: %s",
+				 attname.c_str(), rv.ToString().c_str());
+		return __BUFFER_USAGE_INLINE_TYPE(builder, sizeof(int32_t));
+	}
+};
+
+class pgsqlTimeHandler final : public pgsqlBinaryHandler
+{
+public:
+	size_t	putValue(const char *addr, int sz)
+	{
+		auto	builder = std::dynamic_pointer_cast<arrow::Time64Builder>(arrow_builder);
+		int64_t	value;
+		arrow::Status rv;
+
+		assert(builder != NULL);	//not arrow::Time64Builder
+		if (!addr)
+			rv = builder->AppendNull();
+		else
+		{
+			auto	d_type = std::static_pointer_cast<arrow::Time64Type>(builder->type());
+			assert(sz == sizeof(uint64_t));
+			assert(d_type->unit() == arrow::TimeUnit::MICRO);
+			value = be64toh(*((const uint64_t *)addr));
+			rv = builder->Append(value);
+		}
+		if (!rv.ok())
+			Elog("unable to put value to '%s' field: %s",
+				 attname.c_str(), rv.ToString().c_str());
+		return __BUFFER_USAGE_INLINE_TYPE(builder, sizeof(int64_t));
+	}
+};
+
+class pgsqlTimestampHandler final : public pgsqlBinaryHandler
+{
+public:
+	size_t	putValue(const char *addr, int sz)
+	{
+		auto	builder = std::dynamic_pointer_cast<arrow::TimestampBuilder>(arrow_builder);
+		int64_t	value;
+		arrow::Status rv;
+
+		assert(builder != NULL);	//not arrow::TimestampBuilder
+		if (!addr)
+			rv = builder->AppendNull();
+		else
+		{
+			auto	d_type = std::static_pointer_cast<arrow::TimestampType>(builder->type());
+			assert(sz == sizeof(uint64_t));
+			assert(d_type->unit() == arrow::TimeUnit::MICRO);
+			value = be64toh(*((const uint64_t *)addr));
+			value += (POSTGRES_EPOCH_JDATE -
+					  UNIX_EPOCH_JDATE) * USECS_PER_DAY;
+			rv = builder->Append(value);
+		}
+		if (!rv.ok())
+			Elog("unable to put value to '%s' field: %s",
+				 attname.c_str(), rv.ToString().c_str());
+		return __BUFFER_USAGE_INLINE_TYPE(builder, sizeof(int64_t));
+	}
+};
+
+struct pgsql_interval_binary {
+	int64_t		time;
+	int32_t		days;
+	int32_t		months;
+};
+
+class pgsqlIntervalHandler final : public pgsqlBinaryHandler
+{
+public:
+	size_t	putValue(const char *addr, int sz)
+	{
+		auto	builder = std::dynamic_pointer_cast<arrow::MonthDayNanoIntervalBuilder>(arrow_builder);
+		auto	rawdata = (const struct pgsql_interval_binary *)addr;
+		arrow::Status rv;
+
+		assert(builder != NULL);	//not arrow::DayTimeIntervalBuilder
+		if (!rawdata)
+			rv = builder->AppendNull();
+		else
+		{
+			arrow::MonthDayNanoIntervalType::MonthDayNanos iv;
+			assert(sz == sizeof(struct pgsql_interval_binary));
+			iv.months = be32toh(rawdata->months);
+			iv.days = be32toh(rawdata->days);
+			iv.nanoseconds = be64toh(rawdata->time) * 1000L;
+			rv = builder->Append(iv);
+		}
+		if (!rv.ok())
+			Elog("unable to put value to '%s' field: %s",
+				 attname.c_str(), rv.ToString().c_str());
+		return __BUFFER_USAGE_INLINE_TYPE(builder, sizeof(int64_t));
+	}
+};
+
+class pgsqlTextHandler final : public pgsqlBinaryHandler
+{
+public:
+	size_t	putValue(const char *addr, int sz)
+	{
+		auto	builder = std::dynamic_pointer_cast<arrow::StringBuilder>(arrow_builder);
+		arrow::Status rv;
+
+		assert(builder != NULL);	//not arrow::StringBuilder
+		if (!addr)
+			rv = builder->AppendNull();
+		else
+			rv = builder->Append(addr, sz);
+		if (!rv.ok())
+			Elog("unable to put value to '%s' field: %s",
+				 attname.c_str(), rv.ToString().c_str());
+		return __BUFFER_USAGE_VARLENA_TYPE(builder);
+	}
+};
+
+class pgsqlBpCharHandler final : public pgsqlBinaryHandler
+{
+public:
+	size_t	putValue(const char *addr, int sz)
+	{
+		auto	builder = std::dynamic_pointer_cast<arrow::FixedSizeBinaryBuilder>(arrow_builder);
+		auto	d_type = std::static_pointer_cast<arrow::FixedSizeBinaryType>(builder->type());
+		int		width = d_type->byte_width();
+		arrow::Status rv;
+
+		assert(builder != NULL);	//not arrow::FixedSizeBinaryBuilder
+		if (!addr)
+			rv = builder->AppendNull();
+		else if (sz >= width)
+			rv = builder->Append(addr);
+		else
+		{
+			std::string temp(addr, sz);
+			while (sz++ < width)
+				temp += ' ';
+			rv = builder->Append(temp);
+		}
+		if (!rv.ok())
+			Elog("unable to put value to '%s' field: %s",
+				 attname.c_str(), rv.ToString().c_str());
+		return __BUFFER_USAGE_INLINE_TYPE(builder, width);
+	}
+};
+
+class pgsqlByteaHandler final : public pgsqlBinaryHandler
+{
+public:
+	size_t	putValue(const char *addr, int sz)
+	{
+		auto	builder = std::dynamic_pointer_cast<arrow::BinaryBuilder>(arrow_builder);
+		arrow::Status rv;
+
+		assert(builder != NULL);	//not arrow::BinaryBuilder
+		if (!addr)
+			rv = builder->AppendNull();
+		else
+			rv = builder->Append(addr, sz);
+		if (!rv.ok())
+			Elog("unable to put value to '%s' field: %s",
+				 attname.c_str(), rv.ToString().c_str());
+		return __BUFFER_USAGE_VARLENA_TYPE(builder);
+	}
+};
 
 #define WITH_RECURSIVE_PG_BASE_TYPE							\
 	"WITH RECURSIVE pg_base_type AS ("						\
@@ -295,21 +819,22 @@ __replace_string(std::string &str,
 	")\n"
 
 static void
-pgsql_define_arrow_list_field(arrow::FieldVector &arrow_subfields,
-							  arrowBuilderVector &arrow_builders,
+pgsql_define_arrow_list_field(arrowField &arrow_field,
+							  pgsqlHandler &pgsql_handler,
 							  const char *attname,
 							  Oid typelemid);
 static void
-pgsql_define_arrow_composite_field(arrow::FieldVector &arrow_subfields,
-								   arrowBuilderVector &arrow_builders,
+pgsql_define_arrow_composite_field(arrowField &arrow_field,
+								   pgsqlHandler &pgsql_handler,
+								   const char *attname,
 								   Oid typrelid);
 
 /*
  * pgsql_define_arrow_field
  */
 static void
-pgsql_define_arrow_field(arrow::FieldVector &arrow_fields,
-						 arrowBuilderVector &arrow_builders,
+pgsql_define_arrow_field(arrowField &arrow_field,
+						 pgsqlHandler &pgsql_handler,
 						 const char *attname,
 						 Oid atttypid,
 						 int atttypmod,
@@ -324,31 +849,25 @@ pgsql_define_arrow_field(arrow::FieldVector &arrow_fields,
 						 const char *extname)	/* extension name, if any */
 {
 	auto	pool = arrow::default_memory_pool();
-	std::shared_ptr<arrow::ArrayBuilder> builder;
+	arrowBuilder	builder = nullptr;
+	pgsqlHandler	handler = nullptr;
 
 	/* array type */
 	if (typelemid != 0)
 	{
-		arrow::FieldVector	arrow_subfields;
-		arrowBuilderVector	arrow_subbuilders;
-
-		pgsql_define_arrow_list_field(arrow_subfields,
-									  arrow_subbuilders,
+		pgsql_define_arrow_list_field(arrow_field,
+									  pgsql_handler,
 									  attname,
 									  typelemid);
-		//make List Builder
 		goto out;
 	}
 	/* composite type */
 	if (typrelid != 0)
 	{
-		arrow::FieldVector	arrow_subfields;
-		arrowBuilderVector	arrow_subbuilders;
-
-		pgsql_define_arrow_composite_field(arrow_subfields,
-										   arrow_subbuilders,
+		pgsql_define_arrow_composite_field(arrow_field,
+										   pgsql_handler,
+										   attname,
 										   typrelid);
-		//make StructBuilder
 		goto out;
 	}
 	/* enum type */
@@ -367,114 +886,145 @@ pgsql_define_arrow_field(arrow::FieldVector &arrow_fields,
 		}
 	}
 	/* other built-in types */
-	if (strcmp(nspname, "pg_catalog") == 0)
+	if (strcmp(typname, "bool") == 0 &&
+		strcmp(nspname, "pg_catalog") == 0)
 	{
-		/* well known built-in data types? */
-		if (strcmp(typname, "bool") == 0)
+		builder = std::make_shared<arrow::BooleanBuilder>(arrow::boolean(), pool);
+		handler = std::make_shared<pgsqlBoolHandler>();
+	}
+	else if (strcmp(typname, "int1") == 0 &&
+			 strcmp(nspname, "pg_catalog") == 0)
+	{
+		builder = std::make_shared<arrow::Int8Builder>(arrow::int8(), pool);
+		handler = std::make_shared<pgsqlInt8Handler>();
+	}
+	else if (strcmp(typname, "int2") == 0 &&
+			 strcmp(nspname, "pg_catalog") == 0)
+	{
+		builder = std::make_shared<arrow::Int16Builder>(arrow::int16(), pool);
+		handler = std::make_shared<pgsqlInt16Handler>();
+	}
+	else if (strcmp(typname, "int4") == 0 &&
+			 strcmp(nspname, "pg_catalog") == 0)
+	{
+		builder = std::make_shared<arrow::Int32Builder>(arrow::int32(), pool);
+		handler = std::make_shared<pgsqlInt32Handler>();
+	}
+	else if (strcmp(typname, "int8") == 0 &&
+			 strcmp(nspname, "pg_catalog") == 0)
+	{
+		builder = std::make_shared<arrow::Int64Builder>(arrow::int64(), pool);
+		handler = std::make_shared<pgsqlInt64Handler>();
+	}
+	else if (strcmp(typname, "float2") == 0 &&
+			 strcmp(nspname, "pg_catalog") == 0)
+	{
+		builder = std::make_shared<arrow::HalfFloatBuilder>(arrow::float16(), pool);
+		handler = std::make_shared<pgsqlFloat16Handler>();
+	}
+	else if (strcmp(typname, "float4") == 0 &&
+			 strcmp(nspname, "pg_catalog") == 0)
+	{
+		builder = std::make_shared<arrow::FloatBuilder>(arrow::float32(), pool);
+		handler = std::make_shared<pgsqlFloat32Handler>();
+	}
+	else if (strcmp(typname, "float8") == 0 &&
+			 strcmp(nspname, "pg_catalog") == 0)
+	{
+		builder = std::make_shared<arrow::DoubleBuilder>(arrow::float64(), pool);
+		handler = std::make_shared<pgsqlFloat64Handler>();
+	}
+	else if (strcmp(typname, "numeric") == 0 &&
+			 strcmp(nspname, "pg_catalog") == 0)
+	{
+		int		precision = 36;
+		int		scale = 9;
+
+		if (atttypmod >= (int)sizeof(int32_t))
 		{
-			builder = std::make_shared<arrow::BooleanBuilder>
-				(arrow::boolean(), pool);
+			//See, numeric_typmod_precision and numeric_typmod_scale
+			precision = ((atttypmod - sizeof(int32_t)) >> 16) & 0xffff;
+			scale     = (((atttypmod - sizeof(int32_t)) & 0x7ff) ^ 1024) - 1024;
 		}
-		else if (strcmp(typname, "int1") == 0)
-		{
-			builder = std::make_shared<arrow::Int8Builder>
-				(arrow::int8(), pool);
-		}
-		else if (strcmp(typname, "int2") == 0)
-		{
-			builder = std::make_shared<arrow::Int16Builder>
-				(arrow::int16(), pool);
-		}
-		else if (strcmp(typname, "int4") == 0)
-		{
-			builder = std::make_shared<arrow::Int32Builder>
-				(arrow::int32(), pool);
-		}
-		else if (strcmp(typname, "int8") == 0)
-		{
-			builder = std::make_shared<arrow::Int64Builder>
-				(arrow::int64(), pool);
-		}
-		else if (strcmp(typname, "float2") == 0)
-		{
-			builder = std::make_shared<arrow::HalfFloatBuilder>
-				(arrow::float16(), pool);
-		}
-		else if (strcmp(typname, "float4") == 0)
-		{
-			builder = std::make_shared<arrow::FloatBuilder>
-				(arrow::float32(), pool);
-		}
-		else if (strcmp(typname, "float8") == 0)
-		{
-			builder = std::make_shared<arrow::DoubleBuilder>
-				(arrow::float64(), pool);
-		}
-		else if (strcmp(typname, "numeric") == 0)
-		{
-			//calc prec, scale
-			
-			builder = std::make_shared<arrow::Decimal256Builder>
-				(arrow::decimal256(36,9), pool);
-		}
-		else if (strcmp(typname, "date") == 0)
-		{
-			builder = std::make_shared<arrow::Date32Builder>
-				(arrow::date32(), pool);
-		}
-		else if (strcmp(typname, "time") == 0)
-		{
-			builder = std::make_shared<arrow::Time64Builder>
-				(arrow::time64(arrow::TimeUnit::MICRO), pool);
-		}
-		else if (strcmp(typname, "timestamp") == 0)
-		{
-			builder = std::make_shared<arrow::TimestampBuilder>
-				(arrow::timestamp(arrow::TimeUnit::MICRO), pool);
-		}
-		else if (strcmp(typname, "timestamptz") == 0)
-		{
-			builder = std::make_shared<arrow::TimestampBuilder>
-				(arrow::timestamp(arrow::TimeUnit::MICRO), pool);
-		}
-		else if (strcmp(typname, "interval") == 0)
-		{
-			builder = std::make_shared<arrow::DayTimeIntervalBuilder>
-				(arrow::day_time_interval(), pool);
-		}
-		else if (strcmp(typname, "text") == 0 ||
-				 strcmp(typname, "varchar") == 0)
-		{
-			builder = std::make_shared<arrow::StringBuilder>
-				(arrow::utf8(), pool);
-		}
-		else if (strcmp(typname, "bpchar") == 0)
-		{
-			int		unitsz = Max(atttypmod - 4, 0);
-			builder = std::make_shared<arrow::FixedSizeBinaryBuilder>
-				(arrow::fixed_size_binary(unitsz));
-		}
+		builder = std::make_shared<arrow::Decimal128Builder>
+			(arrow::decimal256(precision, scale), pool);
+		handler = std::make_shared<pgsqlNumericHandler>();
+	}
+	else if (strcmp(typname, "date") == 0 &&
+			 strcmp(nspname, "pg_catalog") == 0)
+	{
+		builder = std::make_shared<arrow::Date32Builder>(arrow::date32(), pool);
+		handler = std::make_shared<pgsqlDateHandler>();
+	}
+	else if (strcmp(typname, "time") == 0 &&
+			 strcmp(nspname, "pg_catalog") == 0)
+	{
+		builder = std::make_shared<arrow::Time64Builder>
+			(arrow::time64(arrow::TimeUnit::MICRO), pool);
+		handler = std::make_shared<pgsqlTimeHandler>();
+	}
+	else if (strcmp(typname, "timestamp") == 0 &&
+			 strcmp(nspname, "pg_catalog") == 0)
+	{
+		builder = std::make_shared<arrow::TimestampBuilder>
+			(arrow::timestamp(arrow::TimeUnit::MICRO), pool);
+		handler = std::make_shared<pgsqlTimestampHandler>();
+	}
+	else if (strcmp(typname, "timestamptz") == 0 &&
+			 strcmp(nspname, "pg_catalog") == 0)
+	{
+		//set timezone
+		builder = std::make_shared<arrow::TimestampBuilder>
+			(arrow::timestamp(arrow::TimeUnit::MICRO), pool);
+		handler = std::make_shared<pgsqlTimestampHandler>();
+	}
+	else if (strcmp(typname, "interval") == 0 &&
+			 strcmp(nspname, "pg_catalog") == 0)
+	{
+		builder = std::make_shared<arrow::DayTimeIntervalBuilder>
+			(arrow::month_day_nano_interval(), pool);
+		handler = std::make_shared<pgsqlIntervalHandler>();
+	}
+	else if ((strcmp(typname, "text") == 0 ||
+			  strcmp(typname, "varchar") == 0) &&
+			 strcmp(nspname, "pg_catalog") == 0)
+	{
+		builder = std::make_shared<arrow::StringBuilder>(arrow::utf8(), pool);
+		handler = std::make_shared<pgsqlTextHandler>();
+	}
+	else if (strcmp(typname, "bpchar") == 0 &&
+			 strcmp(nspname, "pg_catalog") == 0)
+	{
+		int		unitsz = Max(atttypmod - 4, 0);
+		builder = std::make_shared<arrow::FixedSizeBinaryBuilder>
+			(arrow::fixed_size_binary(unitsz));
+		handler = std::make_shared<pgsqlBpCharHandler>();
 	}
 	/* elsewhere, we save the values just bunch of binary data */
-	if (attlen == 1)
+	else if (attlen == 1)
 	{
-		builder = std::make_shared<arrow::UInt8Builder>(arrow::uint8(), pool);
+		builder = std::make_shared<arrow::Int8Builder>(arrow::int8(), pool);
+		handler = std::make_shared<pgsqlInt8Handler>();
 	}
 	else if (attlen == 2)
 	{
-		builder = std::make_shared<arrow::UInt16Builder>(arrow::uint16(), pool);
+		builder = std::make_shared<arrow::Int16Builder>(arrow::int16(), pool);
+		handler = std::make_shared<pgsqlInt16Handler>();
 	}
 	else if (attlen == 4)
 	{
-		builder = std::make_shared<arrow::UInt32Builder>(arrow::uint32(), pool);
+		builder = std::make_shared<arrow::Int32Builder>(arrow::int32(), pool);
+		handler = std::make_shared<pgsqlInt32Handler>();
 	}
 	else if (attlen == 8)
 	{
-		builder = std::make_shared<arrow::UInt64Builder>(arrow::uint64(), pool);
+		builder = std::make_shared<arrow::Int64Builder>(arrow::int64(), pool);
+		handler = std::make_shared<pgsqlInt64Handler>();
 	}
 	else if (attlen == -1)
 	{
 		builder = std::make_shared<arrow::BinaryBuilder>(arrow::binary(), pool);
+		handler = std::make_shared<pgsqlByteaHandler>();
 	}
 	else
 	{
@@ -490,23 +1040,40 @@ pgsql_define_arrow_field(arrow::FieldVector &arrow_fields,
 	}
 out:
 	/*
-	 * Append field and builder
+	 * Common setup handler, builder, and field
 	 */
-	arrow_builders.push_back(builder);
-	arrow_fields.push_back(arrow::field(attname,
-										builder->type(),
-										true));
+	handler->attname = std::string(attname);
+	handler->atttypid = atttypid;
+	handler->atttypmod = atttypmod;
+	handler->attlen = attlen;
+	handler->attbyval = attbyval;
+	handler->attalign = attalign;
+	handler->typtype = typtype;
+	handler->typrelid = typrelid;
+	handler->typelemid = typelemid;
+	if (nspname)
+		handler->nspname = std::string(nspname);
+	if (typname)
+		handler->typname = std::string(typname);
+	if (extname)
+		handler->extname = std::string(extname);
+	handler->arrow_builder = builder;
+	pgsql_handler = handler;
+	arrow_field = arrow::field(attname, builder->type(), true);
 }
 
 /*
  * pgsql_define_arrow_list_field
  */
 static void
-pgsql_define_arrow_list_field(arrow::FieldVector &arrow_subfields,
-							  arrowBuilderVector &arrow_subbuilders,
-							  const char *attname,
-							  Oid typelemid)
+pgsql_define_arrow_list_field(arrowField &arrow_field,
+                              pgsqlHandler &pgsql_handler,
+                              const char *attname,
+                              Oid typelemid)
 {
+	arrow::FieldVector arrow_subfields;
+	arrowBuilderVector arrow_subbuilders;
+	pgsqlHandlerVector pgsql_subhandlers;
 	PGresult   *res;
 	char	   *namebuf = (char *)alloca(strlen(attname) + 10);
 	char		query[4096];
@@ -550,8 +1117,11 @@ pgsql_define_arrow_list_field(arrow::FieldVector &arrow_subfields,
 	if (PQntuples(res) != 1)
 		Elog("unexpected number of result rows: %d", PQntuples(res));
 
-	pgsql_define_arrow_field(arrow_subfields,
-							 arrow_subbuilders,
+	arrow_subfields.resize(1);
+	arrow_subbuilders.resize(1);
+	pgsql_subhandlers.resize(1);
+	pgsql_define_arrow_field(arrow_subfields[0],
+							 pgsql_subhandlers[0],
 							 namebuf,
 							 typelemid,						//type_oid
 							 atol(PQgetvalue(res, 0, 2)),	//typtypmod
@@ -566,16 +1136,22 @@ pgsql_define_arrow_list_field(arrow::FieldVector &arrow_subfields,
 							 (PQgetisnull(res, 0, 9)
 							  ? NULL
 							  : PQgetvalue(res, 0, 9)));	//e.extname
+	arrow_subbuilders[0] = pgsql_subhandlers[0]->arrow_builder;
+	//build List field and handler
 }
 
 /*
  * pgsql_define_arrow_composite_field
  */
 static void
-pgsql_define_arrow_composite_field(arrow::FieldVector &arrow_subfields,
-								   arrowBuilderVector &arrow_subbuilders,
+pgsql_define_arrow_composite_field(arrowField &arrow_field,
+								   pgsqlHandler &pgsql_handler,
+								   const char *attname,
 								   Oid comptype_relid)
 {
+	arrow::FieldVector arrow_subfields;
+	arrowBuilderVector arrow_subbuilders;
+	pgsqlHandlerVector pgsql_subhandlers;
 	PGresult   *res;
 	char		query[4096];
 	int			nfields;
@@ -623,10 +1199,13 @@ pgsql_define_arrow_composite_field(arrow::FieldVector &arrow_subfields,
 			 PQresultErrorMessage(res));
 
 	nfields = PQntuples(res);
+	arrow_subfields.resize(nfields);
+	arrow_subbuilders.resize(nfields);
+	pgsql_subhandlers.resize(nfields);
 	for (int j=0; j < nfields; j++)
 	{
-		pgsql_define_arrow_field(arrow_subfields,
-								 arrow_subbuilders,
+		pgsql_define_arrow_field(arrow_subfields[j],
+								 pgsql_subhandlers[j],
 								 PQgetvalue(res, j, 0),			//attname
 								 atol(PQgetvalue(res, j, 2)),	//atttypid
 								 atol(PQgetvalue(res, j, 3)),	//atttypmod
@@ -641,19 +1220,24 @@ pgsql_define_arrow_composite_field(arrow::FieldVector &arrow_subfields,
 								 (PQgetisnull(res, j, 12)		//e.extname
 								  ? NULL
 								  : PQgetvalue(res, j, 12)));
+		arrow_subbuilders[j] = pgsql_subhandlers[j]->arrow_builder;
 	}
 	PQclear(res);
+
+	//build composite type
 }
 
 /*
  * pgsql_define_arrow_schema
  */
 static void
-pgsql_define_arrow_schema(arrowBuilderVector &arrow_builders)
+pgsql_define_arrow_schema(pgsqlHandlerVector &pgsql_handlers)
 {
 	arrow::FieldVector arrow_fields;
-	int			nfields = PQnfields(pgsql_res);
+	int		nfields = PQnfields(pgsql_res);
 
+	arrow_fields.resize(nfields);
+	pgsql_handlers.resize(nfields);
 	for (int j=0; j < nfields; j++)
 	{
 		const char *attname = PQfname(pgsql_res, j);
@@ -697,8 +1281,8 @@ pgsql_define_arrow_schema(arrowBuilderVector &arrow_builders)
 		if (PQntuples(res) != 1)
 			Elog("unexpected number of result rows: %d", PQntuples(res));
 		/* setup arrow fields */
-		pgsql_define_arrow_field(arrow_fields,
-								 arrow_builders,
+		pgsql_define_arrow_field(arrow_fields[j],
+								 pgsql_handlers[j],
 								 attname,						//attname
 								 atttypid,						//atttypid
 								 atttypmod,						//atttypmod
@@ -717,18 +1301,28 @@ pgsql_define_arrow_schema(arrowBuilderVector &arrow_builders)
 		//TODO: flatten columns
 
 	}
-	arrow_schema = arrow::schema(arrow_fields);
+	/*
+	 * The primary thread builds and stores the 'arrow_schema', and it shall
+	 * be referenced for compatibility checks by worker threads.
+	 */
+	if (!arrow_schema)
+		arrow_schema = arrow::schema(arrow_fields);
+	else
+	{
+		auto	prime_fields = arrow_schema->fields();
 
+		if (prime_fields.size() != arrow_fields.size())
+			Elog("Number of result fields mismatch between primary and worker threads. Please review the SQL command");
+		for (uint32_t j=0; j < prime_fields.size(); j++)
+		{
+			auto	p_field = prime_fields[j];
+			auto	a_field = arrow_fields[j];
 
-
-	
+			if (!p_field->IsCompatibleWith(a_field))
+				Elog("field-%d is not compatible between primary and worker threads. Please review the SQL command", j);
+		}
+	}
 }
-
-
-
-
-
-
 
 /*
  * fetch_next_pgsql_command
@@ -761,8 +1355,8 @@ __pgsql_begin_next_query(uint32_t fetch_ntuples)
 		/* CLOSE the cursor */
 		res = PQexec(pgsql_conn, "CLOSE " CURSOR_NAME);
 		if (PQresultStatus(res) != PGRES_COMMAND_OK)
-			Elog("failed on CLOSE '" CURSOR_NAME "': %s",
-				 PQresultErrorMessage(res));
+			Elog("failed on CLOSE '%s': %s",
+				 CURSOR_NAME, PQresultErrorMessage(res));
 		PQclear(res);
 	}
 
@@ -770,16 +1364,20 @@ __pgsql_begin_next_query(uint32_t fetch_ntuples)
 	for (;;)
 	{
 		const char *command = fetch_next_pgsql_command();
-		char	   *query;
+		std::string	temp;
+		char		query[1024];
 
 		if (!command)
 			return false;	/* no more SQL commands to run */
+		/* print message */
+		if (shows_progress)
+			printf("worker-%u: QUERY=[%s]\n", worker_id, command);
 		/* declare cursor */
-		query = (char *)alloca(strlen(command) + 200);
-		sprintf(query, "DECLARE " CURSOR_NAME " BINARY CURSOR FOR %s", command);
-		res = PQexec(pgsql_conn, query);
+		temp = std::string("DECLARE " CURSOR_NAME " BINARY CURSOR FOR ");
+		temp += command;
+		res = PQexec(pgsql_conn, temp.c_str());
 		if (PQresultStatus(res) != PGRES_COMMAND_OK)
-			Elog("unable to declare a SQL cursor: %s", PQresultErrorMessage(res));
+			Elog("unable to declare a SQL cursor[%s]: %s", temp.c_str(), PQresultErrorMessage(res));
 		PQclear(res);
 
 		/* fetch first results */
@@ -800,8 +1398,8 @@ __pgsql_begin_next_query(uint32_t fetch_ntuples)
 		/* Oops, the command returned an empty result. Try one more */
 		res = PQexec(pgsql_conn, "CLOSE " CURSOR_NAME);
 		if (PQresultStatus(res) != PGRES_COMMAND_OK)
-			Elog("failed on CLOSE '" CURSOR_NAME "': %s",
-				 PQresultErrorMessage(res));
+			Elog("failed on CLOSE '%s': %s",
+				 CURSOR_NAME, PQresultErrorMessage(res));
 		PQclear(res);
 	}
 }
@@ -809,7 +1407,7 @@ __pgsql_begin_next_query(uint32_t fetch_ntuples)
 /*
  * pgsql_begin_primary_query
  */
-static void
+static bool
 pgsql_begin_primary_query(void)
 {
 	PGresult   *res;
@@ -840,8 +1438,7 @@ pgsql_begin_primary_query(void)
 		PQclear(res);
 	}
 	/* fetch first results */
-	if (!__pgsql_begin_next_query(10))
-		Elog("SQL command returned an empty results");
+	return __pgsql_begin_next_query(10);
 }
 
 /*
@@ -854,46 +1451,99 @@ pgsql_begin_next_query(void)
 	return __pgsql_begin_next_query(100000);
 }
 
+/*
+ * pgsql_flush_record_batch
+ */
+static void
+pgsql_flush_record_batch(pgsqlHandlerVector &pgsql_handlers)
+{
+	arrowArrayVector arrow_arrays;
+	arrowArray		array;
+	arrow::Status	rv;
+	int64_t			nrows = -1;
+	uint32_t		chunk_id;
+	arrow::Result<int64_t> foffset_before;
+	arrow::Result<int64_t> foffset_after;
 
+	/* setup record batch */
+	for (auto cell = pgsql_handlers.begin(); cell != pgsql_handlers.end(); cell++)
+	{
+		auto	handler = *cell;
+		auto	builder = handler->arrow_builder;
 
+		rv = builder->Finish(&array);
+		if (!rv.ok())
+			Elog("failed on arrow::ArrayBuilder::Finish: %s",
+				 rv.ToString().c_str());
+		arrow_arrays.push_back(array);
+		if (nrows < 0)
+			nrows = array->length();
+		else if (nrows != array->length())
+			Elog("Bug? number of rows mismatch across the buffers");
+	}
+	if ((errno = pthread_mutex_lock(&arrow_file_mutex)) != 0)
+		Elog("failed on pthread_mutex_lock: %m");
+	foffset_before = arrow_out_stream->Tell();
+	if (parquet_mode)
+	{
+		/* setup a row group */
+		Elog("not implemented yet");
+	}
+	else
+	{
+		/* setup a record batch */
+		auto	rbatch = arrow::RecordBatch::Make(arrow_schema, nrows, arrow_arrays);
+		/* write out record batch */
+		rv = arrow_file_writer->WriteRecordBatch(*rbatch);
+		if (!rv.ok())
+			Elog("failed on WriteRecordBatch: %s", rv.ToString().c_str());
+	}
+	chunk_id = arrow_num_chunks++;
+	arrow_num_items += nrows;
+	foffset_after = arrow_out_stream->Tell();
+	if ((errno = pthread_mutex_unlock(&arrow_file_mutex)) != 0)
+		Elog("failed on pthread_mutex_unlock: %m");
+	/* print progress */
+	if (shows_progress)
+		printf("%s[%u] nitems=%ld, length=%ld at file offset=%ld\n",
+			   !parquet_mode ? "Record Batch" : "Row Group",
+			   chunk_id,
+			   nrows,
+			   foffset_before.ok() && foffset_after.ok() ?
+			   foffset_after.ValueOrDie() - foffset_before.ValueOrDie() : -1,
+			   foffset_before.ok() ? foffset_before.ValueOrDie() : -1);
+	/* reset buffers */
+	for (auto cell = pgsql_handlers.begin(); cell != pgsql_handlers.end(); cell++)
+	{
+		auto	handler = *cell;
+		auto	builder = handler->arrow_builder;
 
-
-
-
-
-
-
-
-
-
-
-
+		builder->Reset();
+	}
+}
 
 /*
  * pgsql_process_one_tuple
  */
 static size_t
-pgsql_process_one_tuple(arrowBuilderVector &arrow_builders,
+pgsql_process_one_tuple(pgsqlHandlerVector &pgsql_handlers,
 						PGresult *res, uint32_t index)
 {
 	uint32_t	nfields = PQnfields(res);
 	size_t		chunk_sz = 0;
 
-	for (uint32_t j=0; j < arrow_builders.size(); j++)
+	for (uint32_t j=0; j < pgsql_handlers.size(); j++)
 	{
-		auto	builder = arrow_builders[j];
-		auto	dtype = builder->type();
+		auto	handler = pgsql_handlers[j];
 		const char *addr = NULL;
+		int		sz = -1;
 
 		if (j < nfields && PQgetisnull(res, index, j) == 0)
-			addr = PQgetvalue(res, index, j);
-		switch (dtype->id())
 		{
-
-
-			default:
-				Elog("unsupported type");
+			addr = PQgetvalue(res, index, j);
+			sz = PQgetlength(res, index, j);
 		}
+		chunk_sz += handler->putValue(addr, sz);
 	}
 	return chunk_sz;
 }
@@ -902,10 +1552,8 @@ pgsql_process_one_tuple(arrowBuilderVector &arrow_builders,
  * pgsql_process_query_results
  */
 static void
-pgsql_process_query_results(void)
+pgsql_process_query_results(pgsqlHandlerVector &handlers)
 {
-	assert(worker_id < num_worker_threads);
-	auto	builders = worker_builders[worker_id];
 	for (;;)
 	{
 		uint32_t	ntuples = PQntuples(pgsql_res);
@@ -913,11 +1561,11 @@ pgsql_process_query_results(void)
 
 		while (pgsql_res_index < ntuples)
 		{
-			size_t	chunk_sz = pgsql_process_one_tuple(builders,
+			size_t	chunk_sz = pgsql_process_one_tuple(handlers,
 													   pgsql_res,
 													   pgsql_res_index++);
 			if (chunk_sz >= batch_segment_sz)
-				/* write out one record-batch or row-group*/;
+				pgsql_flush_record_batch(handlers);
 		}
 		PQclear(pgsql_res);
 		pgsql_res = NULL;
@@ -962,8 +1610,8 @@ build_pgsql_command_list(void)
 		sprintf(buf,
 				"SELECT c.relname, c.relkind,\n"
 				"       GREATEST(pg_relation_size(c.oid), %lu)\n"
-				"       / current_setting('block_size')::int"
-				"  FROM pg_catalog.pg_class\n"
+				"       / current_setting('block_size')::bigint"
+				"  FROM pg_catalog.pg_class c\n"
 				" WHERE oid = '%s'::regclass",
 				batch_segment_sz * num_worker_threads,
 				ctid_target_table);
@@ -972,8 +1620,8 @@ build_pgsql_command_list(void)
 			Elog("failed on [%s]: %s", buf, PQresultErrorMessage(res));
 		if (PQntuples(res) != 1)
 			Elog("parallel target table [%s] is not exist", ctid_target_table);
-		relkind = pstrdup(PQgetvalue(res, 0, 2));
-		unitsz = atoi(PQgetvalue(res, 0, 3));
+		relkind = pstrdup(PQgetvalue(res, 0, 1));
+		unitsz = atol(PQgetvalue(res, 0, 2)) / num_worker_threads;
 		PQclear(res);
 
 		if (strcmp(relkind, "r") != 0 &&
@@ -985,11 +1633,11 @@ build_pgsql_command_list(void)
 		{
 			std::string	query = std::string(raw_pgsql_command);
 
-			if (worker_id == 0)
+			if (__worker == 0)
 				sprintf(buf, "%s.ctid < '(%ld,0)'::tid",
 						ctid_target_table,
 						unitsz * (__worker+1));
-			else if (worker_id < num_worker_threads - 1)
+			else if (__worker < num_worker_threads - 1)
 				sprintf(buf, "%s.ctid >= '(%ld,0)' AND %s.ctid < '(%ld,0)'::tid",
 						ctid_target_table,
 						unitsz * __worker,
@@ -1391,6 +2039,98 @@ dumpArrowSchema(const char *filename)
 }
 
 /*
+ * open_output_file
+ */
+static void open_output_file(void)
+{
+	int		fdesc;
+	const char *comment = "";
+
+	if (output_filename)
+	{
+		fdesc = open(output_filename, O_RDWR | O_CREAT | O_TRUNC, 0666);
+		if (fdesc < 0)
+			Elog("failed on open('%s'): %m", output_filename);
+	}
+	else
+	{
+		int		suffixlen = (parquet_mode ? 8 : 6);
+		char   *namebuf = strdup(parquet_mode
+								 ? "/tmp/pg2arrow_XXXXXX.parquet"
+								 : "/tmp/pg2arrow_XXXXXX.arrow");
+		if (!namebuf)
+			Elog("out of memory");
+		fdesc = mkostemps(namebuf, suffixlen,
+						  O_RDWR | O_CREAT | O_TRUNC);
+		if (fdesc < 0)
+			Elog("failed on mkostemps('%s'): %m", namebuf);
+		output_filename = namebuf;
+		comment = "\nNOTE: -o, --output=FILENAME option was not given, so temporary file was built instead.";
+	}
+	/* open the output arrow stream */
+	{
+		auto	rv = arrow::io::FileOutputStream::Open(fdesc);
+
+		if (!rv.ok())
+			Elog("failed on arrow::io::FileOutputStream::Open('%s'): %s",
+				 output_filename, rv.status().ToString().c_str());
+		arrow_out_stream = rv.ValueOrDie();
+	}
+	/* attach file writer */
+	if (parquet_mode)
+	{
+		Elog("not implemented yet");
+#if 0
+        parquet_file_writer = parquet::ParquetFileWriter::Open(arrow_out_stream,
+                                                               parquet_schema,
+                                                               parquet_props,
+                                                               arrow_schema_metadata);		
+#endif
+	}
+	else
+	{
+		auto	rv = arrow::ipc::MakeFileWriter(arrow_out_stream, arrow_schema);
+
+		if (!rv.ok())
+			Elog("failed on arrow::ipc::MakeFileWriter for '%s': %s",
+				 output_filename,
+				 rv.status().ToString().c_str());
+		arrow_file_writer = rv.ValueOrDie();
+	}
+    printf("pg2arrow: opened the output file '%s'%s\n", output_filename, comment);
+}
+
+/*
+ * close_output_file
+ */
+static void close_output_file(void)
+{
+	arrow::Status  rv;
+
+    if (arrow_file_writer)
+    {
+        rv = arrow_file_writer->Close();
+        if (!rv.ok())
+            Elog("failed on arrow::ipc::RecordBatchWriter::Close: %s",
+                 rv.ToString().c_str());
+    }
+#if HAS_PARQUET
+    if (parquet_file_writer)
+        parquet_file_writer->Close();
+#endif
+    rv = arrow_out_stream->Close();
+    if (!rv.ok())
+		Elog("failed on arrow::ipc::io::FileOutputStream::Close: %s",
+			 rv.ToString().c_str());
+	/* report */
+	printf("pg2arrow: wrote on '%s' total %u %s, %ld items\n",
+		   output_filename,
+		   arrow_num_chunks,
+		   parquet_mode ? "row-groups" : "record-batches",
+		   arrow_num_items);
+}
+
+/*
  * usage
  */
 static void usage(void)
@@ -1418,9 +2158,7 @@ static void usage(void)
 		<< "     (-k and -n are exclusive, either of them can be given)\n"
 		<< "  -q, --parquet         Enables Parquet format.\n"
 		<< "  -o, --output=FILENAME result file in Apache Arrow format\n"
-		<< "      --append=FILENAME result Apache Arrow file to be appended\n"
-		<< "     (--output and --append are exclusive. If neither of them\n"
-		<< "      are given, it creates a temporary file.)\n"
+		<< "                        If not given, pg2arrow creates a temporary file.\n"
 		<< "  -S, --stat[=COLUMNS] embeds min/max statistics for each record batch\n"
 		<< "                        COLUMNS is a comma-separated list of the target\n"
 		<< "                        columns if partially enabled.\n"
@@ -1465,7 +2203,6 @@ parse_options(int argc, char * const argv[])
 		{"parallel-keys",   required_argument, NULL, 'k'},
 		{"parquet",         no_argument,       NULL, 'q'},
 		{"output",          required_argument, NULL, 'o'},
-		{"append",          required_argument, NULL, 1001},
 		{"stat",            required_argument, NULL, 'S'},
 		{"flatten",         optional_argument, NULL, 1002},
 		{"segment-size",    required_argument, NULL, 's'},
@@ -1518,7 +2255,7 @@ parse_options(int argc, char * const argv[])
 				simple_table_name = optarg;
 				break;
 			case 'n':		/* --num-workers */
-				if (num_worker_threads != 0)
+				if (num_worker_threads != 1)
 					Elog("-n, --num-workers was given twice.");
 				else
 				{
@@ -1549,16 +2286,7 @@ parse_options(int argc, char * const argv[])
 			case 'o':		/* --output */
 				if (output_filename)
 					Elog("-o, --output was supplied twice");
-				if (append_filename)
-					Elog("-o and --append are mutually exclusive");
 				output_filename = optarg;
-				break;
-			case 1001:		/* --append */
-				if (append_filename)
-					Elog("--append was supplied twice");
-				if (output_filename)
-					Elog("-o and --append are exclusive");
-				append_filename = optarg;
 				break;
 			case 'S':		/* --stat */
 				if (stat_embedded_columns)
@@ -1784,10 +2512,69 @@ parse_options(int argc, char * const argv[])
 			}
 		}
 	}
+	if (batch_segment_sz == 0)
+		batch_segment_sz = (256UL << 20);
 	if (!parquet_mode && compression_methods.size() > 0)
 		Elog("-C (--compress) is valid only when Parquet mode (-q, --parquet) is enabled");
 	if (password_prompt > 0)
 		pgsql_password = pstrdup(getpass("Password: "));
+}
+
+static void sync_buddy_workers(void)
+{
+	auto	handlers = worker_handlers[worker_id];
+
+	for (uint32_t shift=1; (worker_id & shift) == 0; shift <<= 1)
+	{
+		uint32_t	buddy = worker_id + shift;
+
+		if (buddy >= num_worker_threads)
+			break;
+		if ((errno = pthread_join(worker_threads[buddy], NULL)) != 0)
+			Elog("Failed on pthread_join: %m");
+		/* merge the remained items */
+		//TODO: moveValue virtual method
+		//      and write results if chunk-sz > segment-sz
+
+	}
+}
+
+static void *worker_main(void *__data)
+{
+	/* wait for setup by the primary thread */
+	worker_id = (uintptr_t)__data;
+	pgsqlHandlerVector &pgsql_handlers = worker_handlers[worker_id];
+
+	pthread_mutex_lock(&worker_setup_mutex);
+	while (!worker_setup_done)
+	{
+		pthread_cond_wait(&worker_setup_cond,
+						  &worker_setup_mutex);
+	}
+	pthread_mutex_unlock(&worker_setup_mutex);
+
+	/* open the worker connection */
+	pgsql_conn = pgsql_server_connect();
+	/* begin the primary query */
+	if (pgsql_begin_primary_query())
+	{
+		/* define the schema from the first results */
+		pgsql_define_arrow_schema(pgsql_handlers);
+		do {
+			/* fetch results and write to arrow/parqeut */
+			pgsql_process_query_results(pgsql_handlers);
+			/* try next SQL command, if any */
+		} while (pgsql_begin_next_query());
+	}
+	else
+	{
+		Elog("worker-%d get empty results", worker_id);
+		//TODO: pgsql_handlers must be initialized, based on the primary thread info
+	}
+	/* wait for termination of my buddy */
+	sync_buddy_workers();
+	/* exit thread. remained items shall be merged by buddy */
+	return NULL;
 }
 
 int main(int argc, char * const argv[])
@@ -1801,28 +2588,42 @@ int main(int argc, char * const argv[])
 		return dumpArrowSchema(dump_schema_filename);
 	/* allocate per-worker data */
 	worker_threads.resize(num_worker_threads);
-	worker_builders.resize(num_worker_threads);
+	worker_handlers.resize(num_worker_threads);
 	worker_id = 0;		//primary thread
+	/* start worker threads, if any */
+	for (uintptr_t id=1; id < num_worker_threads; id++)
+	{
+		if ((errno = pthread_create(&worker_threads[id],
+									NULL,
+									worker_main, (void *)id)) != 0)
+			Elog("failed on pthread_create: %m");
+	}
 	/* open the primary connection */
 	pgsql_conn = pgsql_server_connect();
 	/* build the SQL command to run */
 	build_pgsql_command_list();
-	/* read the original arrow file, if --append mode */
-	if (append_filename)
-		Elog("--append is not implemented yet");
 	/* begin the primary query */
-	pgsql_begin_primary_query();
+	if (!pgsql_begin_primary_query())
+		Elog("Query returned an empty results");
 	/* define the schema from the first results */
-	pgsql_define_arrow_schema(worker_builders[0]);
+	pgsql_define_arrow_schema(worker_handlers[0]);
+	/* open the output file */
+	open_output_file();
+	/* start worker threads */
+	worker_setup_done = true;
+	if ((errno = pthread_cond_broadcast(&worker_setup_cond)) != 0)
+		Elog("failed on pthread_cond_broadcast: %m");
 	do {
 		/* fetch results and write to arrow/parqeut */
-		pgsql_process_query_results();
+		pgsql_process_query_results(worker_handlers[0]);
 		/* try next SQL command, if any */
 	} while (pgsql_begin_next_query());
-
-
-	
-	
+	/* wait for termination of my buddy */
+	sync_buddy_workers();
+	/* flush final remaining items */
+	pgsql_flush_record_batch(worker_handlers[0]);
+	/* close the output file */
+	close_output_file();
 	
 	return 0;
 }
