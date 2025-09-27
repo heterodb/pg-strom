@@ -69,8 +69,10 @@ public:
 	std::string		typname;
 	std::string		extname;
 	arrowBuilder	arrow_builder;
-	virtual size_t putValue(const char *value, int sz) = 0;
+	virtual size_t	putValue(const char *value, int sz) = 0;
+	virtual size_t	moveValue(arrowArray array, int64_t index) = 0;
 };
+
 using	pgsqlHandler		= std::shared_ptr<pgsqlBinaryHandler>;
 using	pgsqlHandlerVector	= std::vector<pgsqlHandler>;
 
@@ -308,218 +310,222 @@ __replace_string(std::string &str,
 // Type specific PostgreSQL handlers
 //
 // ================================================================
-#define __BUFFER_USAGE_INLINE_TYPE(builder, unitsz)						\
-	(ARROW_ALIGN((unitsz) * (builder)->length()) +						\
-	 ARROW_ALIGN((builder)->null_count() > 0 ? BITMAPLEN((builder)->length()) : 0))
-#define __BUFFER_USAGE_VARLENA_TYPE(builder)							\
-	(ARROW_ALIGN(sizeof(uint32_t) * ((builder)->length() + 1)) +		\
-	 ARROW_ALIGN((builder)->value_data_length()) +						\
-	 ARROW_ALIGN((builder)->null_count() > 0 ? BITMAPLEN((builder)->length()) : 0))
-#define __BUFFER_USAGE_LARGE_VARLENA_TYPE(builder)						\
-	(ARROW_ALIGN(sizeof(uint64_t) * ((builder)->length() + 1)) +		\
-	 ARROW_ALIGN((builder)->value_data_length()) +						\
-	 ARROW_ALIGN((builder)->null_count() > 0 ? BITMAPLEN((builder)->length()) : 0))
-
-class pgsqlBoolHandler final : public pgsqlBinaryHandler
+class pgsqlBinaryBitmapHandler : public pgsqlBinaryHandler
 {
 public:
-	size_t	putValue(const char *addr, int sz)
+	size_t	chunkSize(void)
 	{
-		auto	builder = std::dynamic_pointer_cast<arrow::BooleanBuilder>(arrow_builder);
-		arrow::Status rv;
-
-		assert(builder != NULL);	//not arrow::BooleanBuilder!!
-		if (!addr)
-			rv = builder->AppendNull();
-		else
-			rv = builder->Append(*addr ? true : false);
-		if (!rv.ok())
-			Elog("unable to append value to '%s' field", attname.c_str());
-		return (ARROW_ALIGN(BITMAPLEN(builder->length())) +
-				ARROW_ALIGN(builder->null_count() > 0 ? BITMAPLEN(builder->length()) : 0));
+		size_t	sz = ARROW_ALIGN(BITMAPLEN(arrow_builder->length()));
+		if (arrow_builder->null_count() > 0)
+			sz += ARROW_ALIGN(BITMAPLEN(arrow_builder->length()));
+		return sz;
 	}
 };
 
-class pgsqlInt8Handler final : public pgsqlBinaryHandler
+class pgsqlBinaryInlineHandler : public pgsqlBinaryHandler
 {
 public:
-	size_t	putValue(const char *addr, int sz)
+	size_t	unitsz;
+	size_t	chunkSize(void)
 	{
-		auto	builder = std::dynamic_pointer_cast<arrow::Int8Builder>(arrow_builder);
-		int8_t	value;
-		arrow::Status rv;
-
-		assert(builder != NULL);	//not arrow::Int8Builder!!
-		if (!addr)
-			rv = builder->AppendNull();
-		else
-		{
-			assert(sz == sizeof(int8_t));
-			value = *((const int8_t *)addr);
-
-			rv = builder->Append(value);
-		}
-		if (!rv.ok())
-			Elog("unable to put value to '%s' field: %s",
-				 attname.c_str(), rv.ToString().c_str());
-		return __BUFFER_USAGE_INLINE_TYPE(builder, sizeof(int8_t));
+		size_t	sz = ARROW_ALIGN(unitsz * arrow_builder->length());
+		if (arrow_builder->null_count() > 0)
+			sz += ARROW_ALIGN(BITMAPLEN(arrow_builder->length()));
+		return sz;
 	}
 };
 
-class pgsqlInt16Handler final : public pgsqlBinaryHandler
+class pgsqlBinaryVarlenaHandler : public pgsqlBinaryHandler
 {
 public:
-	size_t	putValue(const char *addr, int sz)
+	size_t	chunkSize(void)
 	{
-		auto	builder = std::dynamic_pointer_cast<arrow::Int16Builder>(arrow_builder);
-		int16_t	value;
-		arrow::Status rv;
-
-		assert(builder != NULL);	//not arrow::Int16Builder!!
-		if (!addr)
-			rv = builder->AppendNull();
-		else
-		{
-			assert(sz == sizeof(int16_t));
-			value = be16toh(*((const uint16_t *)addr));
-			rv = builder->Append(value);
-		}
-		if (!rv.ok())
-			Elog("unable to put value to '%s' field: %s",
-				 attname.c_str(), rv.ToString().c_str());
-		return __BUFFER_USAGE_INLINE_TYPE(builder, sizeof(int16_t));
+		auto	builder = std::dynamic_pointer_cast<arrow::BinaryBuilder>(arrow_builder);
+		size_t	sz = (ARROW_ALIGN(sizeof(uint32_t) * builder->length()) +
+					  ARROW_ALIGN(builder->value_data_length()));
+		if (builder->null_count() > 0)
+			sz += ARROW_ALIGN(BITMAPLEN(builder->length()));
+		return sz;
 	}
 };
 
-class pgsqlInt32Handler final : public pgsqlBinaryHandler
+class pgsqlBinaryLargeVarlenaHandler : public pgsqlBinaryHandler
 {
 public:
-	size_t	putValue(const char *addr, int sz)
+	size_t	chunkSize(void)
 	{
-		auto	builder = std::dynamic_pointer_cast<arrow::Int32Builder>(arrow_builder);
-		int32_t	value;
-		arrow::Status rv;
-
-		assert(builder != NULL);	//not arrow::Int32Builder!!
-		if (!addr)
-			rv = builder->AppendNull();
-		else
-		{
-			assert(sz == sizeof(int32_t));
-			value = be32toh(*((const uint32_t *)addr));
-			rv = builder->Append(value);
-		}
-		if (!rv.ok())
-			Elog("unable to put value to '%s' field: %s",
-				 attname.c_str(), rv.ToString().c_str());
-		return __BUFFER_USAGE_INLINE_TYPE(builder, sizeof(int32_t));
+		auto	builder = std::dynamic_pointer_cast<arrow::LargeBinaryBuilder>(arrow_builder);
+		size_t	sz = (ARROW_ALIGN(sizeof(uint64_t) * builder->length()) +
+					  ARROW_ALIGN(builder->value_data_length()));
+		if (builder->null_count() > 0)
+			sz += ARROW_ALIGN(BITMAPLEN(builder->length()));
+		return sz;
 	}
 };
 
-class pgsqlInt64Handler final : public pgsqlBinaryHandler
+#define PGSQL_BINARY_PUT_VALUE_TEMPLATE(TYPE_PREFIX)					\
+	size_t	putValue(const char *addr, int sz)							\
+	{																	\
+		auto	builder = std::dynamic_pointer_cast<arrow::TYPE_PREFIX##Builder>(arrow_builder); \
+		arrow::Status rv;												\
+		assert(builder != NULL);										\
+		if (!addr)														\
+			rv = builder->AppendNull();									\
+		else															\
+			rv = builder->Append(fetchBinary(addr,sz));					\
+		if (!rv.ok())													\
+			Elog("unable to put value to '%s' field (%s): %s",			\
+				 attname.c_str(), #TYPE_PREFIX, rv.ToString().c_str());	\
+		return chunkSize();												\
+	}
+#define PGSQL_BINARY_MOVE_VALUE_TEMPLATE(TYPE_PREFIX)					\
+	size_t	moveValue(arrowArray source_array, int64_t index)			\
+	{																	\
+		auto	builder = std::dynamic_pointer_cast<arrow::TYPE_PREFIX##Builder>(arrow_builder); \
+		auto	array = std::dynamic_pointer_cast<arrow::TYPE_PREFIX##Array>(source_array);	\
+		arrow::Status rv;												\
+		assert(builder != NULL && array != NULL);						\
+		assert(index < array->length());								\
+		if (array->IsNull(index))										\
+			rv = builder->AppendNull();									\
+		else															\
+			rv = builder->Append(array->Value(index));					\
+		if (!rv.ok())													\
+			Elog("unable to move value in '%s' field (%s): %s",			\
+				 attname.c_str(), #TYPE_PREFIX, rv.ToString().c_str());	\
+		return chunkSize();												\
+	}
+
+class pgsqlBoolHandler final : public pgsqlBinaryBitmapHandler
 {
 public:
-	size_t	putValue(const char *addr, int sz)
+	bool	fetchBinary(const char *addr, int sz)
 	{
-		auto	builder = std::dynamic_pointer_cast<arrow::Int64Builder>(arrow_builder);
-		int64_t	value;
-		arrow::Status rv;
-
-		assert(builder != NULL);	//not arrow::Int64Builder!!
-		if (!addr)
-			rv = builder->AppendNull();
-		else
-		{
-			assert(sz == sizeof(int64_t));
-			value = be64toh(*((const uint64_t *)addr));
-			rv = builder->Append(value);
-		}
-		if (!rv.ok())
-			Elog("unable to put value to '%s' field: %s",
-				 attname.c_str(), rv.ToString().c_str());
-		return __BUFFER_USAGE_INLINE_TYPE(builder, sizeof(int64_t));
+		assert(sz == sizeof(char));
+		return *addr ? true : false;
 	}
+	PGSQL_BINARY_PUT_VALUE_TEMPLATE(Boolean)
+	PGSQL_BINARY_MOVE_VALUE_TEMPLATE(Boolean)
 };
 
-class pgsqlFloat16Handler final : public pgsqlBinaryHandler
+class pgsqlInt8Handler final : public pgsqlBinaryInlineHandler
 {
 public:
-	size_t	putValue(const char *addr, int sz)
+	pgsqlInt8Handler()
 	{
-		auto		builder = std::dynamic_pointer_cast<arrow::HalfFloatBuilder>(arrow_builder);
-		uint16_t	value;
-		arrow::Status rv;
-
-		assert(builder != NULL);	//not arrow::HalfFloatBuilder!!
-		if (!addr)
-			rv = builder->AppendNull();
-		else
-		{
-			assert(sz == sizeof(uint16_t));
-			value = be16toh(*((const uint16_t *)addr));
-			rv = builder->Append(value);
-		}
-		if (!rv.ok())
-			Elog("unable to put value to '%s' field: %s",
-				 attname.c_str(), rv.ToString().c_str());
-		return __BUFFER_USAGE_INLINE_TYPE(builder, sizeof(int64_t));
+		unitsz = sizeof(int8_t);
 	}
+	int8_t	fetchBinary(const char *addr, int sz)
+	{
+		assert(sz == sizeof(int8_t));
+		return *((const int8_t *)addr);
+	}
+	PGSQL_BINARY_PUT_VALUE_TEMPLATE(Int8)
+	PGSQL_BINARY_MOVE_VALUE_TEMPLATE(Int8)
 };
 
-class pgsqlFloat32Handler final : public pgsqlBinaryHandler
+class pgsqlInt16Handler final : public pgsqlBinaryInlineHandler
 {
 public:
-	size_t	putValue(const char *addr, int sz)
+	pgsqlInt16Handler()
 	{
-		auto		builder = std::dynamic_pointer_cast<arrow::FloatBuilder>(arrow_builder);
+		unitsz = sizeof(int16_t);
+	}
+	int16_t	fetchBinary(const char *addr, int sz)
+	{
+		assert(sz == sizeof(int16_t));
+		return be16toh(*((const int16_t *)addr));
+	}
+	PGSQL_BINARY_PUT_VALUE_TEMPLATE(Int16)
+	PGSQL_BINARY_MOVE_VALUE_TEMPLATE(Int16)
+};
+
+class pgsqlInt32Handler final : public pgsqlBinaryInlineHandler
+{
+public:
+	pgsqlInt32Handler()
+	{
+		unitsz = sizeof(int32_t);
+	}
+	int32_t	fetchBinary(const char *addr, int sz)
+	{
+		assert(sz == sizeof(int32_t));
+		return be32toh(*((const int32_t *)addr));
+	}
+	PGSQL_BINARY_PUT_VALUE_TEMPLATE(Int32)
+	PGSQL_BINARY_MOVE_VALUE_TEMPLATE(Int32)
+};
+
+class pgsqlInt64Handler final : public pgsqlBinaryInlineHandler
+{
+public:
+	pgsqlInt64Handler()
+	{
+		unitsz = sizeof(int64_t);
+	}
+	int64_t	fetchBinary(const char *addr, int sz)
+	{
+		assert(sz == sizeof(int64_t));
+		return be64toh(*((const int64_t *)addr));
+	}
+	PGSQL_BINARY_PUT_VALUE_TEMPLATE(Int64)
+	PGSQL_BINARY_MOVE_VALUE_TEMPLATE(Int64)
+};
+
+class pgsqlFloat16Handler final : public pgsqlBinaryInlineHandler
+{
+public:
+	pgsqlFloat16Handler()
+	{
+		unitsz = sizeof(uint16_t);
+	}
+	uint16_t	fetchBinary(const char *addr, int sz)
+	{
+		assert(sz == sizeof(uint16_t));
+		return be16toh(*((const uint16_t *)addr));
+	}
+	PGSQL_BINARY_PUT_VALUE_TEMPLATE(HalfFloat)
+	PGSQL_BINARY_MOVE_VALUE_TEMPLATE(HalfFloat)
+};
+
+class pgsqlFloat32Handler final : public pgsqlBinaryInlineHandler
+{
+public:
+	pgsqlFloat32Handler()
+	{
+		unitsz = sizeof(float);
+	}
+	float	fetchBinary(const char *addr, int sz)
+	{
 		union {
-			uint32_t	u32;
+			uint32_t	ival;
 			float		fval;
-		} value;
-		arrow::Status rv;
-
-		assert(builder != NULL);	//not arrow::FloatBuilder!!
-		if (!addr)
-			rv = builder->AppendNull();
-		else
-		{
-			assert(sz == sizeof(uint32_t));
-			value.u32 = be32toh(*((const uint32_t *)addr));
-			rv = builder->Append(value.fval);
-		}
-		if (!rv.ok())
-			Elog("unable to put value to '%s' field: %s",
-				 attname.c_str(), rv.ToString().c_str());
-		return __BUFFER_USAGE_INLINE_TYPE(builder, sizeof(int64_t));
+		} u;
+		u.ival = be32toh(*((const uint32_t *)addr));
+		return u.fval;
 	}
+	PGSQL_BINARY_PUT_VALUE_TEMPLATE(Float)
+	PGSQL_BINARY_MOVE_VALUE_TEMPLATE(Float)
 };
 
-class pgsqlFloat64Handler final : public pgsqlBinaryHandler
+class pgsqlFloat64Handler final : public pgsqlBinaryInlineHandler
 {
 public:
-	size_t	putValue(const char *addr, int sz)
+	pgsqlFloat64Handler()
 	{
-		auto		builder = std::dynamic_pointer_cast<arrow::DoubleBuilder>(arrow_builder);
-		union {
-			uint64_t	u64;
-			double		fval;
-		} value;
-		arrow::Status rv;
-
-		assert(builder != NULL);	//not arrow::DoubleBuilder!!
-		if (!addr)
-			rv = builder->AppendNull();
-		else
-		{
-			assert(sz == sizeof(uint64_t));
-			value.u64 = be64toh(*((const uint64_t *)addr));
-			rv = builder->Append(value.fval);
-		}
-		if (!rv.ok())
-			Elog("unable to put value to '%s' field: %s",
-				 attname.c_str(), rv.ToString().c_str());
-		return __BUFFER_USAGE_INLINE_TYPE(builder, sizeof(int64_t));
+		unitsz = sizeof(double);
 	}
+	double fetchBinary(const char *addr, int sz)
+	{
+		union {
+			uint64_t	ival;
+			double		fval;
+		} u;
+		u.ival = be64toh(*((const uint64_t *)addr));
+		return u.fval;
+	}
+	PGSQL_BINARY_PUT_VALUE_TEMPLATE(Double)
+	PGSQL_BINARY_MOVE_VALUE_TEMPLATE(Double)
 };
 
 /* parameters of Numeric type */
@@ -534,267 +540,210 @@ public:
 #define NBASE				10000
 #define DEC_DIGITS			4
 
-struct pgsql_numeric_binary {
+typedef struct
+{
 	uint16_t	ndigits;	/* number of digits */
 	uint16_t	weight;		/* weight of first digit */
 	uint16_t	sign;		/* NUMERIC_(POS|NEG|NAN) */
 	uint16_t	dscale;		/* display scale */
 	int16_t		digits[1];	/* numeric digists */
-};
+} __pgsql_numeric_binary;
 
-class pgsqlNumericHandler final : public pgsqlBinaryHandler
+class pgsqlNumericHandler final : public pgsqlBinaryInlineHandler
 {
 public:
-	size_t	putValue(const char *addr, int sz)
+	pgsqlNumericHandler()
 	{
-		auto	builder = std::dynamic_pointer_cast<arrow::Decimal128Builder>(arrow_builder);
-		auto	rawdata = (const struct pgsql_numeric_binary *)addr;
-		arrow::Status	rv;
-
-		assert(builder != NULL);	/* not arrow::Decimal128Builder!! */
-		if (!rawdata)
-			rv = builder->AppendNull();
-		else
-		{
-			auto		d_type = std::static_pointer_cast<arrow::Decimal128Type>(builder->type());
-			int32_t		d_scale = d_type->scale();
-			int			ndigits = be16toh(rawdata->ndigits);
-			int			weight = be16toh(rawdata->weight);
-			int			sign = be16toh(rawdata->sign);
-			int			d;
-			arrow::Decimal128 value(0);
-
-			if ((sign & NUMERIC_SIGN_MASK) == NUMERIC_SIGN_MASK)
-				Elog("Decimal128 cannot map NaN, +Inf or -Inf in PostgreSQL Numeric");
-			/* makes integer portion first */
-			for (d=0; d <= weight; d++)
-			{
-				int		dig = (d >= 0 && d < ndigits) ? be16toh(rawdata->digits[d]) : 0;
-				if (dig < 0 || dig >= NBASE)
-					Elog("Numeric digit is corrupted (out of range: %d)", dig);
-				value = NBASE * value + dig;
-			}
-			/* makes floating point portion if any */
-			while (d_scale > 0)
-			{
-				int		dig = (d >= 0 && d < ndigits) ? be16toh(rawdata->digits[d]) : 0;
-				if (dig < 0 || dig >= NBASE)
-					Elog("Numeric digit is corrupted (out of range: %d)", dig);
-				if (d_scale >= DEC_DIGITS)
-					value = NBASE * value + dig;
-				else if (d_scale == 3)
-					value = 1000L * value + dig / 10L;
-				else if (d_scale == 2)
-					value =  100L * value + dig / 100L;
-				else if (d_scale == 1)
-					value =   10L * value + dig / 1000L;
-				else
-					Elog("internal bug");
-				d_scale -= DEC_DIGITS;
-				d++;
-			}
-			/* is it a negative value? */
-			if ((sign & NUMERIC_NEG) != 0)
-				value = -value;
-			/* ok, put this value */
-			rv = builder->Append(value);
-		}
-		if (!rv.ok())
-			Elog("unable to put value to '%s' field: %s",
-				 attname.c_str(), rv.ToString().c_str());
-		return __BUFFER_USAGE_INLINE_TYPE(builder, 16);
+		unitsz = sizeof(__int128_t);
 	}
+	arrow::Decimal128 fetchBinary(const char *addr, int sz)
+	{
+		auto	rawdata = (const __pgsql_numeric_binary *)addr;
+		auto	builder = std::dynamic_pointer_cast<arrow::Decimal128Builder>(arrow_builder);
+		auto	d_type = std::static_pointer_cast<arrow::Decimal128Type>(builder->type());
+		int32_t	d_scale = d_type->scale();
+		int		ndigits = be16toh(rawdata->ndigits);
+		int		weight = be16toh(rawdata->weight);
+		int		sign = be16toh(rawdata->sign);
+		int		d;
+		arrow::Decimal128 value(0);
+
+		if ((sign & NUMERIC_SIGN_MASK) == NUMERIC_SIGN_MASK)
+			Elog("Decimal128 cannot map NaN, +Inf or -Inf in PostgreSQL Numeric");
+		/* makes integer portion first */
+		for (d=0; d <= weight; d++)
+		{
+			int		dig = (d >= 0 && d < ndigits) ? be16toh(rawdata->digits[d]) : 0;
+			if (dig < 0 || dig >= NBASE)
+				Elog("Numeric digit is corrupted (out of range: %d)", dig);
+			value = NBASE * value + dig;
+		}
+		/* makes floating point portion if any */
+		while (d_scale > 0)
+		{
+			int		dig = (d >= 0 && d < ndigits) ? be16toh(rawdata->digits[d]) : 0;
+			if (dig < 0 || dig >= NBASE)
+				Elog("Numeric digit is corrupted (out of range: %d)", dig);
+			if (d_scale >= DEC_DIGITS)
+				value = NBASE * value + dig;
+			else if (d_scale == 3)
+				value = 1000L * value + dig / 10L;
+			else if (d_scale == 2)
+				value =  100L * value + dig / 100L;
+			else if (d_scale == 1)
+				value =   10L * value + dig / 1000L;
+			else
+				Elog("internal bug");
+			d_scale -= DEC_DIGITS;
+			d++;
+		}
+		/* is it a negative value? */
+		if ((sign & NUMERIC_NEG) != 0)
+			value = -value;
+		return value;
+	}
+	PGSQL_BINARY_PUT_VALUE_TEMPLATE(Decimal128)
+    PGSQL_BINARY_MOVE_VALUE_TEMPLATE(Decimal128)
 };
 
 #define UNIX_EPOCH_JDATE		2440588UL	/* 1970-01-01 */
 #define POSTGRES_EPOCH_JDATE	2451545UL	/* 2000-01-01 */
 #define USECS_PER_DAY			86400000000UL
 
-class pgsqlDateHandler final : public pgsqlBinaryHandler
+class pgsqlDateHandler final : public pgsqlBinaryInlineHandler
 {
 public:
-	size_t	putValue(const char *addr, int sz)
+	pgsqlDateHandler()
+	{
+		unitsz = sizeof(int32_t);
+	}
+	int32_t	fetchBinary(const char *addr, int sz)
 	{
 		auto	builder = std::dynamic_pointer_cast<arrow::Date32Builder>(arrow_builder);
+		auto	d_type = std::static_pointer_cast<arrow::Date32Type>(builder->type());
 		int32_t	value;
-		arrow::Status rv;
 
-		assert(builder != NULL);	//not arrow::Date32Builder
-		if (!addr)
-			rv = builder->AppendNull();
-		else
-		{
-			auto	d_type = std::static_pointer_cast<arrow::Date32Type>(builder->type());
-			assert(sz == sizeof(uint32_t));
-			assert(d_type->unit() == arrow::DateUnit::DAY);
-			value = be32toh(*((const uint32_t *)addr));
-			value += (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE);
-			rv = builder->Append(value);
-		}
-		if (!rv.ok())
-			Elog("unable to put value to '%s' field: %s",
-				 attname.c_str(), rv.ToString().c_str());
-		return __BUFFER_USAGE_INLINE_TYPE(builder, sizeof(int32_t));
+		assert(sz == sizeof(int32_t) && d_type->unit() == arrow::DateUnit::DAY);
+		value = be32toh(*((const uint32_t *)addr));
+		return value + (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE);
 	}
+	PGSQL_BINARY_PUT_VALUE_TEMPLATE(Date32)
+	PGSQL_BINARY_MOVE_VALUE_TEMPLATE(Date32)
 };
 
-class pgsqlTimeHandler final : public pgsqlBinaryHandler
+class pgsqlTimeHandler final : public pgsqlBinaryInlineHandler
 {
 public:
-	size_t	putValue(const char *addr, int sz)
+	pgsqlTimeHandler()
+	{
+		unitsz = sizeof(int64_t);
+	}
+	int64_t	fetchBinary(const char *addr, int sz)
 	{
 		auto	builder = std::dynamic_pointer_cast<arrow::Time64Builder>(arrow_builder);
+		auto	d_type = std::static_pointer_cast<arrow::Time64Type>(builder->type());
 		int64_t	value;
-		arrow::Status rv;
 
-		assert(builder != NULL);	//not arrow::Time64Builder
-		if (!addr)
-			rv = builder->AppendNull();
-		else
-		{
-			auto	d_type = std::static_pointer_cast<arrow::Time64Type>(builder->type());
-			assert(sz == sizeof(uint64_t));
-			assert(d_type->unit() == arrow::TimeUnit::MICRO);
-			value = be64toh(*((const uint64_t *)addr));
-			rv = builder->Append(value);
-		}
-		if (!rv.ok())
-			Elog("unable to put value to '%s' field: %s",
-				 attname.c_str(), rv.ToString().c_str());
-		return __BUFFER_USAGE_INLINE_TYPE(builder, sizeof(int64_t));
+		assert(sz == sizeof(int64_t) && d_type->unit() == arrow::TimeUnit::MICRO);
+		value = be64toh(*((const uint64_t *)addr));
+		return value;
 	}
+	PGSQL_BINARY_PUT_VALUE_TEMPLATE(Time64)
+	PGSQL_BINARY_MOVE_VALUE_TEMPLATE(Time64)
 };
 
-class pgsqlTimestampHandler final : public pgsqlBinaryHandler
+class pgsqlTimestampHandler final : public pgsqlBinaryInlineHandler
 {
 public:
-	size_t	putValue(const char *addr, int sz)
+	pgsqlTimestampHandler()
+	{
+		unitsz = sizeof(int64_t);
+	}
+	int64_t	fetchBinary(const char *addr, int sz)
 	{
 		auto	builder = std::dynamic_pointer_cast<arrow::TimestampBuilder>(arrow_builder);
+		auto	d_type = std::static_pointer_cast<arrow::TimestampType>(builder->type());
 		int64_t	value;
-		arrow::Status rv;
 
-		assert(builder != NULL);	//not arrow::TimestampBuilder
-		if (!addr)
-			rv = builder->AppendNull();
-		else
-		{
-			auto	d_type = std::static_pointer_cast<arrow::TimestampType>(builder->type());
-			assert(sz == sizeof(uint64_t));
-			assert(d_type->unit() == arrow::TimeUnit::MICRO);
-			value = be64toh(*((const uint64_t *)addr));
-			value += (POSTGRES_EPOCH_JDATE -
-					  UNIX_EPOCH_JDATE) * USECS_PER_DAY;
-			rv = builder->Append(value);
-		}
-		if (!rv.ok())
-			Elog("unable to put value to '%s' field: %s",
-				 attname.c_str(), rv.ToString().c_str());
-		return __BUFFER_USAGE_INLINE_TYPE(builder, sizeof(int64_t));
+		assert(sz == sizeof(uint64_t) && d_type->unit() == arrow::TimeUnit::MICRO);
+		value = be64toh(*((const uint64_t *)addr));
+		return value + (POSTGRES_EPOCH_JDATE -
+						UNIX_EPOCH_JDATE) * USECS_PER_DAY;
 	}
+	PGSQL_BINARY_PUT_VALUE_TEMPLATE(Timestamp)
+	PGSQL_BINARY_MOVE_VALUE_TEMPLATE(Timestamp)
 };
 
-struct pgsql_interval_binary {
+typedef struct
+{
 	int64_t		time;
 	int32_t		days;
 	int32_t		months;
-};
+} __pgsql_interval_binary;
 
-class pgsqlIntervalHandler final : public pgsqlBinaryHandler
+class pgsqlIntervalHandler final : public pgsqlBinaryInlineHandler
 {
 public:
-	size_t	putValue(const char *addr, int sz)
+	pgsqlIntervalHandler()
 	{
-		auto	builder = std::dynamic_pointer_cast<arrow::MonthDayNanoIntervalBuilder>(arrow_builder);
-		auto	rawdata = (const struct pgsql_interval_binary *)addr;
-		arrow::Status rv;
+		unitsz = sizeof(arrow::MonthDayNanoIntervalType::MonthDayNanos);
+	}
+	arrow::MonthDayNanoIntervalType::MonthDayNanos fetchBinary(const char *addr, int sz)
+	{
+		auto	rawdata = (const __pgsql_interval_binary *)addr;
+		arrow::MonthDayNanoIntervalType::MonthDayNanos iv;
+		assert(sz == sizeof(__pgsql_interval_binary));
+		iv.months = be32toh(rawdata->months);
+		iv.days   = be32toh(rawdata->days);
+		iv.nanoseconds = be64toh(rawdata->time) * 1000L;
+		return iv;
+	}
+	PGSQL_BINARY_PUT_VALUE_TEMPLATE(MonthDayNanoInterval)
+	PGSQL_BINARY_MOVE_VALUE_TEMPLATE(MonthDayNanoInterval)
+};
 
-		assert(builder != NULL);	//not arrow::DayTimeIntervalBuilder
-		if (!rawdata)
-			rv = builder->AppendNull();
-		else
+class pgsqlTextHandler final : public pgsqlBinaryVarlenaHandler
+{
+public:
+	std::string_view fetchBinary(const char *addr, int sz)
+	{
+		return std::string_view(addr, sz);
+	}
+	PGSQL_BINARY_PUT_VALUE_TEMPLATE(String)
+	PGSQL_BINARY_MOVE_VALUE_TEMPLATE(String)
+};
+
+class pgsqlBpCharHandler final : public pgsqlBinaryInlineHandler
+{
+public:
+	pgsqlBpCharHandler(size_t width)
+	{
+		unitsz = width;
+	}
+	std::string fetchBinary(const char *addr, size_t sz)
+	{
+		auto	buf = std::string(addr, Min(sz, unitsz));
+
+		while (sz < unitsz)
 		{
-			arrow::MonthDayNanoIntervalType::MonthDayNanos iv;
-			assert(sz == sizeof(struct pgsql_interval_binary));
-			iv.months = be32toh(rawdata->months);
-			iv.days = be32toh(rawdata->days);
-			iv.nanoseconds = be64toh(rawdata->time) * 1000L;
-			rv = builder->Append(iv);
+			buf += ' ';
+			sz++;
 		}
-		if (!rv.ok())
-			Elog("unable to put value to '%s' field: %s",
-				 attname.c_str(), rv.ToString().c_str());
-		return __BUFFER_USAGE_INLINE_TYPE(builder, sizeof(int64_t));
+		return buf;
 	}
+	PGSQL_BINARY_PUT_VALUE_TEMPLATE(FixedSizeBinary)
+	PGSQL_BINARY_MOVE_VALUE_TEMPLATE(FixedSizeBinary)
 };
 
-class pgsqlTextHandler final : public pgsqlBinaryHandler
+class pgsqlByteaHandler final : public pgsqlBinaryVarlenaHandler
 {
 public:
-	size_t	putValue(const char *addr, int sz)
+	std::string_view fetchBinary(const char *addr, int sz)
 	{
-		auto	builder = std::dynamic_pointer_cast<arrow::StringBuilder>(arrow_builder);
-		arrow::Status rv;
-
-		assert(builder != NULL);	//not arrow::StringBuilder
-		if (!addr)
-			rv = builder->AppendNull();
-		else
-			rv = builder->Append(addr, sz);
-		if (!rv.ok())
-			Elog("unable to put value to '%s' field: %s",
-				 attname.c_str(), rv.ToString().c_str());
-		return __BUFFER_USAGE_VARLENA_TYPE(builder);
+		return std::string_view(addr, sz);
 	}
-};
-
-class pgsqlBpCharHandler final : public pgsqlBinaryHandler
-{
-public:
-	size_t	putValue(const char *addr, int sz)
-	{
-		auto	builder = std::dynamic_pointer_cast<arrow::FixedSizeBinaryBuilder>(arrow_builder);
-		auto	d_type = std::static_pointer_cast<arrow::FixedSizeBinaryType>(builder->type());
-		int		width = d_type->byte_width();
-		arrow::Status rv;
-
-		assert(builder != NULL);	//not arrow::FixedSizeBinaryBuilder
-		if (!addr)
-			rv = builder->AppendNull();
-		else if (sz >= width)
-			rv = builder->Append(addr);
-		else
-		{
-			std::string temp(addr, sz);
-			while (sz++ < width)
-				temp += ' ';
-			rv = builder->Append(temp);
-		}
-		if (!rv.ok())
-			Elog("unable to put value to '%s' field: %s",
-				 attname.c_str(), rv.ToString().c_str());
-		return __BUFFER_USAGE_INLINE_TYPE(builder, width);
-	}
-};
-
-class pgsqlByteaHandler final : public pgsqlBinaryHandler
-{
-public:
-	size_t	putValue(const char *addr, int sz)
-	{
-		auto	builder = std::dynamic_pointer_cast<arrow::BinaryBuilder>(arrow_builder);
-		arrow::Status rv;
-
-		assert(builder != NULL);	//not arrow::BinaryBuilder
-		if (!addr)
-			rv = builder->AppendNull();
-		else
-			rv = builder->Append(addr, sz);
-		if (!rv.ok())
-			Elog("unable to put value to '%s' field: %s",
-				 attname.c_str(), rv.ToString().c_str());
-		return __BUFFER_USAGE_VARLENA_TYPE(builder);
-	}
+	PGSQL_BINARY_PUT_VALUE_TEMPLATE(Binary)
+	PGSQL_BINARY_MOVE_VALUE_TEMPLATE(Binary)
 };
 
 #define WITH_RECURSIVE_PG_BASE_TYPE							\
@@ -995,10 +944,10 @@ pgsql_define_arrow_field(arrowField &arrow_field,
 	else if (strcmp(typname, "bpchar") == 0 &&
 			 strcmp(nspname, "pg_catalog") == 0)
 	{
-		int		unitsz = Max(atttypmod - 4, 0);
+		int		width = Max(atttypmod - sizeof(int32_t), 0);
 		builder = std::make_shared<arrow::FixedSizeBinaryBuilder>
-			(arrow::fixed_size_binary(unitsz));
-		handler = std::make_shared<pgsqlBpCharHandler>();
+			(arrow::fixed_size_binary(width));
+		handler = std::make_shared<pgsqlBpCharHandler>(width);
 	}
 	/* elsewhere, we save the values just bunch of binary data */
 	else if (attlen == 1)
@@ -1790,18 +1739,6 @@ pgsql_server_connect(void)
 	return conn;
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
 /*
  * dumpArrowMetadata (--meta=FILENAME)
  */
@@ -2522,20 +2459,56 @@ parse_options(int argc, char * const argv[])
 
 static void sync_buddy_workers(void)
 {
-	auto	handlers = worker_handlers[worker_id];
+	auto	my_handlers = worker_handlers[worker_id];
 
 	for (uint32_t shift=1; (worker_id & shift) == 0; shift <<= 1)
 	{
-		uint32_t	buddy = worker_id + shift;
+		uint32_t	buddy_id = worker_id + shift;
 
-		if (buddy >= num_worker_threads)
+		if (buddy_id >= num_worker_threads)
 			break;
-		if ((errno = pthread_join(worker_threads[buddy], NULL)) != 0)
+		if ((errno = pthread_join(worker_threads[buddy_id], NULL)) != 0)
 			Elog("Failed on pthread_join: %m");
 		/* merge the remained items */
-		//TODO: moveValue virtual method
-		//      and write results if chunk-sz > segment-sz
+		{
+			pgsqlHandlerVector &buddy_handlers = worker_handlers[buddy_id];
+			arrowArrayVector	arrow_arrays;
+			arrowArray			array;
+			arrow::Status		rv;
+			int64_t				nrows = -1;
 
+			/* finalize the buddy buffer */
+			for (auto cell = buddy_handlers.begin(); cell != buddy_handlers.end(); cell++)
+			{
+				auto	handler = *cell;
+				auto	builder = handler->arrow_builder;
+
+				rv = builder->Finish(&array);
+				if (!rv.ok())
+					Elog("failed on arrow::ArrayBuilder::Finish: %s",
+						 rv.ToString().c_str());
+				arrow_arrays.push_back(array);
+				if (nrows < 0)
+					nrows = array->length();
+				else if (nrows != array->length())
+					Elog("Bug? number of rows mismatch across the buffers");
+			}
+			assert(my_handlers.size() == arrow_arrays.size());
+			/* move the values from buddy buffer */
+			for (int64_t i=0; i < nrows; i++)
+			{
+				size_t	chunk_sz = 0;
+
+				for (uint32_t j=0; j < my_handlers.size(); j++)
+				{
+					auto	handler = my_handlers[j];
+
+					chunk_sz += handler->moveValue(arrow_arrays[j], i);
+				}
+				if (chunk_sz >= batch_segment_sz)
+					pgsql_flush_record_batch(my_handlers);
+			}
+		}
 	}
 }
 
