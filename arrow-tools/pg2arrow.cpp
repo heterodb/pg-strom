@@ -23,6 +23,7 @@
 #include <arrow/ipc/api.h>
 #include <arrow/ipc/reader.h>
 #include <parquet/arrow/reader.h>	/* dnf install parquet-devel, or apt install libparquet-dev */
+#include <parquet/arrow/writer.h>
 #include <parquet/file_reader.h>
 #include <parquet/schema.h>
 #include <parquet/statistics.h>
@@ -87,7 +88,7 @@ static const char  *pgsql_database = NULL;			/* -d, --database */
 static int			pgsql_command_id = 0;
 static std::vector<std::string> pgsql_command_list;
 static const char  *raw_pgsql_command = NULL;		/* -c, --command */
-static uint32_t		num_worker_threads = 1;			/* -n, --num-workers */
+static uint32_t		num_worker_threads = 0;			/* -n, --num-workers */
 static const char  *ctid_target_table = NULL;	/*     --ctid-target */
 static const char  *parallel_keys;					/* -k, --parallel-keys */
 static bool			parquet_mode = false;			/* -q, --parquet */
@@ -95,7 +96,7 @@ static const char  *output_filename = NULL;			/* -o, --output */
 static const char  *stat_embedded_columns = NULL;	/* -S, --stat */
 static const char  *flatten_composite_columns = NULL; /* --flatten */
 static size_t		batch_segment_sz = 0;			/* -s, --segment-size */
-static std::vector<compressOption>	compression_methods;
+static std::vector<const compressOption *> compression_methods;	/* -C, --compress */
 static const char  *dump_meta_filename = NULL;		/* --meta */
 static const char  *dump_schema_filename = NULL;	/* --schema */
 static const char  *dump_schema_tablename = NULL;	/* --schema-name */
@@ -115,8 +116,9 @@ static const char	   *snapshot_identifier = NULL;
 static std::shared_ptr<arrow::Schema>					arrow_schema = NULL;
 static std::shared_ptr<arrow::io::FileOutputStream>		arrow_out_stream;
 static std::shared_ptr<arrow::ipc::RecordBatchWriter>	arrow_file_writer;
-static std::shared_ptr<parquet::schema::GroupNode>		parquet_schema;
-static std::unique_ptr<parquet::ParquetFileWriter>		parquet_file_writer;
+//static std::shared_ptr<parquet::schema::GroupNode>		parquet_schema;
+//static std::unique_ptr<parquet::ParquetFileWriter>		parquet_file_writer;
+static std::unique_ptr<parquet::arrow::FileWriter>		parquet_file_writer;
 static pthread_mutex_t	arrow_file_mutex = PTHREAD_MUTEX_INITIALIZER;
 static uint32_t			arrow_num_chunks = 0;
 static uint64_t			arrow_num_items = 0;
@@ -1433,19 +1435,23 @@ pgsql_flush_record_batch(pgsqlHandlerVector &pgsql_handlers)
 	if ((errno = pthread_mutex_lock(&arrow_file_mutex)) != 0)
 		Elog("failed on pthread_mutex_lock: %m");
 	foffset_before = arrow_out_stream->Tell();
+	/* setup a record batch */
+	auto	rbatch = arrow::RecordBatch::Make(arrow_schema, nrows, arrow_arrays);
 	if (parquet_mode)
 	{
-		/* setup a row group */
-		Elog("not implemented yet");
+		/* write out row-group */
+		rv = parquet_file_writer->WriteRecordBatch(*rbatch);
+		if (!rv.ok())
+			Elog("failed on parquet::arrow::FileWriter::WriteRecordBatch: %s",
+				 rv.ToString().c_str());
 	}
 	else
 	{
-		/* setup a record batch */
-		auto	rbatch = arrow::RecordBatch::Make(arrow_schema, nrows, arrow_arrays);
 		/* write out record batch */
 		rv = arrow_file_writer->WriteRecordBatch(*rbatch);
 		if (!rv.ok())
-			Elog("failed on WriteRecordBatch: %s", rv.ToString().c_str());
+			Elog("failed on arrow::ipc::RecordBatchWriter::WriteRecordBatch: %s",
+				 rv.ToString().c_str());
 	}
 	chunk_id = arrow_num_chunks++;
 	arrow_num_items += nrows;
@@ -1542,6 +1548,7 @@ pgsql_process_query_results(pgsqlHandlerVector &handlers)
 static void
 build_pgsql_command_list(void)
 {
+	assert(num_worker_threads > 0);
 	if (num_worker_threads == 1)
 	{
 		/* simple non-parallel case */
@@ -1976,6 +1983,43 @@ dumpArrowSchema(const char *filename)
 }
 
 /*
+ * parquet_my_writer_props
+ * parquet_arrow_my_writer_props
+ *  - properties for parquet::arrow::FileWriter
+ */
+static std::shared_ptr<parquet::WriterProperties>
+parquet_my_writer_props(void)
+{
+	parquet::WriterProperties::Builder builder;
+	auto	props = parquet::WriterProperties::Builder().build();
+
+	/* created-by pg2arrow */
+	builder.created_by(std::string("pg2arrow"));
+	/* pg2arrow does not split row-groups by number of lines */
+	builder.max_row_group_length(INT64_MAX);
+	/* default compression method */
+	builder.compression(arrow::Compression::type::ZSTD);
+	for (auto cell = compression_methods.begin(); cell != compression_methods.end(); cell++)
+	{
+		auto	comp = *cell;
+
+		if (comp->colname)
+			builder.compression(std::string(comp->colname), comp->method);
+		else
+			builder.compression(comp->method);
+	}
+	// MEMO: Parquet enables min/max/null-count statistics in the default,
+	// so we don't need to touch something special ...(like enable_statistics())
+	return builder.build();
+}
+
+static std::shared_ptr<parquet::ArrowWriterProperties>
+parquet_arrow_my_writer_props(void)
+{
+	return parquet::default_arrow_writer_properties();
+}
+
+/*
  * open_output_file
  */
 static void open_output_file(void)
@@ -2016,13 +2060,15 @@ static void open_output_file(void)
 	/* attach file writer */
 	if (parquet_mode)
 	{
-		Elog("not implemented yet");
-#if 0
-        parquet_file_writer = parquet::ParquetFileWriter::Open(arrow_out_stream,
-                                                               parquet_schema,
-                                                               parquet_props,
-                                                               arrow_schema_metadata);		
-#endif
+		auto	rv = parquet::arrow::FileWriter::Open(*arrow_schema,
+													  arrow::default_memory_pool(),
+													  arrow_out_stream,
+													  parquet_my_writer_props(),
+													  parquet_arrow_my_writer_props());
+		if (!rv.ok())
+			Elog("failed on parquet::arrow::FileWriter::Open('%s'): %s",
+				output_filename, rv.status().ToString().c_str());
+		parquet_file_writer = std::move(rv).ValueOrDie();
 	}
 	else
 	{
@@ -2051,10 +2097,13 @@ static void close_output_file(void)
             Elog("failed on arrow::ipc::RecordBatchWriter::Close: %s",
                  rv.ToString().c_str());
     }
-#if HAS_PARQUET
     if (parquet_file_writer)
-        parquet_file_writer->Close();
-#endif
+	{
+        rv = parquet_file_writer->Close();
+		if (!rv.ok())
+			Elog("failed on parquet::arrow::FileWriter::Close: %s",
+				 rv.ToString().c_str());
+	}
     rv = arrow_out_stream->Close();
     if (!rv.ok())
 		Elog("failed on arrow::ipc::io::FileOutputStream::Close: %s",
@@ -2192,7 +2241,7 @@ parse_options(int argc, char * const argv[])
 				simple_table_name = optarg;
 				break;
 			case 'n':		/* --num-workers */
-				if (num_worker_threads != 1)
+				if (num_worker_threads != 0)
 					Elog("-n, --num-workers was given twice.");
 				else
 				{
@@ -2213,6 +2262,8 @@ parse_options(int argc, char * const argv[])
 			case 'k':
 				if (parallel_keys)
 					Elog("-k, --parallel_keys was given twice.");
+				if (num_worker_threads != 0)
+					Elog("-k and -n are mutually exclusive.");
 				if (ctid_target_table)
 					Elog("--ctid-target and -k, --parallel_keys are mutually exclusive.");
 				parallel_keys = optarg;
@@ -2268,34 +2319,34 @@ parse_options(int argc, char * const argv[])
 			case 'C':		/* --compress */
 				{
 					char   *pos = strchr(optarg, ':');
-					compressOption comp;
+					auto	comp = (compressOption *)palloc0(sizeof(compressOption));
 
 					if (!pos)
 					{
 						/* --compress=METHOD */
-						comp.colname = NULL;
+						comp->colname = NULL;
 						pos = optarg;
 					}
 					else
 					{
 						/* --compress=COLUMN:METHOD */
 						*pos++ = '\0';
-						comp.colname = __trim(optarg);
+						comp->colname = __trim(optarg);
 					}
 					if (strcasecmp(pos, "snappy") == 0)
-						comp.method = arrow::Compression::type::SNAPPY;
+						comp->method = arrow::Compression::type::SNAPPY;
 					else if (strcasecmp(pos, "gzip") == 0)
-						comp.method = arrow::Compression::type::GZIP;
+						comp->method = arrow::Compression::type::GZIP;
 					else if (strcasecmp(pos, "brotli") == 0)
-						comp.method = arrow::Compression::type::BROTLI;
+						comp->method = arrow::Compression::type::BROTLI;
 					else if (strcasecmp(pos, "zstd") == 0)
-						comp.method = arrow::Compression::type::ZSTD;
+						comp->method = arrow::Compression::type::ZSTD;
 					else if (strcasecmp(pos, "lz4") == 0)
-						comp.method = arrow::Compression::type::LZ4;
+						comp->method = arrow::Compression::type::LZ4;
 					else if (strcasecmp(pos, "lzo") == 0)
-						comp.method = arrow::Compression::type::LZO;
+						comp->method = arrow::Compression::type::LZO;
 					else if (strcasecmp(pos, "bz2") == 0)
-						comp.method = arrow::Compression::type::BZ2;
+						comp->method = arrow::Compression::type::BZ2;
 					else
 						Elog("unknown --compress method [%s]", optarg);
 					compression_methods.push_back(comp);
@@ -2385,6 +2436,30 @@ parse_options(int argc, char * const argv[])
 	}
 	else if (optind != argc)
 		Elog("too much command line arguments");
+	//
+	// Set default parallel workers
+	//
+	if (num_worker_threads == 0)
+	{
+		if (ctid_target_table)
+			num_worker_threads = 4;		/* default parallel */
+		else if (parallel_keys)
+		{
+			const char *pos = parallel_keys;
+			int			count = 0;
+
+			while ((pos = strchr(pos, ',')) != NULL)
+			{
+				count++;
+				pos++;
+			}
+			num_worker_threads = count + 1;
+		}
+		else
+		{
+			num_worker_threads = 1;		/* no parallel execution */
+		}
+	}
 	//
 	// Check command line option consistency
 	//
