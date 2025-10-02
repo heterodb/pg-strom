@@ -29,13 +29,12 @@
 /*
  * Error Reporting
  */
-#ifdef PGSTROM_DEBUG_BUILD
-#define __Elog(fmt,...)							\
-	fprintf(stderr, "(%s:%d) " fmt "\n",		\
-			__FILE__,__LINE__, ##__VA_ARGS__)
-#else
-#define __Elog(fmt,...)
-#endif
+static thread_local	char	__private_error_message[512];
+#define __Elog(fmt,...)										\
+	snprintf(__private_error_message,						\
+			 sizeof(__private_error_message),				\
+			 "[error %s:%d] " fmt "\n",						\
+			 __basename(__FILE__),__LINE__, ##__VA_ARGS__)	\
 
 /*
  * parquetMetaDataCache
@@ -533,12 +532,12 @@ parquetReadArrowTable(std::shared_ptr<arrow::Table> table,
  * It returns a KDS buffer with KDS_FORMAT_ARROW that loads the
  * specified row-group.
  */
-kern_data_store *
-parquetReadOneRowGroup(const char *filename,
-					   const kern_data_store *kds_head,
-					   void *(*malloc_callback)(void *malloc_private,
-												size_t malloc_size),
-					   void *malloc_private)
+static kern_data_store *
+__parquetReadOneRowGroup(const char *filename,
+						 const kern_data_store *kds_head,
+						 void *(*malloc_callback)(void *malloc_private,
+												  size_t malloc_size),
+						 void *malloc_private)
 {
 	uint32_t	row_group_index = kds_head->parquet_row_group;
 	struct stat	stat_buf;
@@ -602,7 +601,7 @@ parquetReadOneRowGroup(const char *filename,
 			parquetPutMetaDataCache(entry);
 		else
 			pq_hash_lock[hindex].unlock();
-		__Elog("failed on parquet::ParquetFileReader::Open('%s'): %s", filename);
+		__Elog("failed on parquet::ParquetFileReader::Open('%s')", filename);
 		return NULL;
 	}
 
@@ -670,9 +669,48 @@ parquetReadOneRowGroup(const char *filename,
 		else
 		{
 			__Elog("failed on parquet::arrow::FileReader::ReadRowGroup: %s",
-				   status.ToString.c_str());
+				   status.ToString().c_str());
 		}
 	}
 	parquetPutMetaDataCache(entry);
+	return kds;
+}
+
+/*
+ * parquetReadOneRowGroup - interface to C-portion
+ */
+kern_data_store *
+parquetReadOneRowGroup(const char *filename,
+					   const kern_data_store *kds_head,
+					   void *(*malloc_callback)(void *malloc_private,
+												size_t malloc_size),
+					   void *malloc_private,
+					   const char **p_error_message)
+{
+	kern_data_store *kds = NULL;
+
+	*__private_error_message = '\0';
+	try {
+		kds = __parquetReadOneRowGroup(filename,
+									   kds_head,
+									   malloc_callback,
+									   malloc_private);
+	}
+	catch (const std::exception &e) {
+		const char *estr = e.what();
+		snprintf(__private_error_message,
+				 sizeof(__private_error_message),
+				 "[exception] %s", estr);
+	}
+	/* error reporting */
+	if (p_error_message)
+	{
+		if (kds)
+			*p_error_message = NULL;	/* no error status */
+		else if (*__private_error_message == '\0')
+			*p_error_message = "unknown internal error";
+		else
+			*p_error_message = __private_error_message;
+	}
 	return kds;
 }

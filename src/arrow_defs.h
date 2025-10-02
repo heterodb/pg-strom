@@ -925,7 +925,8 @@ parquetReadOneRowGroup(const char *filename,
 					   const struct kern_data_store *kds_head,
 					   void *(*malloc_callback)(void *malloc_private,
 												size_t malloc_size),
-					   void *malloc_private);
+					   void *malloc_private,
+					   const char **p_error_message);
 #undef __EXTERN
 
 #endif		/* !__CUDACC__ */
