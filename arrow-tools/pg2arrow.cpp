@@ -14,6 +14,7 @@
 #include <endian.h>
 #include <fcntl.h>
 #include <getopt.h>
+#include <mutex>
 #include <pthread.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -30,6 +31,36 @@
 #include <parquet/stream_writer.h>
 #include <libpq-fe.h>
 #include "arrow_defs.h"
+
+// ------------------------------------------------
+// Error Reporting
+// ------------------------------------------------
+#define Elog(fmt,...)									\
+	do {												\
+		if (verbose > 1)								\
+			fprintf(stderr, "[ERROR %s:%d] " fmt "\n",	\
+					__FILE__,__LINE__, ##__VA_ARGS__);	\
+		else											\
+			fprintf(stderr, "[ERROR] " fmt "\n",		\
+					##__VA_ARGS__);						\
+		exit(1);										\
+	} while(0)
+#define Info(fmt,...)									\
+	do {												\
+		if (verbose > 1)								\
+			fprintf(stderr, "[INFO %s:%d] " fmt "\n",	\
+					__FILE__,__LINE__, ##__VA_ARGS__);	\
+		else if (verbose > 0)							\
+			fprintf(stderr, "[INFO] " fmt "\n",			\
+					##__VA_ARGS__);						\
+	} while(0)
+
+#define Debug(fmt,...)									\
+	do {												\
+		if (verbose > 1)								\
+			fprintf(stderr, "[DEBUG %s:%d] " fmt "\n",	\
+					__FILE__,__LINE__, ##__VA_ARGS__);	\
+	} while(0)
 
 // ------------------------------------------------
 // Type definitions
@@ -53,28 +84,7 @@ using	arrowBuilder	= std::shared_ptr<arrow::ArrayBuilder>;
 using	arrowBuilderVector = std::vector<arrowBuilder>;
 using	arrowArray		= std::shared_ptr<arrow::Array>;
 using	arrowArrayVector = std::vector<arrowArray>;
-
-class pgsqlBinaryHandler
-{
-public:
-	std::string		attname;
-	Oid				atttypid;
-	int				atttypmod;
-	int				attlen;
-	char			attbyval;
-	char			attalign;
-	char			typtype;
-	Oid				typrelid;	/* valid, if composite type */
-	Oid				typelemid;	/* valid, if array type */
-	std::string		nspname;
-	std::string		typname;
-	std::string		extname;
-	arrowBuilder	arrow_builder;
-	virtual size_t	putValue(const char *value, int sz) = 0;
-	virtual size_t	moveValue(arrowArray array, int64_t index) = 0;
-};
-
-using	pgsqlHandler		= std::shared_ptr<pgsqlBinaryHandler>;
+using	pgsqlHandler		= std::shared_ptr<class pgsqlBinaryHandler>;
 using	pgsqlHandlerVector	= std::vector<pgsqlHandler>;
 
 // ------------------------------------------------
@@ -116,10 +126,8 @@ static const char	   *snapshot_identifier = NULL;
 static std::shared_ptr<arrow::Schema>					arrow_schema = NULL;
 static std::shared_ptr<arrow::io::FileOutputStream>		arrow_out_stream;
 static std::shared_ptr<arrow::ipc::RecordBatchWriter>	arrow_file_writer;
-//static std::shared_ptr<parquet::schema::GroupNode>		parquet_schema;
-//static std::unique_ptr<parquet::ParquetFileWriter>		parquet_file_writer;
 static std::unique_ptr<parquet::arrow::FileWriter>		parquet_file_writer;
-static pthread_mutex_t	arrow_file_mutex = PTHREAD_MUTEX_INITIALIZER;
+static std::mutex		arrow_file_mutex;
 static uint32_t			arrow_num_chunks = 0;
 static uint64_t			arrow_num_items = 0;
 
@@ -133,34 +141,33 @@ static thread_local uint32_t	worker_id = -1;
 static thread_local const char *server_timezone = NULL;
 
 // ------------------------------------------------
-// Error Reporting
+// pgsqlBinaryHandler - the base class
 // ------------------------------------------------
-#define Elog(fmt,...)									\
-	do {												\
-		if (verbose > 1)								\
-			fprintf(stderr, "[ERROR %s:%d] " fmt "\n",	\
-					__FILE__,__LINE__, ##__VA_ARGS__);	\
-		else											\
-			fprintf(stderr, "[ERROR] " fmt "\n",		\
-					##__VA_ARGS__);						\
-		exit(1);										\
-	} while(0)
-#define Info(fmt,...)									\
-	do {												\
-		if (verbose > 1)								\
-			fprintf(stderr, "[INFO %s:%d] " fmt "\n",	\
-					__FILE__,__LINE__, ##__VA_ARGS__);	\
-		else if (verbose > 0)							\
-			fprintf(stderr, "[INFO] " fmt "\n",			\
-					##__VA_ARGS__);						\
-	} while(0)
-
-#define Debug(fmt,...)									\
-	do {												\
-		if (verbose > 1)								\
-			fprintf(stderr, "[DEBUG %s:%d] " fmt "\n",	\
-					__FILE__,__LINE__, ##__VA_ARGS__);	\
-	} while(0)
+class pgsqlBinaryHandler
+{
+public:
+	std::string		attname;
+	std::string		typname;
+	arrowBuilder	arrow_builder;
+	arrowArray		arrow_array;
+	virtual size_t	chunkSize(void) = 0;
+	virtual size_t	putValue(const char *value, int sz) = 0;
+	virtual size_t	moveValue(pgsqlHandler buddy, int64_t index) = 0;
+	virtual int64_t	Finish(void)
+	{
+		auto	rv = arrow_builder->Finish(&arrow_array);
+		if (!rv.ok())
+			Elog("failed on arrow::ArrayBuilder::Finish: %s",
+				 rv.ToString().c_str());
+		return arrow_array->length();
+	}
+	virtual void	Reset(void)
+	{
+		arrow_builder->Reset();
+		if (arrow_array)
+			arrow_array = nullptr;
+	}
+};
 
 // ------------------------------------------------
 // Misc utility functions
@@ -381,10 +388,10 @@ public:
 		return chunkSize();												\
 	}
 #define PGSQL_BINARY_MOVE_VALUE_TEMPLATE(TYPE_PREFIX)					\
-	size_t	moveValue(arrowArray source_array, int64_t index)			\
+	size_t	moveValue(pgsqlHandler buddy, int64_t index)				\
 	{																	\
 		auto	builder = std::dynamic_pointer_cast<arrow::TYPE_PREFIX##Builder>(arrow_builder); \
-		auto	array = std::dynamic_pointer_cast<arrow::TYPE_PREFIX##Array>(source_array);	\
+		auto	array = std::dynamic_pointer_cast<arrow::TYPE_PREFIX##Array>(buddy->arrow_array); \
 		arrow::Status rv;												\
 		assert(builder != NULL && array != NULL);						\
 		assert(index < array->length());								\
@@ -748,6 +755,66 @@ public:
 	PGSQL_BINARY_MOVE_VALUE_TEMPLATE(Binary)
 };
 
+class pgsqlListHandler final : public pgsqlBinaryHandler
+{
+	pgsqlHandler	element;
+	Oid				element_type_oid;
+public:
+	pgsqlListHandler(pgsqlHandler __element, Oid __element_type_oid)
+	{
+		element = __element;
+		element_type_oid = __element_type_oid;
+	}
+	size_t  chunkSize(void)
+	{
+		auto	builder = std::dynamic_pointer_cast<arrow::ListBuilder>(arrow_builder);
+		size_t  sz = ARROW_ALIGN(sizeof(uint32_t) * (builder->length() + 1));
+		if (builder->null_count() > 0)
+			sz += ARROW_ALIGN(BITMAPLEN(builder->length()));
+		return sz + element->chunkSize();
+	}
+	size_t	putValue(const char *addr, int sz)
+	{
+		auto	builder = std::dynamic_pointer_cast<arrow::ListBuilder>(arrow_builder);
+		Elog("not implemented");
+	}
+	size_t	moveValue(pgsqlHandler buddy, int64_t index)
+	{
+		auto	builder = std::dynamic_pointer_cast<arrow::ListBuilder>(arrow_builder);
+		Elog("not implemented");
+	}
+};
+
+class pgsqlStructHandler final : public pgsqlBinaryVarlenaHandler
+{
+	pgsqlHandlerVector	children;
+public:
+	pgsqlStructHandler(pgsqlHandlerVector __children)
+	{
+		children = __children;
+	}
+	size_t	chunkSize(void)
+	{
+		auto	builder = std::dynamic_pointer_cast<arrow::StructBuilder>(arrow_builder);
+		size_t	chunk_sz = 0;
+		if (builder->null_count() > 0)
+			chunk_sz += ARROW_ALIGN(BITMAPLEN(builder->length()));
+		for (auto cell = children.begin(); cell != children.end(); cell++)
+			chunk_sz += (*cell)->chunkSize();
+		return chunk_sz;
+	}
+	size_t	putValue(const char *addr, int sz)
+	{
+		auto	builder = std::dynamic_pointer_cast<arrow::StructBuilder>(arrow_builder);
+		Elog("not implemented");
+	}
+	size_t	moveValue(pgsqlHandler buddy, int64_t index)
+	{
+		auto	builder = std::dynamic_pointer_cast<arrow::StructBuilder>(arrow_builder);
+		Elog("not implemented");
+	}
+};
+
 #define WITH_RECURSIVE_PG_BASE_TYPE							\
 	"WITH RECURSIVE pg_base_type AS ("						\
 	"  SELECT 0 depth, oid type_id, oid base_id,"			\
@@ -769,16 +836,10 @@ public:
 	"   WHERE t.typbasetype = b.type_id"					\
 	")\n"
 
-static void
-pgsql_define_arrow_list_field(arrowField &arrow_field,
-							  pgsqlHandler &pgsql_handler,
-							  const char *attname,
-							  Oid typelemid);
-static void
-pgsql_define_arrow_composite_field(arrowField &arrow_field,
-								   pgsqlHandler &pgsql_handler,
-								   const char *attname,
-								   Oid typrelid);
+static pgsqlHandler
+pgsql_define_arrow_list_field(const char *attname, Oid typelemid);
+static pgsqlHandler
+pgsql_define_arrow_composite_field(const char *attname, Oid typrelid);
 
 /*
  * pgsql_define_arrow_field
@@ -806,19 +867,15 @@ pgsql_define_arrow_field(arrowField &arrow_field,
 	/* array type */
 	if (typelemid != 0)
 	{
-		pgsql_define_arrow_list_field(arrow_field,
-									  pgsql_handler,
-									  attname,
-									  typelemid);
+		handler = pgsql_define_arrow_list_field(attname, typelemid);
+		builder = handler->arrow_builder;
 		goto out;
 	}
 	/* composite type */
 	if (typrelid != 0)
 	{
-		pgsql_define_arrow_composite_field(arrow_field,
-										   pgsql_handler,
-										   attname,
-										   typrelid);
+		handler = pgsql_define_arrow_composite_field(attname, typrelid);
+		builder = handler->arrow_builder;
 		goto out;
 	}
 	/* enum type */
@@ -994,21 +1051,9 @@ out:
 	 * Common setup handler, builder, and field
 	 */
 	handler->attname = std::string(attname);
-	handler->atttypid = atttypid;
-	handler->atttypmod = atttypmod;
-	handler->attlen = attlen;
-	handler->attbyval = attbyval;
-	handler->attalign = attalign;
-	handler->typtype = typtype;
-	handler->typrelid = typrelid;
-	handler->typelemid = typelemid;
-	if (nspname)
-		handler->nspname = std::string(nspname);
-	if (typname)
-		handler->typname = std::string(typname);
-	if (extname)
-		handler->extname = std::string(extname);
+	handler->typname = std::string(typname);
 	handler->arrow_builder = builder;
+	handler->arrow_array = nullptr;
 	pgsql_handler = handler;
 	arrow_field = arrow::field(attname, builder->type(), true);
 }
@@ -1016,18 +1061,17 @@ out:
 /*
  * pgsql_define_arrow_list_field
  */
-static void
-pgsql_define_arrow_list_field(arrowField &arrow_field,
-                              pgsqlHandler &pgsql_handler,
-                              const char *attname,
-                              Oid typelemid)
+static pgsqlHandler
+pgsql_define_arrow_list_field(const char *attname, Oid typelemid)
 {
-	arrow::FieldVector arrow_subfields;
-	arrowBuilderVector arrow_subbuilders;
-	pgsqlHandlerVector pgsql_subhandlers;
-	PGresult   *res;
-	char	   *namebuf = (char *)alloca(strlen(attname) + 10);
-	char		query[4096];
+	arrowField		element_field;
+	arrowBuilder	element_builder;
+	pgsqlHandler	element_handler;
+	pgsqlHandler	handler;
+	arrowBuilder	builder;
+	PGresult	   *res;
+	char		   *namebuf = (char *)alloca(strlen(attname) + 10);
+	char			query[4096];
 
 	sprintf(namebuf, "__%s", attname);
 	snprintf(query, sizeof(query),
@@ -1068,11 +1112,8 @@ pgsql_define_arrow_list_field(arrowField &arrow_field,
 	if (PQntuples(res) != 1)
 		Elog("unexpected number of result rows: %d", PQntuples(res));
 
-	arrow_subfields.resize(1);
-	arrow_subbuilders.resize(1);
-	pgsql_subhandlers.resize(1);
-	pgsql_define_arrow_field(arrow_subfields[0],
-							 pgsql_subhandlers[0],
+	pgsql_define_arrow_field(element_field,
+							 element_handler,
 							 namebuf,
 							 typelemid,						//type_oid
 							 atol(PQgetvalue(res, 0, 2)),	//typtypmod
@@ -1087,25 +1128,30 @@ pgsql_define_arrow_list_field(arrowField &arrow_field,
 							 (PQgetisnull(res, 0, 9)
 							  ? NULL
 							  : PQgetvalue(res, 0, 9)));	//e.extname
-	arrow_subbuilders[0] = pgsql_subhandlers[0]->arrow_builder;
-	//build List field and handler
+	element_builder = element_handler->arrow_builder;
+	/* setup arrow-builder and pgsql-handler */
+	builder = std::make_shared<arrow::ListBuilder>(arrow::default_memory_pool(),
+												   element_builder,
+												   element_field->type());
+	handler = std::make_shared<pgsqlListHandler>(element_handler, typelemid);
+	handler->arrow_builder = builder;
+	return handler;
 }
 
 /*
  * pgsql_define_arrow_composite_field
  */
-static void
-pgsql_define_arrow_composite_field(arrowField &arrow_field,
-								   pgsqlHandler &pgsql_handler,
-								   const char *attname,
-								   Oid comptype_relid)
+static pgsqlHandler
+pgsql_define_arrow_composite_field(const char *attname, Oid comptype_relid)
 {
-	arrow::FieldVector arrow_subfields;
-	arrowBuilderVector arrow_subbuilders;
-	pgsqlHandlerVector pgsql_subhandlers;
-	PGresult   *res;
-	char		query[4096];
-	int			nfields;
+	arrow::FieldVector children_fields;
+	arrowBuilderVector children_builders;
+	pgsqlHandlerVector children_handlers;
+	pgsqlHandler	handler;
+	arrowBuilder	builder;
+	PGresult	   *res;
+	char			query[4096];
+	int				nfields;
 
 	snprintf(query, sizeof(query),
 			 WITH_RECURSIVE_PG_BASE_TYPE
@@ -1150,13 +1196,13 @@ pgsql_define_arrow_composite_field(arrowField &arrow_field,
 			 PQresultErrorMessage(res));
 
 	nfields = PQntuples(res);
-	arrow_subfields.resize(nfields);
-	arrow_subbuilders.resize(nfields);
-	pgsql_subhandlers.resize(nfields);
+	children_fields.resize(nfields);
+	children_builders.resize(nfields);
+	children_handlers.resize(nfields);
 	for (int j=0; j < nfields; j++)
 	{
-		pgsql_define_arrow_field(arrow_subfields[j],
-								 pgsql_subhandlers[j],
+		pgsql_define_arrow_field(children_fields[j],
+								 children_handlers[j],
 								 PQgetvalue(res, j, 0),			//attname
 								 atol(PQgetvalue(res, j, 2)),	//atttypid
 								 atol(PQgetvalue(res, j, 3)),	//atttypmod
@@ -1171,11 +1217,17 @@ pgsql_define_arrow_composite_field(arrowField &arrow_field,
 								 (PQgetisnull(res, j, 12)		//e.extname
 								  ? NULL
 								  : PQgetvalue(res, j, 12)));
-		arrow_subbuilders[j] = pgsql_subhandlers[j]->arrow_builder;
+		children_builders[j] = children_handlers[j]->arrow_builder;
 	}
 	PQclear(res);
+	/* setup arrow-builder and pgsql-handler */
+	builder = std::make_shared<arrow::StructBuilder>(arrow::struct_(children_fields),
+													 arrow::default_memory_pool(),
+													 children_builders);
+	handler = std::make_shared<pgsqlStructHandler>(children_handlers);
+	handler->arrow_builder = builder;
 
-	//build composite type
+	return handler;
 }
 
 /*
@@ -1409,7 +1461,6 @@ static void
 pgsql_flush_record_batch(pgsqlHandlerVector &pgsql_handlers)
 {
 	arrowArrayVector arrow_arrays;
-	arrowArray		array;
 	arrow::Status	rv;
 	int64_t			nrows = -1;
 	uint32_t		chunk_id;
@@ -1419,24 +1470,22 @@ pgsql_flush_record_batch(pgsqlHandlerVector &pgsql_handlers)
 	/* setup record batch */
 	for (auto cell = pgsql_handlers.begin(); cell != pgsql_handlers.end(); cell++)
 	{
-		auto	handler = *cell;
-		auto	builder = handler->arrow_builder;
+		auto		handler = (*cell);
+		int64_t		__nrows = handler->Finish();
 
-		rv = builder->Finish(&array);
-		if (!rv.ok())
-			Elog("failed on arrow::ArrayBuilder::Finish: %s",
-				 rv.ToString().c_str());
-		arrow_arrays.push_back(array);
 		if (nrows < 0)
-			nrows = array->length();
-		else if (nrows != array->length())
+			nrows = __nrows;
+		else if (nrows != __nrows)
 			Elog("Bug? number of rows mismatch across the buffers");
+		arrow_arrays.push_back(handler->arrow_array);
 	}
-	if ((errno = pthread_mutex_lock(&arrow_file_mutex)) != 0)
-		Elog("failed on pthread_mutex_lock: %m");
+	/* begin critical section */
+	arrow_file_mutex.lock();
 	foffset_before = arrow_out_stream->Tell();
 	/* setup a record batch */
-	auto	rbatch = arrow::RecordBatch::Make(arrow_schema, nrows, arrow_arrays);
+	auto	rbatch = arrow::RecordBatch::Make(arrow_schema,
+											  nrows,
+											  arrow_arrays);
 	if (parquet_mode)
 	{
 		/* write out row-group */
@@ -1456,8 +1505,8 @@ pgsql_flush_record_batch(pgsqlHandlerVector &pgsql_handlers)
 	chunk_id = arrow_num_chunks++;
 	arrow_num_items += nrows;
 	foffset_after = arrow_out_stream->Tell();
-	if ((errno = pthread_mutex_unlock(&arrow_file_mutex)) != 0)
-		Elog("failed on pthread_mutex_unlock: %m");
+	arrow_file_mutex.unlock();
+	/* end critical section */
 	/* print progress */
 	if (shows_progress)
 		printf("%s[%u] nitems=%ld, length=%ld at file offset=%ld\n",
@@ -1470,10 +1519,7 @@ pgsql_flush_record_batch(pgsqlHandlerVector &pgsql_handlers)
 	/* reset buffers */
 	for (auto cell = pgsql_handlers.begin(); cell != pgsql_handlers.end(); cell++)
 	{
-		auto	handler = *cell;
-		auto	builder = handler->arrow_builder;
-
-		builder->Reset();
+		(*cell)->Reset();
 	}
 }
 
@@ -2547,39 +2593,27 @@ static void sync_buddy_workers(void)
 		/* merge the remained items */
 		{
 			pgsqlHandlerVector &buddy_handlers = worker_handlers[buddy_id];
-			arrowArrayVector	arrow_arrays;
-			arrowArray			array;
-			arrow::Status		rv;
-			int64_t				nrows = -1;
+			arrow::Status	rv;
+			int64_t			nrows = -1;
 
+			assert(my_handlers.size() == buddy_handlers.size());
 			/* finalize the buddy buffer */
 			for (auto cell = buddy_handlers.begin(); cell != buddy_handlers.end(); cell++)
 			{
-				auto	handler = *cell;
-				auto	builder = handler->arrow_builder;
+				int64_t		__nrows = (*cell)->Finish();
 
-				rv = builder->Finish(&array);
-				if (!rv.ok())
-					Elog("failed on arrow::ArrayBuilder::Finish: %s",
-						 rv.ToString().c_str());
-				arrow_arrays.push_back(array);
 				if (nrows < 0)
-					nrows = array->length();
-				else if (nrows != array->length())
+					nrows = __nrows;
+				else if (nrows != __nrows)
 					Elog("Bug? number of rows mismatch across the buffers");
 			}
-			assert(my_handlers.size() == arrow_arrays.size());
 			/* move the values from buddy buffer */
 			for (int64_t i=0; i < nrows; i++)
 			{
 				size_t	chunk_sz = 0;
 
 				for (uint32_t j=0; j < my_handlers.size(); j++)
-				{
-					auto	handler = my_handlers[j];
-
-					chunk_sz += handler->moveValue(arrow_arrays[j], i);
-				}
+					chunk_sz += my_handlers[j]->moveValue(buddy_handlers[j], i);
 				if (chunk_sz >= batch_segment_sz)
 					pgsql_flush_record_batch(my_handlers);
 			}
