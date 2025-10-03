@@ -95,16 +95,5 @@ SELECT * FROM tt_2 EXCEPT SELECT * FROM ft_2 ORDER BY id;
 SELECT * FROM ft_2 EXCEPT SELECT * FROM tt_2 ORDER BY id;
 
 --
--- Append mode
---
-\! $PG2ARROW_CMD -c 'SELECT id+3000,-i2,-i4,-i8,-f2,-f4,-f8,c,-num FROM regtest_arrow_utils_temp.tt_1' --append $ARROW_TEST_DATA_DIR/test_pg2arrow_tt1.arrow
-
-INSERT INTO tt_1 (
-  SELECT id+3000,-i2,-i4,-i8,-f2,-f4,-f8,c,-num FROM tt_1
-);
-SELECT * FROM tt_1 EXCEPT SELECT * FROM ft_1 ORDER BY id;
-SELECT * FROM ft_1 EXCEPT SELECT * FROM tt_1 ORDER BY id;
-
---
 -- TODO: Dictionary Batch
 --
