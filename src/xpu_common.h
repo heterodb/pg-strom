@@ -3937,10 +3937,10 @@ struct __dlist_node
 		prev = next = this;
 	}
 };
-#define __dlist_foreach(entry, lhead)								\
-	for (auto __iter = (lhead)->next, __iter_next = __iter->next;	\
-		 (entry = __iter->owner) != NULL;							\
-		 __iter = __iter_next, entry = __iter->owner)
+#define __dlist_foreach(entry, lhead)									\
+	for (auto __iter = (lhead)->next, __iter_next = __iter->next;		\
+		 (entry = __iter->owner) != NULL;								\
+		 __iter = __iter_next, __iter_next = __iter->next, entry = __iter->owner)
 
 template <typename T>
 INLINE_FUNCTION(void)

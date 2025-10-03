@@ -3715,6 +3715,7 @@ parquetFillupRowGroup(Relation relation,
 {
 	kern_data_store *kds_head;
 	kern_data_store *kds;
+	const char		*error_message = NULL;
 
 	/* prepare the KDS buffer */
 	resetStringInfo(chunk_buffer);
@@ -3727,11 +3728,13 @@ parquetFillupRowGroup(Relation relation,
 	resetStringInfo(chunk_buffer);
 	kds = parquetReadOneRowGroup(rb_state->af_state->filename,
 								 kds_head,
-								 __parquetFillupAllocBuffer, chunk_buffer);
+								 __parquetFillupAllocBuffer, chunk_buffer,
+								 &error_message);
 	if (!kds)
-		elog(ERROR, "Unable to load row-group %d of the parquet file '%s'",
+		elog(ERROR, "Unable to load row-group %d of the parquet file '%s': %s",
 			 rb_state->rb_index,
-			 rb_state->af_state->filename);
+			 rb_state->af_state->filename,
+			 error_message);
 	return kds;
 }
 

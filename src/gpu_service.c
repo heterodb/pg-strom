@@ -3543,13 +3543,18 @@ gpuservLoadKdsParquet(gpuClient *gclient,
 {
 	gpuMemChunk *m_chunk;
 	kern_data_store *kds;
+	const char	*error_message;
 
 	kds = parquetReadOneRowGroup(pathname,
 								 kds_head,
 								 __loadKdsParquetMallocCallback,
-								 &m_chunk);
+								 &m_chunk,
+								 &error_message);
 	if (!kds)
+	{
+		__gsLog("%s", error_message);
 		return NULL;
+	}
 	Assert(m_chunk->m_devptr == (CUdeviceptr)kds);
 	return m_chunk;
 }
