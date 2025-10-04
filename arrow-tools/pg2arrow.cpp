@@ -148,6 +148,11 @@ class pgsqlBinaryHandler
 public:
 	std::string		attname;
 	std::string		typname;
+	Oid				type_oid;
+	int32_t			type_mod;
+	char			type_align;
+	bool			type_byval;
+	int				type_len;
 	arrowBuilder	arrow_builder;
 	arrowArray		arrow_array;
 	virtual size_t	chunkSize(void) = 0;
@@ -570,41 +575,52 @@ public:
 		auto	rawdata = (const __pgsql_numeric_binary *)addr;
 		auto	builder = std::dynamic_pointer_cast<arrow::Decimal128Builder>(arrow_builder);
 		auto	d_type = std::static_pointer_cast<arrow::Decimal128Type>(builder->type());
-		int32_t	d_scale = d_type->scale();
-		int		ndigits = be16toh(rawdata->ndigits);
-		int		weight = be16toh(rawdata->weight);
-		int		sign = be16toh(rawdata->sign);
-		int		d;
+		int		d_scale = d_type->scale();
+		int		ndigits = (int16_t)be16toh(rawdata->ndigits);
+		int		weight = (int16_t)be16toh(rawdata->weight) + 1;
+		int		sign = (int16_t)be16toh(rawdata->sign);
+		int		diff = DEC_DIGITS * (ndigits - weight) - d_scale;
 		arrow::Decimal128 value(0);
-
+		static int __pow10[] = {
+			1,				/* 10^0 */
+			10,				/* 10^1 */
+			100,			/* 10^2 */
+			1000,			/* 10^3 */
+			10000,			/* 10^4 */
+			100000,			/* 10^5 */
+			1000000,		/* 10^6 */
+			10000000,		/* 10^7 */
+			100000000,		/* 10^8 */
+			1000000000,		/* 10^9 */
+		};
 		if ((sign & NUMERIC_SIGN_MASK) == NUMERIC_SIGN_MASK)
 			Elog("Decimal128 cannot map NaN, +Inf or -Inf in PostgreSQL Numeric");
-		/* makes integer portion first */
-		for (d=0; d <= weight; d++)
+		/* can reduce some digits pgsql numeric scale is larger than arrow decimal's scale */
+		if (diff >= DEC_DIGITS)
 		{
-			int		dig = (d >= 0 && d < ndigits) ? be16toh(rawdata->digits[d]) : 0;
+			ndigits -= (diff / DEC_DIGITS);
+			diff = (diff % DEC_DIGITS);
+		}
+		assert(diff < DEC_DIGITS);
+		for (int i=0; i < ndigits; i++)
+		{
+			int		dig = be16toh(rawdata->digits[i]);
 			if (dig < 0 || dig >= NBASE)
 				Elog("Numeric digit is corrupted (out of range: %d)", dig);
 			value = NBASE * value + dig;
 		}
-		/* makes floating point portion if any */
-		while (d_scale > 0)
+		/* adjust to the decimal128 */
+		while (diff > 0)
 		{
-			int		dig = (d >= 0 && d < ndigits) ? be16toh(rawdata->digits[d]) : 0;
-			if (dig < 0 || dig >= NBASE)
-				Elog("Numeric digit is corrupted (out of range: %d)", dig);
-			if (d_scale >= DEC_DIGITS)
-				value = NBASE * value + dig;
-			else if (d_scale == 3)
-				value = 1000L * value + dig / 10L;
-			else if (d_scale == 2)
-				value =  100L * value + dig / 100L;
-			else if (d_scale == 1)
-				value =   10L * value + dig / 1000L;
-			else
-				Elog("internal bug");
-			d_scale -= DEC_DIGITS;
-			d++;
+			int		k = Min(9, diff);
+			value /= __pow10[k];
+			diff -= k;
+		}
+		while (diff < 0)
+		{
+			int		k = Min(9, -diff);
+			value *= __pow10[k];
+			diff += k;
 		}
 		/* is it a negative value? */
 		if ((sign & NUMERIC_NEG) != 0)
@@ -755,20 +771,32 @@ public:
 	PGSQL_BINARY_MOVE_VALUE_TEMPLATE(Binary)
 };
 
+/* see array_send() in PostgreSQL */
+typedef struct {
+	int32_t		ndim;
+	int32_t		hasnull;
+	int32_t		element_oid;
+	struct {
+		int32_t	sz;
+		int32_t	lb;
+	} dim[1];
+} __pgsql_array_binary;
+
 class pgsqlListHandler final : public pgsqlBinaryHandler
 {
 	pgsqlHandler	element;
-	Oid				element_type_oid;
+	Oid				element_oid;
 public:
-	pgsqlListHandler(pgsqlHandler __element, Oid __element_type_oid)
+	pgsqlListHandler(pgsqlHandler __element, Oid __element_oid)
 	{
 		element = __element;
-		element_type_oid = __element_type_oid;
+		element_oid = __element_oid;
 	}
 	size_t  chunkSize(void)
 	{
 		auto	builder = std::dynamic_pointer_cast<arrow::ListBuilder>(arrow_builder);
 		size_t  sz = ARROW_ALIGN(sizeof(uint32_t) * (builder->length() + 1));
+
 		if (builder->null_count() > 0)
 			sz += ARROW_ALIGN(BITMAPLEN(builder->length()));
 		return sz + element->chunkSize();
@@ -776,12 +804,84 @@ public:
 	size_t	putValue(const char *addr, int sz)
 	{
 		auto	builder = std::dynamic_pointer_cast<arrow::ListBuilder>(arrow_builder);
-		Elog("not implemented");
+		arrow::Status rv;
+
+		assert(builder != NULL);
+		if (!addr)
+		{
+			rv = builder->AppendNull();
+			if (!rv.ok())
+				Elog("unable to put NULL to '%s' field (List): %s",
+					 attname.c_str(), rv.ToString().c_str());
+		}
+		else
+		{
+			auto   *rawdata = (const __pgsql_array_binary *)addr;
+			int		ndim = be32toh(rawdata->ndim);
+			//bool	hasnull = (be32toh(rawdata->hasnull) != 0);
+			int		nitems;
+			int		elem_sz;
+			const char *pos;
+
+			if (be32toh(rawdata->element_oid) != element_oid)
+				Elog("PostgreSQL array element type mismatch");
+			if (ndim != 1)
+				Elog("pg2arrow supports only 1-dimensional PostgreSQL array (ndim=%d)", ndim);
+			nitems = be32toh(rawdata->dim[0].sz);
+			rv = builder->Append();
+			if (!rv.ok())
+				Elog("unable to put value to '%s' field (List): %s",
+					 attname.c_str(), rv.ToString().c_str());
+			pos = (const char *)&rawdata->dim[ndim];
+			for (int i=0; i < nitems; i++)
+			{
+				if (pos + sizeof(int32_t) > addr + sz)
+					Elog("out of range - binary array has corrupted");
+				elem_sz = be32toh(*((int32_t *)pos));
+				pos += sizeof(int32_t);
+				if (elem_sz < 0)
+					element->putValue(NULL, 0);
+				else
+				{
+					element->putValue(pos, elem_sz);
+					pos += elem_sz;
+				}
+			}
+		}
+		return chunkSize();
 	}
-	size_t	moveValue(pgsqlHandler buddy, int64_t index)
+	size_t	moveValue(pgsqlHandler __buddy, int64_t index)
 	{
 		auto	builder = std::dynamic_pointer_cast<arrow::ListBuilder>(arrow_builder);
-		Elog("not implemented");
+		auto	buddy = std::dynamic_pointer_cast<pgsqlListHandler>(__buddy);
+		auto	array = std::dynamic_pointer_cast<arrow::ListArray>(buddy->arrow_array);
+		arrow::Status rv;
+
+		assert(index < array->length());
+		if (array->IsNull(index))
+		{
+			rv = builder->AppendNull();
+			if (!rv.ok())
+				Elog("unable to put NULL to '%s' field (List): %s",
+					 attname.c_str(), rv.ToString().c_str());
+		}
+		else
+		{
+			int32_t		head = array->value_offset(index);
+			int32_t		tail = array->value_offset(index+1);
+
+			assert(head <= tail);
+			rv = builder->Append();
+			if (!rv.ok())
+				Elog("unable to move value in '%s' field (List): %s",
+					 attname.c_str(), rv.ToString().c_str());
+			for (int32_t curr=head; curr < tail; curr++)
+			{
+				/* move and item from buddy's element to my element */
+				element->moveValue(buddy->element, curr);
+			}
+		}
+		return chunkSize();
 	}
 };
 
@@ -797,6 +897,7 @@ public:
 	{
 		auto	builder = std::dynamic_pointer_cast<arrow::StructBuilder>(arrow_builder);
 		size_t	chunk_sz = 0;
+
 		if (builder->null_count() > 0)
 			chunk_sz += ARROW_ALIGN(BITMAPLEN(builder->length()));
 		for (auto cell = children.begin(); cell != children.end(); cell++)
@@ -806,12 +907,98 @@ public:
 	size_t	putValue(const char *addr, int sz)
 	{
 		auto	builder = std::dynamic_pointer_cast<arrow::StructBuilder>(arrow_builder);
-		Elog("not implemented");
+		const char *pos = addr;
+		arrow::Status rv;
+		int		nvalids;
+
+		/* fillup by NULL */
+		if (!addr)
+		{
+			rv = builder->AppendNull();
+			if (!rv.ok())
+				Elog("unable to put NULL to '%s' field (Struct): %s",
+					 attname.c_str(), rv.ToString().c_str());
+			for (int j=0; j < children.size(); j++)
+				children[j]->putValue(NULL, 0);
+		}
+		else
+		{
+			rv = builder->Append();
+			if (!rv.ok())
+				Elog("unable to put values to '%s' field (Struct): %s",
+					 attname.c_str(), rv.ToString().c_str());
+			if (sz < sizeof(int32_t))
+				Elog("out of range - binary composite has corrupted");
+			nvalids = be32toh(*((int32_t *)pos));
+			pos += sizeof(int32_t);
+			for (int j=0; j < children.size(); j++)
+			{
+				auto	child = children[j];
+
+				if (j >= nvalids)
+					child->putValue(NULL, 0);
+				else if (pos + 2*sizeof(int32_t) >= addr + sz)
+					Elog("out of range - binary composite has corrupted");
+				else
+				{
+					Oid		item_oid = be32toh(((uint32_t *)pos)[0]);
+					int		item_sz  = be32toh(((int32_t *)pos)[1]);
+
+					pos += 2*sizeof(int32_t);
+					if (item_sz < 0)
+						child->putValue(NULL, 0);
+					else if (item_oid == child->type_oid)
+					{
+						child->putValue(pos, item_sz);
+						pos += item_sz;
+					}
+					else
+					{
+						Elog("PostgreSQL composite datum is corrupted (type_oid=%u, not %u)",
+							 item_oid, child->type_oid);
+					}
+				}
+			}
+		}
+		return chunkSize();
 	}
-	size_t	moveValue(pgsqlHandler buddy, int64_t index)
+	size_t	moveValue(pgsqlHandler __buddy, int64_t index)
 	{
 		auto	builder = std::dynamic_pointer_cast<arrow::StructBuilder>(arrow_builder);
-		Elog("not implemented");
+		auto	buddy = std::dynamic_pointer_cast<pgsqlStructHandler>(__buddy);
+		auto	array = std::dynamic_pointer_cast<arrow::StructArray>(buddy->arrow_array);
+		arrow::Status rv;
+
+		assert(index < array->length());
+		assert(children.size() == buddy->children.size());
+		if (array->IsNull(index))
+		{
+			rv = builder->AppendNull();
+			if (!rv.ok())
+				Elog("unable to put NULL to '%s' field (Struct): %s",
+					 attname.c_str(), rv.ToString().c_str());
+			for (int j=0; j < children.size(); j++)
+			{
+				auto	child = children[j];
+
+				child->putValue(NULL, 0);
+			}
+		}
+		else
+		{
+			rv = builder->Append();
+			if (!rv.ok())
+				Elog("unable to put valid-bit to '%s' field (Struct): %s",
+					 attname.c_str(), rv.ToString().c_str());
+			for (int j=0; j < children.size(); j++)
+			{
+				auto	child = children[j];
+				auto	buddy_child = buddy->children[j];
+
+				child->moveValue(buddy_child, index);
+			}
+		}
+		return chunkSize();
 	}
 };
 
@@ -955,7 +1142,7 @@ pgsql_define_arrow_field(arrowField &arrow_field,
 			scale     = (((atttypmod - sizeof(int32_t)) & 0x7ff) ^ 1024) - 1024;
 		}
 		builder = std::make_shared<arrow::Decimal128Builder>
-			(arrow::decimal256(precision, scale), pool);
+			(arrow::decimal128(precision, scale), pool);
 		handler = std::make_shared<pgsqlNumericHandler>();
 	}
 	else if (strcmp(typname, "date") == 0 &&
@@ -1052,6 +1239,11 @@ out:
 	 */
 	handler->attname = std::string(attname);
 	handler->typname = std::string(typname);
+	handler->type_oid = atttypid;
+	handler->type_mod = atttypmod;
+	handler->type_align = attalign;
+	handler->type_byval = (attbyval == 't');
+	handler->type_len = attlen;
 	handler->arrow_builder = builder;
 	handler->arrow_array = nullptr;
 	pgsql_handler = handler;
@@ -1132,7 +1324,7 @@ pgsql_define_arrow_list_field(const char *attname, Oid typelemid)
 	/* setup arrow-builder and pgsql-handler */
 	builder = std::make_shared<arrow::ListBuilder>(arrow::default_memory_pool(),
 												   element_builder,
-												   element_field->type());
+												   arrow::list(element_field->type()));
 	handler = std::make_shared<pgsqlListHandler>(element_handler, typelemid);
 	handler->arrow_builder = builder;
 	return handler;

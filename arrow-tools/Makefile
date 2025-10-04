@@ -68,7 +68,7 @@ TSV2ARROW_LDFLAGS += $(shell pkgconf --libs arrow)
 ARROW2CSV_LDFLAGS += $(shell pkgconf --libs arrow)
 endif
 endif
-CPPFLAGS += -std=c++17 $(CFLAGS)
+CPPFLAGS += -std=c++17 $(CFLAGS) -Wno-sign-compare
 
 PREFIX		?= /usr/local
 BINDIR		?= $(PREFIX)/bin
