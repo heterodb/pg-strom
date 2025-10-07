@@ -453,18 +453,21 @@ public:
 	}
 	C_TYPE updateStats(const C_TYPE &datum)
 	{
-		if (!stats_is_valid)
+		if (this->stats_enabled)
 		{
-			stats_min_value = datum;
-			stats_max_value = datum;
-			stats_is_valid  = true;
-		}
-		else
-		{
-			if (stats_min_value > datum)
+			if (!stats_is_valid)
+			{
 				stats_min_value = datum;
-			if (stats_max_value < datum)
 				stats_max_value = datum;
+				stats_is_valid  = true;
+			}
+			else
+			{
+				if (stats_min_value > datum)
+					stats_min_value = datum;
+				if (stats_max_value < datum)
+					stats_max_value = datum;
+			}
 		}
 		return datum;
 	}
@@ -478,9 +481,9 @@ public:
 
 		if (stats_is_valid)
 		{
-			custom_metadata->Append(std::string("stat_min.") + this->attname,
-									std::to_string(stats_min_value));
-			custom_metadata->Append(std::string("stat_max.") + this->attname,
+			custom_metadata->Append(std::string("min_max_stats.") + this->attname,
+									std::to_string(stats_min_value) +
+									std::string(",") +
 									std::to_string(stats_max_value));
 			stats_is_valid = false;
 		}
@@ -683,18 +686,21 @@ public:
 	}
 	arrow::Decimal128 updateStats(const arrow::Decimal128 &datum)
 	{
-		if (!stats_is_valid)
+		if (stats_enabled)
 		{
-			stats_min_value = datum;
-			stats_max_value = datum;
-			stats_is_valid = true;
-		}
-		else
-		{
-			if (stats_min_value > datum)
+			if (!stats_is_valid)
+			{
 				stats_min_value = datum;
-			if (stats_max_value < datum)
 				stats_max_value = datum;
+				stats_is_valid = true;
+			}
+			else
+			{
+				if (stats_min_value > datum)
+					stats_min_value = datum;
+				if (stats_max_value < datum)
+					stats_max_value = datum;
+			}
 		}
 		return datum;
 	}
@@ -773,9 +779,9 @@ public:
 			auto	builder = std::dynamic_pointer_cast<arrow::Decimal128Builder>(this->arrow_builder);
 			auto	d_type = std::static_pointer_cast<arrow::Decimal128Type>(builder->type());
 			int		scale = d_type->scale();
-			custom_metadata->Append(std::string("stat_min.") + this->attname,
-									this->stats_min_value.ToString(scale));
-			custom_metadata->Append(std::string("stat_max.") + this->attname,
+			custom_metadata->Append(std::string("min_max_stats.") + this->attname,
+									this->stats_min_value.ToString(scale) +
+									std::string(",") +
 									this->stats_max_value.ToString(scale));
 			this->stats_is_valid = false;
         }
@@ -2602,7 +2608,7 @@ static void usage(void)
 		<< "  -q, --parquet         Enables Parquet format.\n"
 		<< "  -o, --output=FILENAME result file in Apache Arrow format\n"
 		<< "                        If not given, pg2arrow creates a temporary file.\n"
-		<< "  -S, --stat[=COLUMNS] embeds min/max statistics for each record batch\n"
+		<< "  -S, --stats[=COLUMNS] embeds min/max statistics for each record batch\n"
 		<< "                        COLUMNS is a comma-separated list of the target\n"
 		<< "                        columns if partially enabled.\n"
 		<< "      --flatten[=COLUMNS]    Enables to expand RECORD values into flatten\n"
@@ -2646,7 +2652,7 @@ parse_options(int argc, char * const argv[])
 		{"parallel-keys",   required_argument, NULL, 'k'},
 		{"parquet",         no_argument,       NULL, 'q'},
 		{"output",          required_argument, NULL, 'o'},
-		{"stat",            required_argument, NULL, 'S'},
+		{"stats",           optional_argument, NULL, 'S'},
 		{"flatten",         optional_argument, NULL, 1002},
 		{"segment-size",    required_argument, NULL, 's'},
 		{"compress",        required_argument, NULL, 'C'},
