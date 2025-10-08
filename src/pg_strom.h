@@ -710,8 +710,6 @@ xpuConnectReceiveCommands(pgsocket sockfd,
 						  void *priv,
 						  const char *error_label);
 extern void		xpuClientCloseSession(XpuConnection *conn);
-extern void		xpuClientSendCommand(XpuConnection *conn, const XpuCommand *xcmd);
-extern void		xpuClientPutResponse(XpuCommand *xcmd);
 extern const XpuCommand *pgstromBuildSessionInfo(pgstromTaskState *pts,
 												 uint32_t join_inner_handle,
 												 TupleDesc tdesc_final);

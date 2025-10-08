@@ -2760,7 +2760,7 @@ pgstromScanChunkGpuCache(pgstromTaskState *pts,
 			gpuCacheInvokeApplyRedo(gc_desc, sync_pos, true);
 		}
 		xcmd = (XpuCommand *)pts->xcmd_buf.data;
-		xcmd->u.task.scan_repeat_id = repeat_id;
+		xcmd->repeat_id = repeat_id;
 		Assert(xcmd->length == pts->xcmd_buf.len);
 		xcmd_iov->iov_base = pts->xcmd_buf.data;
 		xcmd_iov->iov_len  = pts->xcmd_buf.len;
