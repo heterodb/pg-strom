@@ -2633,7 +2633,8 @@ static void usage(void)
 		<< "      --set=NAME:VALUE config option to set before SQL execution\n"
 		<< "  -v, --verbose        shows verbose output\n"
 		<< "      --help           shows this message\n"
-		<< "\n";
+		<< "\n"
+		<< "pg2arrow version " PGSTROM_VERSION " - reports bugs to <pgstrom@heterodb.com>.\n",
 	_exit(0);
 }
 
