@@ -151,19 +151,19 @@ PG-Strom %{version}-%{release} built for PostgreSQL v18, based on %{__githash}
 %prep
 %setup -q -n @@STROM_TARBALL@@
 %if %{__HAS_PG15}
-%{__rm} -rm ../PG15
+%{__rm} -rf ../PG15
 %{__cp} -dpR . ../PG15
 %endif
 %if %{__HAS_PG16}
-%{__rm} -rm ../PG16
+%{__rm} -rf ../PG16
 %{__cp} -dpR . ../PG16
 %endif
 %if %{__HAS_PG17}
-%{__rm} -rm ../PG17
+%{__rm} -rf ../PG17
 %{__cp} -dpR . ../PG17
 %endif
 %if %{__HAS_PG18}
-%{__rm} -rm ../PG18
+%{__rm} -rf ../PG18
 %{__cp} -dpR . ../PG18
 %endif
 
