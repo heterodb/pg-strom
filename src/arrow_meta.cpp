@@ -3062,7 +3062,7 @@ __readParquetFieldMetadata(ArrowField *node,
 		}
 		case arrow::Type::type::TIME32:
 		case arrow::Type::type::TIME64: {
-			const auto tm_type = arrow::internal::checked_pointer_cast<arrow::TimestampType>(__type);
+			const auto tm_type = arrow::internal::checked_pointer_cast<arrow::TimeType>(__type);
 			INIT_ARROW_TYPE_NODE(&node->type, Time);
 			node->type.Time.unit = __transformArrowTimeUnit(tm_type->unit());
 			node->type.Time.bitWidth = (__type->id() == arrow::Type::type::TIME32 ? 32 : 64);
