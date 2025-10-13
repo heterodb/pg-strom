@@ -1118,7 +1118,7 @@ public:
 					Elog("out of range - binary composite has corrupted");
 				else
 				{
-					Oid		item_oid = be32toh(((uint32_t *)pos)[0]);
+					//Oid		item_oid = be32toh(((uint32_t *)pos)[0]);
 					int		item_sz  = be32toh(((int32_t *)pos)[1]);
 
 					pos += 2*sizeof(int32_t);
@@ -1129,12 +1129,13 @@ public:
 						child->putValue(pos, item_sz);
 						pos += item_sz;
 					}
-//FIXME: sub-fields type should be obtained from the results, not schema					
-//					else
-//					{
-//						Elog("PostgreSQL composite datum is corrupted (type_oid=%u, not %u)",
-//							 item_oid, child->type_oid);
-//					}
+					/*
+					 * MEMO: record_send() may use different type to pack
+					 * sub-field values, and often item_oid is not identical
+					 * with the type defined in the system catalog.
+					 * We need further investigation what is the best way
+					 * to map sub-field type into arrow/parquet types.
+					 */
 				}
 			}
 		}
