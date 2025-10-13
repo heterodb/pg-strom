@@ -155,6 +155,7 @@ public:
 	bool			type_byval;
 	int				type_len;
 	bool			stats_enabled;
+	bool			composite_flatten;
 	arrowBuilder	arrow_builder;
 	arrowArray		arrow_array;
 	virtual size_t	chunkSize(void) = 0;
@@ -168,7 +169,13 @@ public:
 	virtual bool	appendStats(std::shared_ptr<arrow::KeyValueMetadata> custom_metadata)
 	{
 		return false;
-	}	
+	}
+	virtual void	appendArrays(arrowArrayVector &arrow_arrays_vector)
+	{
+		if (!arrow_array)
+			Elog("Bug? appendArrays() must be called after Finish()");
+		arrow_arrays_vector.push_back(arrow_array);
+	}
 	virtual int64_t	Finish(void)
 	{
 		auto	rv = arrow_builder->Finish(&arrow_array);
@@ -1117,16 +1124,17 @@ public:
 					pos += 2*sizeof(int32_t);
 					if (item_sz < 0)
 						child->putValue(NULL, 0);
-					else if (item_oid == child->type_oid)
+					else // if (item_oid == child->type_oid)
 					{
 						child->putValue(pos, item_sz);
 						pos += item_sz;
 					}
-					else
-					{
-						Elog("PostgreSQL composite datum is corrupted (type_oid=%u, not %u)",
-							 item_oid, child->type_oid);
-					}
+//FIXME: sub-fields type should be obtained from the results, not schema					
+//					else
+//					{
+//						Elog("PostgreSQL composite datum is corrupted (type_oid=%u, not %u)",
+//							 item_oid, child->type_oid);
+//					}
 				}
 			}
 		}
@@ -1169,6 +1177,21 @@ public:
 			}
 		}
 		return chunkSize();
+	}
+	void	appendArrays(arrowArrayVector &arrow_arrays_vector)
+	{
+		if (!arrow_array)
+			Elog("Bug? appendArrays() must be called after Finish()");
+		if (!composite_flatten)
+			arrow_arrays_vector.push_back(arrow_array);
+		else
+		{
+			auto	comp_array = std::dynamic_pointer_cast<arrow::StructArray>(arrow_array);
+			auto	sub_arrays = comp_array->fields();
+
+			for (int k=0; k < sub_arrays.size(); k++)
+				arrow_arrays_vector.push_back(sub_arrays[k]);
+		}
 	}
 };
 
@@ -1643,6 +1666,65 @@ pgsql_define_arrow_composite_field(const char *attname, Oid comptype_relid)
 }
 
 /*
+ * pullup_composite_subfields
+ */
+static void
+pullup_composite_subfields(arrow::FieldVector &arrow_fields,
+						   pgsqlHandlerVector &pgsql_handlers)
+{
+	arrow::FieldVector flatten_fields;
+
+	assert(arrow_fields.size() == pgsql_handlers.size());
+	for (int j=0; j < arrow_fields.size(); j++)
+	{
+		arrowField	field = arrow_fields[j];
+		auto		d_type = field->type();
+
+		if (d_type->id() != arrow::Type::STRUCT)
+			flatten_fields.push_back(field);
+		else
+		{
+			bool	be_flatten = false;
+
+			if (strcmp(flatten_composite_columns, "*") == 0)
+				be_flatten = true;
+			else
+			{
+				char   *temp = (char *)alloca(strlen(flatten_composite_columns) + 1);
+				char   *tok, *pos;
+
+				strcpy(temp, flatten_composite_columns);
+				for (tok = strtok_r(temp, ",", &pos);
+					 tok != NULL;
+					 tok = strtok_r(NULL, ",", &pos))
+				{
+					tok = __trim(tok);
+					if (field->name() == std::string(tok))
+					{
+						be_flatten = true;
+						break;
+					}
+				}
+			}
+			if (!be_flatten)
+				flatten_fields.push_back(field);
+			else
+			{
+				auto	comp_type = std::dynamic_pointer_cast<arrow::StructType>(d_type);
+
+				for (int k=0; k < comp_type->num_fields(); k++)
+				{
+					auto subfield = comp_type->field(k);
+					flatten_fields.push_back(subfield);
+				}
+				pgsql_handlers[j]->composite_flatten = true;
+			}
+		}
+	}
+	arrow_fields = flatten_fields;
+}
+
+/*
  * pgsql_define_arrow_schema
  */
 static void
@@ -1716,6 +1798,9 @@ pgsql_define_arrow_schema(pgsqlHandlerVector &pgsql_handlers)
 		//TODO: flatten columns
 
 	}
+	/* pull up composite sub-fields to flatten fields */
+	if (flatten_composite_columns)
+		pullup_composite_subfields(arrow_fields, pgsql_handlers);
 	/* enables min/max statistics in arrow */
 	if (!parquet_mode && stat_embedded_columns)
 		arrow_enables_statistics(pgsql_handlers);
@@ -1893,7 +1978,7 @@ pgsql_flush_record_batch(pgsqlHandlerVector &pgsql_handlers)
 			nrows = __nrows;
 		else if (nrows != __nrows)
 			Elog("Bug? number of rows mismatch across the buffers");
-		arrow_arrays.push_back(handler->arrow_array);
+		handler->appendArrays(arrow_arrays);
 		handler->appendStats(custom_metadata);
 	}
 	/* begin critical section */
