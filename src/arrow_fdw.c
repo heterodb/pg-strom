@@ -3165,11 +3165,14 @@ arrowFdwExtractFilesList(List *options_list,
 		}
 		else if (strcmp(defel->defname, "files") == 0)
 		{
-			char   *temp = pstrdup(strVal(defel->arg));
-			char   *saveptr;
-			char   *tok;
+			const char *__files = strVal(defel->arg);
+			char   *temp = (char *)alloca(strlen(__files) + 1);
+			char   *tok, *pos;
 
-			while ((tok = strtok_r(temp, ",", &saveptr)) != NULL)
+			strcpy(temp, __files);
+			for (tok = strtok_r(temp, ",", &pos);
+				 tok != NULL;
+				 tok = strtok_r(NULL, ",", &pos))
 			{
 				tok = __trim(tok);
 
@@ -3179,7 +3182,6 @@ arrowFdwExtractFilesList(List *options_list,
 					elog(ERROR, "arrow_fdw: unable to access '%s': %m", tok);
 				filesList = lappend(filesList, makeString(pstrdup(tok)));
 			}
-			pfree(temp);
 		}
 		else if (strcmp(defel->defname, "dir") == 0)
 		{
