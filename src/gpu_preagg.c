@@ -25,6 +25,7 @@ static bool					pgstrom_enable_gpupreagg = false;
 static bool					pgstrom_enable_partitionwise_gpupreagg = false;
 static bool					pgstrom_enable_numeric_aggfuncs;
 bool						pgstrom_enable_gpusort = false;
+static double				pgstrom_groupby_reduction_factor = 0.7;
 
 /*
  * pgstrom_is_gpupreagg_path
@@ -2171,6 +2172,108 @@ try_add_final_groupby_paths(xpugroupby_build_path_context *con, Path *part_path)
 }
 
 /*
+ * is_arrow_fdw_relation
+ *
+ * Check if the relation is an Arrow/Parquet FDW foreign table
+ */
+static bool
+is_arrow_fdw_relation(PlannerInfo *root, RelOptInfo *rel)
+{
+	RangeTblEntry *rte;
+	ForeignTable *ftable;
+	ForeignServer *fserver;
+	ForeignDataWrapper *fdw;
+	Relation relation;
+	bool result = false;
+
+	/* Must be a base relation */
+	if (rel->reloptkind != RELOPT_BASEREL)
+		return false;
+
+	/* Get the RangeTblEntry from parse tree */
+	if (rel->relid == 0 || rel->relid > list_length(root->parse->rtable))
+		return false;
+
+	rte = list_nth(root->parse->rtable, rel->relid - 1);
+	if (!rte || rte->rtekind != RTE_RELATION)
+		return false;
+
+	/* Must be a foreign table */
+	relation = table_open(rte->relid, NoLock);
+	if (relation->rd_rel->relkind != RELKIND_FOREIGN_TABLE)
+	{
+		table_close(relation, NoLock);
+		return false;
+	}
+	table_close(relation, NoLock);
+
+	/* Get foreign table info */
+	ftable = GetForeignTable(rte->relid);
+	fserver = GetForeignServer(ftable->serverid);
+	fdw = GetForeignDataWrapper(fserver->fdwid);
+
+	/* Check if it's arrow_fdw */
+	result = (strcmp(fdw->fdwname, "arrow_fdw") == 0);
+
+	return result;
+}
+
+/*
+ * apply_num_groups_sqrt_reduction
+ *
+ * Apply square-root based reduction to overestimated num_groups.
+ * PostgreSQL's estimate_num_groups() multiplies n_distinct values for each
+ * GROUP BY column, which causes combinatorial explosion with 3+ columns.
+ *
+ * Formula:
+ *   baseline = max(input_nrows * 0.1, 1000)
+ *   excess = estimated_groups - baseline
+ *   adjusted = baseline + sqrt(excess) * reduction_factor
+ *
+ * Example with factor=0.7:
+ *   estimated=1M, input=1M, baseline=100K
+ *   excess = 900K
+ *   adjusted = 100K + sqrt(900K) * 0.7 = 100K + 664 ≈ 101K
+ */
+static double
+apply_num_groups_sqrt_reduction(double estimated_groups, double input_nrows)
+{
+	double selectivity;
+	double baseline;
+	double excess;
+	double reduced_excess;
+	double adjusted;
+
+	/* Guard against division by zero */
+	if (input_nrows <= 0)
+		return estimated_groups;
+
+	selectivity = estimated_groups / input_nrows;
+
+	/* Only apply if suspiciously high selectivity */
+	if (selectivity <= 0.1 || estimated_groups < 10000.0)
+		return estimated_groups;
+
+	/* Baseline: assume at most 10% of input rows could be distinct groups */
+	baseline = Max(input_nrows * 0.1, 1000.0);
+
+	if (estimated_groups <= baseline)
+		return estimated_groups;
+
+	/* Apply sqrt reduction to the excess */
+	excess = estimated_groups - baseline;
+	reduced_excess = sqrt(excess) * pgstrom_groupby_reduction_factor;
+	adjusted = baseline + reduced_excess;
+
+	elog(DEBUG1, "GpuPreAgg: reduced num_groups from %.0f to %.0f"
+		 " (selectivity=%.2f%%, baseline=%.0f, factor=%.2f)",
+		 estimated_groups, adjusted, selectivity * 100.0,
+		 baseline, pgstrom_groupby_reduction_factor);
+
+	return adjusted;
+}
+
+/*
  * __buildXpuPreAggCustomPath
  */
 static CustomPath *
@@ -2215,33 +2318,61 @@ __buildXpuPreAggCustomPath(xpugroupby_build_path_context *con)
 		pp_info->xpu_task_flags |= (DEVTASK__PREAGG | DEVTASK__PINNED_ROW_RESULTS);
 	pp_info->sibling_param_id = con->sibling_param_id;
 	/* TODO: more precise cost factors */
-	pp_info->final_nrows = con->num_groups;
 
-	/* No tuples shall be generated until child JOIN/SCAN path completion */
-	pp_info->startup_cost = (pp_info->startup_cost +
-							 pp_info->inner_cost +
-							 pp_info->run_cost);
-	/* Cost estimation for grouping */
-	num_group_keys = list_length(parse->groupClause);
-	pp_info->startup_cost += (xpu_operator_cost *
-							  num_group_keys *
-							  input_nrows);
-	/* Cost estimation for aggregate function */
-	pp_info->startup_cost += (target_partial->cost.per_tuple * input_nrows +
-							  target_partial->cost.startup) * xpu_ratio;
-	/* Cost for DMA receive (xPU --> Host) */
-	pp_info->run_cost = (con->target_partial->cost.per_tuple +
-						 xpu_tuple_cost) * con->num_groups / pp_info->parallel_divisor;
-	pp_info->final_cost = 0.0;
+	/* Adjust num_groups if it seems overestimated due to combinatorial explosion.
+	 * Apply square-root based dampening to reduce overestimated group counts.
+	 * Only applies to arrow_fdw/parquet_fdw foreign tables (because ANALYZE
+	 * requires decompression which consumes GPU memory, so we avoid ANALYZE
+	 * and fix the default cardinality estimation instead).
+	 */
+	{
+		double adjusted_num_groups = con->num_groups;
+		RelOptInfo *scan_rel = NULL;
+		bool is_arrow_fdw = false;
 
-	cpath->path.pathtype         = T_CustomScan;
-	cpath->path.parent           = con->input_rel;
-	cpath->path.pathtarget       = con->target_partial;
-	cpath->path.param_info       = con->param_info;
-	cpath->path.parallel_aware   = con->try_parallel;
-	cpath->path.parallel_safe    = con->input_rel->consider_parallel;
-	cpath->path.parallel_workers = pp_info->parallel_nworkers;
-	cpath->path.rows             = con->num_groups;
+		/* Find the base scan relation from pp_info */
+		if (pp_info->scan_relid > 0)
+		{
+			scan_rel = find_base_rel(con->root, pp_info->scan_relid);
+			is_arrow_fdw = is_arrow_fdw_relation(con->root, scan_rel);
+		}
+
+		/* Only apply reduction for arrow_fdw foreign tables */
+		if (is_arrow_fdw)
+		{
+			adjusted_num_groups = apply_num_groups_sqrt_reduction(con->num_groups,
+																  input_nrows);
+		}
+		/* Update context for downstream CPU HashAgg cost estimation */
+		con->num_groups = adjusted_num_groups;
+		pp_info->final_nrows = adjusted_num_groups;
+
+		/* No tuples shall be generated until child JOIN/SCAN path completion */
+		pp_info->startup_cost = (pp_info->startup_cost +
+								 pp_info->inner_cost +
+								 pp_info->run_cost);
+		/* Cost estimation for grouping */
+		num_group_keys = list_length(parse->groupClause);
+		pp_info->startup_cost += (xpu_operator_cost *
+								  num_group_keys *
+								  input_nrows);
+		/* Cost estimation for aggregate function */
+		pp_info->startup_cost += (target_partial->cost.per_tuple * input_nrows +
+								  target_partial->cost.startup) * xpu_ratio;
+		/* Cost for DMA receive (xPU --> Host) */
+		pp_info->run_cost = (con->target_partial->cost.per_tuple +
+							 xpu_tuple_cost) * adjusted_num_groups / pp_info->parallel_divisor;
+		pp_info->final_cost = 0.0;
+
+		cpath->path.pathtype         = T_CustomScan;
+		cpath->path.parent           = con->input_rel;
+		cpath->path.pathtarget       = con->target_partial;
+		cpath->path.param_info       = con->param_info;
+		cpath->path.parallel_aware   = con->try_parallel;
+		cpath->path.parallel_safe    = con->input_rel->consider_parallel;
+		cpath->path.parallel_workers = pp_info->parallel_nworkers;
+		cpath->path.rows             = adjusted_num_groups;
+	}
 	cpath->path.startup_cost     = pp_info->startup_cost;
 	cpath->path.total_cost       = (pp_info->startup_cost +
 									pp_info->run_cost +
@@ -3621,6 +3752,17 @@ pgstrom_init_gpu_preagg(void)
 							 NULL,
 							 &pgstrom_enable_gpusort,
 							 true,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+	/* reduction factor for GROUP BY num_groups adjustment */
+	DefineCustomRealVariable("pg_strom.groupby_reduction_factor",
+							 "Reduction factor for sqrt-based GROUP BY cardinality dampening",
+							 NULL,
+							 &pgstrom_groupby_reduction_factor,
+							 0.7,
+							 0.1,
+							 2.0,
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
