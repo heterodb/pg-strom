@@ -773,7 +773,7 @@ out:
 	xcmd = (XpuCommand *)pts->xcmd_buf.data;
 	xcmd->u.task.kds_src_pathname = kds_src_pathname;
 	xcmd->u.task.kds_src_iovec = kds_src_iovec;
-	xcmd->u.task.scan_repeat_id = scan_repeat_id;
+	xcmd->repeat_id = scan_repeat_id;
 	xcmd->length = pts->xcmd_buf.len;
 
 	xcmd_iov[0].iov_base = xcmd;

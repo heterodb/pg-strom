@@ -20,6 +20,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <arrow/api.h>				/* dnf install arrow-devel, or apt install libarrow-dev */
+#include <arrow/array.h>
 #include <arrow/io/api.h>
 #include <arrow/ipc/api.h>
 #include <arrow/ipc/reader.h>
@@ -37,7 +38,7 @@
 // ------------------------------------------------
 #define Elog(fmt,...)									\
 	do {												\
-		if (verbose > 1)								\
+		if (verbose)									\
 			fprintf(stderr, "[ERROR %s:%d] " fmt "\n",	\
 					__FILE__,__LINE__, ##__VA_ARGS__);	\
 		else											\
@@ -47,7 +48,7 @@
 	} while(0)
 #define Info(fmt,...)									\
 	do {												\
-		if (verbose > 1)								\
+		if (verbose)									\
 			fprintf(stderr, "[INFO %s:%d] " fmt "\n",	\
 					__FILE__,__LINE__, ##__VA_ARGS__);	\
 		else if (verbose > 0)							\
@@ -57,7 +58,7 @@
 
 #define Debug(fmt,...)									\
 	do {												\
-		if (verbose > 1)								\
+		if (verbose)									\
 			fprintf(stderr, "[DEBUG %s:%d] " fmt "\n",	\
 					__FILE__,__LINE__, ##__VA_ARGS__);	\
 	} while(0)
@@ -148,11 +149,33 @@ class pgsqlBinaryHandler
 public:
 	std::string		attname;
 	std::string		typname;
+	Oid				type_oid;
+	int32_t			type_mod;
+	char			type_align;
+	bool			type_byval;
+	int				type_len;
+	bool			stats_enabled;
+	bool			composite_flatten;
 	arrowBuilder	arrow_builder;
 	arrowArray		arrow_array;
 	virtual size_t	chunkSize(void) = 0;
 	virtual size_t	putValue(const char *value, int sz) = 0;
 	virtual size_t	moveValue(pgsqlHandler buddy, int64_t index) = 0;
+	virtual void	enableStats(void)
+	{
+		Info("-S,--stat tried to enable min/max statistics on the field '%s' (%s), but not supported",
+			 attname.c_str(), typname.c_str());
+	}
+	virtual bool	appendStats(std::shared_ptr<arrow::KeyValueMetadata> custom_metadata)
+	{
+		return false;
+	}
+	virtual void	appendArrays(arrowArrayVector &arrow_arrays_vector)
+	{
+		if (!arrow_array)
+			Elog("Bug? appendArrays() must be called after Finish()");
+		arrow_arrays_vector.push_back(arrow_array);
+	}
 	virtual int64_t	Finish(void)
 	{
 		auto	rv = arrow_builder->Finish(&arrow_array);
@@ -314,35 +337,81 @@ __replace_string(std::string &str,
 	}
 }
 
+#include <arrow/array/array_decimal.h>
 // ================================================================
 //
 // Type specific PostgreSQL handlers
 //
 // ================================================================
-class pgsqlBinaryBitmapHandler : public pgsqlBinaryHandler
+template <typename BUILDER_TYPE, typename ARRAY_TYPE, typename C_TYPE>
+class pgsqlBinaryScalarHandler : public pgsqlBinaryHandler
+{
+public:
+	virtual C_TYPE fetchBinary(const char *addr, int sz) = 0;
+	virtual C_TYPE fetchArray(arrowArray __array, int64_t index) = 0;
+	virtual C_TYPE updateStats(const C_TYPE &datum) = 0;
+	size_t	putValue(const char *addr, int sz)
+	{
+		auto	builder = std::dynamic_pointer_cast<BUILDER_TYPE>(this->arrow_builder);
+		arrow::Status rv;
+
+		if (!addr)
+			rv = builder->AppendNull();
+		else
+			rv = builder->Append(updateStats(fetchBinary(addr,sz)));
+		if (!rv.ok())
+			Elog("unable to put value to '%s' field (%s): %s",
+				 attname.c_str(), typname.c_str(), rv.ToString().c_str());
+		return chunkSize();
+	}
+	size_t	moveValue(pgsqlHandler buddy, int64_t index)
+	{
+		auto	builder = std::dynamic_pointer_cast<BUILDER_TYPE>(this->arrow_builder);
+		auto	array = std::dynamic_pointer_cast<ARRAY_TYPE>(buddy->arrow_array);
+		arrow::Status rv;
+
+		assert(index < array->length());
+		if (array->IsNull(index))
+			rv = builder->AppendNull();
+		else
+			rv = builder->Append(updateStats(fetchArray(buddy->arrow_array, index)));
+		if (!rv.ok())
+			Elog("unable to put value to '%s' field (%s): %s",
+				 attname.c_str(), typname.c_str(), rv.ToString().c_str());
+		return chunkSize();
+	}
+};
+
+template <typename BUILDER_TYPE, typename ARRAY_TYPE, typename C_TYPE>
+class __pgsqlBinaryBitmapHandler : public pgsqlBinaryScalarHandler<BUILDER_TYPE,ARRAY_TYPE,C_TYPE>
 {
 public:
 	size_t	chunkSize(void)
 	{
-		size_t	sz = ARROW_ALIGN(BITMAPLEN(arrow_builder->length()));
-		if (arrow_builder->null_count() > 0)
-			sz += ARROW_ALIGN(BITMAPLEN(arrow_builder->length()));
+		size_t	sz = ARROW_ALIGN(BITMAPLEN(this->arrow_builder->length()));
+		if (this->arrow_builder->null_count() > 0)
+			sz += ARROW_ALIGN(BITMAPLEN(this->arrow_builder->length()));
 		return sz;
 	}
 };
+#define pgsqlBinaryBitmapHandler(TYPE_PREFIX,C_TYPE)				\
+	__pgsqlBinaryBitmapHandler<arrow::TYPE_PREFIX##Builder,arrow::TYPE_PREFIX##Array,C_TYPE>
 
-class pgsqlBinaryInlineHandler : public pgsqlBinaryHandler
+template <typename BUILDER_TYPE, typename ARRAY_TYPE, typename C_TYPE>
+class __pgsqlBinaryInlineHandler : public pgsqlBinaryScalarHandler<BUILDER_TYPE,ARRAY_TYPE,C_TYPE>
 {
 public:
 	size_t	unitsz;
 	size_t	chunkSize(void)
 	{
-		size_t	sz = ARROW_ALIGN(unitsz * arrow_builder->length());
-		if (arrow_builder->null_count() > 0)
-			sz += ARROW_ALIGN(BITMAPLEN(arrow_builder->length()));
+		size_t	sz = ARROW_ALIGN(unitsz * this->arrow_builder->length());
+		if (this->arrow_builder->null_count() > 0)
+			sz += ARROW_ALIGN(BITMAPLEN(this->arrow_builder->length()));
 		return sz;
 	}
 };
+#define pgsqlBinaryInlineHandler(TYPE_PREFIX,C_TYPE)				\
+	__pgsqlBinaryInlineHandler<arrow::TYPE_PREFIX##Builder,arrow::TYPE_PREFIX##Array,C_TYPE>
 
 class pgsqlBinaryVarlenaHandler : public pgsqlBinaryHandler
 {
@@ -371,6 +440,65 @@ public:
 		return sz;
 	}
 };
+
+template <typename BUILDER_TYPE, typename ARRAY_TYPE, typename C_TYPE>
+class __pgsqlBinarySimpleInlineHandler : public __pgsqlBinaryInlineHandler<BUILDER_TYPE,ARRAY_TYPE,C_TYPE>
+{
+public:
+	bool	stats_is_valid;
+	C_TYPE	stats_min_value;
+	C_TYPE	stats_max_value;
+	__pgsqlBinarySimpleInlineHandler()
+	{
+		stats_is_valid = false;
+	}
+	C_TYPE fetchArray(arrowArray __array, int64_t index)
+	{
+		auto	array = std::dynamic_pointer_cast<ARRAY_TYPE>(__array);
+
+		return array->Value(index);
+	}
+	C_TYPE updateStats(const C_TYPE &datum)
+	{
+		if (this->stats_enabled)
+		{
+			if (!stats_is_valid)
+			{
+				stats_min_value = datum;
+				stats_max_value = datum;
+				stats_is_valid  = true;
+			}
+			else
+			{
+				if (stats_min_value > datum)
+					stats_min_value = datum;
+				if (stats_max_value < datum)
+					stats_max_value = datum;
+			}
+		}
+		return datum;
+	}
+	void	enableStats(void)
+	{
+		this->stats_enabled = true;
+	}
+	bool	appendStats(std::shared_ptr<arrow::KeyValueMetadata> custom_metadata)
+	{
+		bool	retval = stats_is_valid;
+
+		if (stats_is_valid)
+		{
+			custom_metadata->Append(std::string("min_max_stats.") + this->attname,
+									std::to_string(stats_min_value) +
+									std::string(",") +
+									std::to_string(stats_max_value));
+			stats_is_valid = false;
+		}
+		return retval;
+	}
+};
+#define pgsqlBinarySimpleInlineHandler(TYPE_PREFIX,C_TYPE)				\
+	__pgsqlBinarySimpleInlineHandler<arrow::TYPE_PREFIX##Builder,arrow::TYPE_PREFIX##Array,C_TYPE>
 
 #define PGSQL_BINARY_PUT_VALUE_TEMPLATE(TYPE_PREFIX)					\
 	size_t	putValue(const char *addr, int sz)							\
@@ -405,19 +533,27 @@ public:
 		return chunkSize();												\
 	}
 
-class pgsqlBoolHandler final : public pgsqlBinaryBitmapHandler
+class pgsqlBoolHandler final : public pgsqlBinaryBitmapHandler(Boolean,bool)
 {
 public:
+	bool	updateStats(const bool &datum)
+	{
+		return datum;
+	}
 	bool	fetchBinary(const char *addr, int sz)
 	{
 		assert(sz == sizeof(char));
 		return *addr ? true : false;
 	}
-	PGSQL_BINARY_PUT_VALUE_TEMPLATE(Boolean)
-	PGSQL_BINARY_MOVE_VALUE_TEMPLATE(Boolean)
+	bool	fetchArray(arrowArray __array, int64_t index)
+	{
+		auto	array = std::dynamic_pointer_cast<arrow::BooleanArray>(__array);
+
+		return array->Value(index);
+	}
 };
 
-class pgsqlInt8Handler final : public pgsqlBinaryInlineHandler
+class pgsqlInt8Handler final : public pgsqlBinarySimpleInlineHandler(Int8,int8_t)
 {
 public:
 	pgsqlInt8Handler()
@@ -429,11 +565,9 @@ public:
 		assert(sz == sizeof(int8_t));
 		return *((const int8_t *)addr);
 	}
-	PGSQL_BINARY_PUT_VALUE_TEMPLATE(Int8)
-	PGSQL_BINARY_MOVE_VALUE_TEMPLATE(Int8)
 };
 
-class pgsqlInt16Handler final : public pgsqlBinaryInlineHandler
+class pgsqlInt16Handler final : public pgsqlBinarySimpleInlineHandler(Int16,int16_t)
 {
 public:
 	pgsqlInt16Handler()
@@ -445,11 +579,9 @@ public:
 		assert(sz == sizeof(int16_t));
 		return be16toh(*((const int16_t *)addr));
 	}
-	PGSQL_BINARY_PUT_VALUE_TEMPLATE(Int16)
-	PGSQL_BINARY_MOVE_VALUE_TEMPLATE(Int16)
 };
 
-class pgsqlInt32Handler final : public pgsqlBinaryInlineHandler
+class pgsqlInt32Handler final : public pgsqlBinarySimpleInlineHandler(Int32,int32_t)
 {
 public:
 	pgsqlInt32Handler()
@@ -461,11 +593,9 @@ public:
 		assert(sz == sizeof(int32_t));
 		return be32toh(*((const int32_t *)addr));
 	}
-	PGSQL_BINARY_PUT_VALUE_TEMPLATE(Int32)
-	PGSQL_BINARY_MOVE_VALUE_TEMPLATE(Int32)
 };
 
-class pgsqlInt64Handler final : public pgsqlBinaryInlineHandler
+class pgsqlInt64Handler final : public pgsqlBinarySimpleInlineHandler(Int64,int64_t)
 {
 public:
 	pgsqlInt64Handler()
@@ -477,11 +607,9 @@ public:
 		assert(sz == sizeof(int64_t));
 		return be64toh(*((const int64_t *)addr));
 	}
-	PGSQL_BINARY_PUT_VALUE_TEMPLATE(Int64)
-	PGSQL_BINARY_MOVE_VALUE_TEMPLATE(Int64)
 };
 
-class pgsqlFloat16Handler final : public pgsqlBinaryInlineHandler
+class pgsqlFloat16Handler final : public pgsqlBinarySimpleInlineHandler(HalfFloat,uint16_t)
 {
 public:
 	pgsqlFloat16Handler()
@@ -493,11 +621,9 @@ public:
 		assert(sz == sizeof(uint16_t));
 		return be16toh(*((const uint16_t *)addr));
 	}
-	PGSQL_BINARY_PUT_VALUE_TEMPLATE(HalfFloat)
-	PGSQL_BINARY_MOVE_VALUE_TEMPLATE(HalfFloat)
 };
 
-class pgsqlFloat32Handler final : public pgsqlBinaryInlineHandler
+class pgsqlFloat32Handler final : public pgsqlBinarySimpleInlineHandler(Float,float)
 {
 public:
 	pgsqlFloat32Handler()
@@ -513,11 +639,9 @@ public:
 		u.ival = be32toh(*((const uint32_t *)addr));
 		return u.fval;
 	}
-	PGSQL_BINARY_PUT_VALUE_TEMPLATE(Float)
-	PGSQL_BINARY_MOVE_VALUE_TEMPLATE(Float)
 };
 
-class pgsqlFloat64Handler final : public pgsqlBinaryInlineHandler
+class pgsqlFloat64Handler final : public pgsqlBinarySimpleInlineHandler(Double,double)
 {
 public:
 	pgsqlFloat64Handler()
@@ -533,8 +657,6 @@ public:
 		u.ival = be64toh(*((const uint64_t *)addr));
 		return u.fval;
 	}
-	PGSQL_BINARY_PUT_VALUE_TEMPLATE(Double)
-	PGSQL_BINARY_MOVE_VALUE_TEMPLATE(Double)
 };
 
 /* parameters of Numeric type */
@@ -558,68 +680,127 @@ typedef struct
 	int16_t		digits[1];	/* numeric digists */
 } __pgsql_numeric_binary;
 
-class pgsqlNumericHandler final : public pgsqlBinaryInlineHandler
+class pgsqlNumericHandler final : public pgsqlBinaryInlineHandler(Decimal128,arrow::Decimal128)
 {
 public:
+	bool	stats_is_valid;
+	arrow::Decimal128	stats_min_value;
+	arrow::Decimal128	stats_max_value;
 	pgsqlNumericHandler()
 	{
+		stats_is_valid = false;
 		unitsz = sizeof(__int128_t);
+	}
+	arrow::Decimal128 updateStats(const arrow::Decimal128 &datum)
+	{
+		if (stats_enabled)
+		{
+			if (!stats_is_valid)
+			{
+				stats_min_value = datum;
+				stats_max_value = datum;
+				stats_is_valid = true;
+			}
+			else
+			{
+				if (stats_min_value > datum)
+					stats_min_value = datum;
+				if (stats_max_value < datum)
+					stats_max_value = datum;
+			}
+		}
+		return datum;
 	}
 	arrow::Decimal128 fetchBinary(const char *addr, int sz)
 	{
 		auto	rawdata = (const __pgsql_numeric_binary *)addr;
 		auto	builder = std::dynamic_pointer_cast<arrow::Decimal128Builder>(arrow_builder);
 		auto	d_type = std::static_pointer_cast<arrow::Decimal128Type>(builder->type());
-		int32_t	d_scale = d_type->scale();
-		int		ndigits = be16toh(rawdata->ndigits);
-		int		weight = be16toh(rawdata->weight);
-		int		sign = be16toh(rawdata->sign);
-		int		d;
+		int		d_scale = d_type->scale();
+		int		ndigits = (int16_t)be16toh(rawdata->ndigits);
+		int		weight = (int16_t)be16toh(rawdata->weight) + 1;
+		int		sign = (int16_t)be16toh(rawdata->sign);
+		int		diff = DEC_DIGITS * (ndigits - weight) - d_scale;
 		arrow::Decimal128 value(0);
-
+		static int __pow10[] = {
+			1,				/* 10^0 */
+			10,				/* 10^1 */
+			100,			/* 10^2 */
+			1000,			/* 10^3 */
+			10000,			/* 10^4 */
+			100000,			/* 10^5 */
+			1000000,		/* 10^6 */
+			10000000,		/* 10^7 */
+			100000000,		/* 10^8 */
+			1000000000,		/* 10^9 */
+		};
 		if ((sign & NUMERIC_SIGN_MASK) == NUMERIC_SIGN_MASK)
 			Elog("Decimal128 cannot map NaN, +Inf or -Inf in PostgreSQL Numeric");
-		/* makes integer portion first */
-		for (d=0; d <= weight; d++)
+		/* can reduce some digits pgsql numeric scale is larger than arrow decimal's scale */
+		if (diff >= DEC_DIGITS)
 		{
-			int		dig = (d >= 0 && d < ndigits) ? be16toh(rawdata->digits[d]) : 0;
+			ndigits -= (diff / DEC_DIGITS);
+			diff = (diff % DEC_DIGITS);
+		}
+		assert(diff < DEC_DIGITS);
+		for (int i=0; i < ndigits; i++)
+		{
+			int		dig = be16toh(rawdata->digits[i]);
 			if (dig < 0 || dig >= NBASE)
 				Elog("Numeric digit is corrupted (out of range: %d)", dig);
 			value = NBASE * value + dig;
 		}
-		/* makes floating point portion if any */
-		while (d_scale > 0)
+		/* adjust to the decimal128 */
+		while (diff > 0)
 		{
-			int		dig = (d >= 0 && d < ndigits) ? be16toh(rawdata->digits[d]) : 0;
-			if (dig < 0 || dig >= NBASE)
-				Elog("Numeric digit is corrupted (out of range: %d)", dig);
-			if (d_scale >= DEC_DIGITS)
-				value = NBASE * value + dig;
-			else if (d_scale == 3)
-				value = 1000L * value + dig / 10L;
-			else if (d_scale == 2)
-				value =  100L * value + dig / 100L;
-			else if (d_scale == 1)
-				value =   10L * value + dig / 1000L;
-			else
-				Elog("internal bug");
-			d_scale -= DEC_DIGITS;
-			d++;
+			int		k = Min(9, diff);
+			value /= __pow10[k];
+			diff -= k;
+		}
+		while (diff < 0)
+		{
+			int		k = Min(9, -diff);
+			value *= __pow10[k];
+			diff += k;
 		}
 		/* is it a negative value? */
 		if ((sign & NUMERIC_NEG) != 0)
 			value = -value;
 		return value;
 	}
-	PGSQL_BINARY_PUT_VALUE_TEMPLATE(Decimal128)
-    PGSQL_BINARY_MOVE_VALUE_TEMPLATE(Decimal128)
+	arrow::Decimal128 fetchArray(arrowArray array, int64_t index)
+	{
+		arrow::Decimal128 hoge(123);
+		return hoge;
+	}
+	void enableStats(void)
+    {
+		this->stats_enabled = true;
+    }
+    bool appendStats(std::shared_ptr<arrow::KeyValueMetadata> custom_metadata)
+    {
+		bool  retval = this->stats_is_valid;
+
+		if (this->stats_enabled && this->stats_is_valid)
+		{
+			auto	builder = std::dynamic_pointer_cast<arrow::Decimal128Builder>(this->arrow_builder);
+			auto	d_type = std::static_pointer_cast<arrow::Decimal128Type>(builder->type());
+			int		scale = d_type->scale();
+			custom_metadata->Append(std::string("min_max_stats.") + this->attname,
+									this->stats_min_value.ToString(scale) +
+									std::string(",") +
+									this->stats_max_value.ToString(scale));
+			this->stats_is_valid = false;
+        }
+        return retval;
+    }
 };
 
 #define UNIX_EPOCH_JDATE		2440588UL	/* 1970-01-01 */
 #define POSTGRES_EPOCH_JDATE	2451545UL	/* 2000-01-01 */
 #define USECS_PER_DAY			86400000000UL
 
-class pgsqlDateHandler final : public pgsqlBinaryInlineHandler
+class pgsqlDateHandler final : public pgsqlBinarySimpleInlineHandler(Date32,int32_t)
 {
 public:
 	pgsqlDateHandler()
@@ -636,11 +817,9 @@ public:
 		value = be32toh(*((const uint32_t *)addr));
 		return value + (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE);
 	}
-	PGSQL_BINARY_PUT_VALUE_TEMPLATE(Date32)
-	PGSQL_BINARY_MOVE_VALUE_TEMPLATE(Date32)
 };
 
-class pgsqlTimeHandler final : public pgsqlBinaryInlineHandler
+class pgsqlTimeHandler final : public pgsqlBinarySimpleInlineHandler(Time64,int64_t)
 {
 public:
 	pgsqlTimeHandler()
@@ -657,11 +836,9 @@ public:
 		value = be64toh(*((const uint64_t *)addr));
 		return value;
 	}
-	PGSQL_BINARY_PUT_VALUE_TEMPLATE(Time64)
-	PGSQL_BINARY_MOVE_VALUE_TEMPLATE(Time64)
 };
 
-class pgsqlTimestampHandler final : public pgsqlBinaryInlineHandler
+class pgsqlTimestampHandler final : public pgsqlBinarySimpleInlineHandler(Timestamp,int64_t)
 {
 public:
 	pgsqlTimestampHandler()
@@ -679,8 +856,6 @@ public:
 		return value + (POSTGRES_EPOCH_JDATE -
 						UNIX_EPOCH_JDATE) * USECS_PER_DAY;
 	}
-	PGSQL_BINARY_PUT_VALUE_TEMPLATE(Timestamp)
-	PGSQL_BINARY_MOVE_VALUE_TEMPLATE(Timestamp)
 };
 
 typedef struct
@@ -690,12 +865,17 @@ typedef struct
 	int32_t		months;
 } __pgsql_interval_binary;
 
-class pgsqlIntervalHandler final : public pgsqlBinaryInlineHandler
+class pgsqlIntervalHandler final : public pgsqlBinaryInlineHandler(MonthDayNanoInterval,
+																   arrow::MonthDayNanoIntervalType::MonthDayNanos)
 {
 public:
 	pgsqlIntervalHandler()
 	{
 		unitsz = sizeof(arrow::MonthDayNanoIntervalType::MonthDayNanos);
+	}
+	arrow::MonthDayNanoIntervalType::MonthDayNanos updateStats(const arrow::MonthDayNanoIntervalType::MonthDayNanos &datum)
+	{
+		return datum;
 	}
 	arrow::MonthDayNanoIntervalType::MonthDayNanos fetchBinary(const char *addr, int sz)
 	{
@@ -707,8 +887,12 @@ public:
 		iv.nanoseconds = be64toh(rawdata->time) * 1000L;
 		return iv;
 	}
-	PGSQL_BINARY_PUT_VALUE_TEMPLATE(MonthDayNanoInterval)
-	PGSQL_BINARY_MOVE_VALUE_TEMPLATE(MonthDayNanoInterval)
+	arrow::MonthDayNanoIntervalType::MonthDayNanos fetchArray(arrowArray __array, int64_t index)
+	{
+		auto	array = std::dynamic_pointer_cast<arrow::MonthDayNanoIntervalArray>(__array);
+
+		return array->Value(index);
+	}
 };
 
 class pgsqlTextHandler final : public pgsqlBinaryVarlenaHandler
@@ -722,14 +906,18 @@ public:
 	PGSQL_BINARY_MOVE_VALUE_TEMPLATE(String)
 };
 
-class pgsqlBpCharHandler final : public pgsqlBinaryInlineHandler
+class pgsqlBpCharHandler final : public pgsqlBinaryInlineHandler(FixedSizeBinary,std::string)
 {
 public:
 	pgsqlBpCharHandler(size_t width)
 	{
 		unitsz = width;
 	}
-	std::string fetchBinary(const char *addr, size_t sz)
+	std::string updateStats(const std::string &datum)
+	{
+		return datum;
+	}
+	std::string fetchBinary(const char *addr, int sz)
 	{
 		auto	buf = std::string(addr, Min(sz, unitsz));
 
@@ -740,8 +928,13 @@ public:
 		}
 		return buf;
 	}
-	PGSQL_BINARY_PUT_VALUE_TEMPLATE(FixedSizeBinary)
-	PGSQL_BINARY_MOVE_VALUE_TEMPLATE(FixedSizeBinary)
+	std::string	fetchArray(arrowArray __array, int64_t index)
+	{
+		auto	array = std::dynamic_pointer_cast<arrow::FixedSizeBinaryArray>(__array);
+		const char *addr = (const char *)array->Value(index);
+
+		return std::string(addr, unitsz);
+	}
 };
 
 class pgsqlByteaHandler final : public pgsqlBinaryVarlenaHandler
@@ -755,20 +948,32 @@ public:
 	PGSQL_BINARY_MOVE_VALUE_TEMPLATE(Binary)
 };
 
+/* see array_send() in PostgreSQL */
+typedef struct {
+	int32_t		ndim;
+	int32_t		hasnull;
+	int32_t		element_oid;
+	struct {
+		int32_t	sz;
+		int32_t	lb;
+	} dim[1];
+} __pgsql_array_binary;
+
 class pgsqlListHandler final : public pgsqlBinaryHandler
 {
 	pgsqlHandler	element;
-	Oid				element_type_oid;
+	Oid				element_oid;
 public:
-	pgsqlListHandler(pgsqlHandler __element, Oid __element_type_oid)
+	pgsqlListHandler(pgsqlHandler __element, Oid __element_oid)
 	{
 		element = __element;
-		element_type_oid = __element_type_oid;
+		element_oid = __element_oid;
 	}
 	size_t  chunkSize(void)
 	{
 		auto	builder = std::dynamic_pointer_cast<arrow::ListBuilder>(arrow_builder);
 		size_t  sz = ARROW_ALIGN(sizeof(uint32_t) * (builder->length() + 1));
+
 		if (builder->null_count() > 0)
 			sz += ARROW_ALIGN(BITMAPLEN(builder->length()));
 		return sz + element->chunkSize();
@@ -776,12 +981,84 @@ public:
 	size_t	putValue(const char *addr, int sz)
 	{
 		auto	builder = std::dynamic_pointer_cast<arrow::ListBuilder>(arrow_builder);
-		Elog("not implemented");
+		arrow::Status rv;
+
+		assert(builder != NULL);
+		if (!addr)
+		{
+			rv = builder->AppendNull();
+			if (!rv.ok())
+				Elog("unable to put NULL to '%s' field (List): %s",
+					 attname.c_str(), rv.ToString().c_str());
+		}
+		else
+		{
+			auto   *rawdata = (const __pgsql_array_binary *)addr;
+			int		ndim = be32toh(rawdata->ndim);
+			//bool	hasnull = (be32toh(rawdata->hasnull) != 0);
+			int		nitems;
+			int		elem_sz;
+			const char *pos;
+
+			if (be32toh(rawdata->element_oid) != element_oid)
+				Elog("PostgreSQL array element type mismatch");
+			if (ndim != 1)
+				Elog("pg2arrow supports only 1-dimensional PostgreSQL array (ndim=%d)", ndim);
+			nitems = be32toh(rawdata->dim[0].sz);
+			rv = builder->Append();
+			if (!rv.ok())
+				Elog("unable to put value to '%s' field (List): %s",
+					 attname.c_str(), rv.ToString().c_str());
+			pos = (const char *)&rawdata->dim[ndim];
+			for (int i=0; i < nitems; i++)
+			{
+				if (pos + sizeof(int32_t) > addr + sz)
+					Elog("out of range - binary array has corrupted");
+				elem_sz = be32toh(*((int32_t *)pos));
+				pos += sizeof(int32_t);
+				if (elem_sz < 0)
+					element->putValue(NULL, 0);
+				else
+				{
+					element->putValue(pos, elem_sz);
+					pos += elem_sz;
+				}
+			}
+		}
+		return chunkSize();
 	}
-	size_t	moveValue(pgsqlHandler buddy, int64_t index)
+	size_t	moveValue(pgsqlHandler __buddy, int64_t index)
 	{
 		auto	builder = std::dynamic_pointer_cast<arrow::ListBuilder>(arrow_builder);
-		Elog("not implemented");
+		auto	buddy = std::dynamic_pointer_cast<pgsqlListHandler>(__buddy);
+		auto	array = std::dynamic_pointer_cast<arrow::ListArray>(buddy->arrow_array);
+		arrow::Status rv;
+
+		assert(index < array->length());
+		if (array->IsNull(index))
+		{
+			rv = builder->AppendNull();
+			if (!rv.ok())
+				Elog("unable to put NULL to '%s' field (List): %s",
+					 attname.c_str(), rv.ToString().c_str());
+		}
+		else
+		{
+			int32_t		head = array->value_offset(index);
+			int32_t		tail = array->value_offset(index+1);
+
+			assert(head <= tail);
+			rv = builder->Append();
+			if (!rv.ok())
+				Elog("unable to move value in '%s' field (List): %s",
+					 attname.c_str(), rv.ToString().c_str());
+			for (int32_t curr=head; curr < tail; curr++)
+			{
+				/* move and item from buddy's element to my element */
+				element->moveValue(buddy->element, curr);
+			}
+		}
+		return chunkSize();
 	}
 };
 
@@ -797,6 +1074,7 @@ public:
 	{
 		auto	builder = std::dynamic_pointer_cast<arrow::StructBuilder>(arrow_builder);
 		size_t	chunk_sz = 0;
+
 		if (builder->null_count() > 0)
 			chunk_sz += ARROW_ALIGN(BITMAPLEN(builder->length()));
 		for (auto cell = children.begin(); cell != children.end(); cell++)
@@ -806,15 +1084,167 @@ public:
 	size_t	putValue(const char *addr, int sz)
 	{
 		auto	builder = std::dynamic_pointer_cast<arrow::StructBuilder>(arrow_builder);
-		Elog("not implemented");
+		const char *pos = addr;
+		arrow::Status rv;
+		int		nvalids;
+
+		/* fillup by NULL */
+		if (!addr)
+		{
+			rv = builder->AppendNull();
+			if (!rv.ok())
+				Elog("unable to put NULL to '%s' field (Struct): %s",
+					 attname.c_str(), rv.ToString().c_str());
+			for (int j=0; j < children.size(); j++)
+				children[j]->putValue(NULL, 0);
+		}
+		else
+		{
+			rv = builder->Append();
+			if (!rv.ok())
+				Elog("unable to put values to '%s' field (Struct): %s",
+					 attname.c_str(), rv.ToString().c_str());
+			if (sz < sizeof(int32_t))
+				Elog("out of range - binary composite has corrupted");
+			nvalids = be32toh(*((int32_t *)pos));
+			pos += sizeof(int32_t);
+			for (int j=0; j < children.size(); j++)
+			{
+				auto	child = children[j];
+
+				if (j >= nvalids)
+					child->putValue(NULL, 0);
+				else if (pos + 2*sizeof(int32_t) >= addr + sz)
+					Elog("out of range - binary composite has corrupted");
+				else
+				{
+					//Oid		item_oid = be32toh(((uint32_t *)pos)[0]);
+					int		item_sz  = be32toh(((int32_t *)pos)[1]);
+
+					pos += 2*sizeof(int32_t);
+					if (item_sz < 0)
+						child->putValue(NULL, 0);
+					else // if (item_oid == child->type_oid)
+					{
+						child->putValue(pos, item_sz);
+						pos += item_sz;
+					}
+					/*
+					 * MEMO: record_send() may use different type to pack
+					 * sub-field values, and often item_oid is not identical
+					 * with the type defined in the system catalog.
+					 * We need further investigation what is the best way
+					 * to map sub-field type into arrow/parquet types.
+					 */
+				}
+			}
+		}
+		return chunkSize();
 	}
-	size_t	moveValue(pgsqlHandler buddy, int64_t index)
+	size_t	moveValue(pgsqlHandler __buddy, int64_t index)
 	{
 		auto	builder = std::dynamic_pointer_cast<arrow::StructBuilder>(arrow_builder);
-		Elog("not implemented");
+		auto	buddy = std::dynamic_pointer_cast<pgsqlStructHandler>(__buddy);
+		auto	array = std::dynamic_pointer_cast<arrow::StructArray>(buddy->arrow_array);
+		arrow::Status rv;
+
+		assert(index < array->length());
+		assert(children.size() == buddy->children.size());
+		if (array->IsNull(index))
+		{
+			rv = builder->AppendNull();
+			if (!rv.ok())
+				Elog("unable to put NULL to '%s' field (Struct): %s",
+					 attname.c_str(), rv.ToString().c_str());
+			for (int j=0; j < children.size(); j++)
+			{
+				auto	child = children[j];
+
+				child->putValue(NULL, 0);
+			}
+		}
+		else
+		{
+			rv = builder->Append();
+			if (!rv.ok())
+				Elog("unable to put valid-bit to '%s' field (Struct): %s",
+					 attname.c_str(), rv.ToString().c_str());
+			for (int j=0; j < children.size(); j++)
+			{
+				auto	child = children[j];
+				auto	buddy_child = buddy->children[j];
+
+				child->moveValue(buddy_child, index);
+			}
+		}
+		return chunkSize();
+	}
+	void	appendArrays(arrowArrayVector &arrow_arrays_vector)
+	{
+		if (!arrow_array)
+			Elog("Bug? appendArrays() must be called after Finish()");
+		if (!composite_flatten)
+			arrow_arrays_vector.push_back(arrow_array);
+		else
+		{
+			auto	comp_array = std::dynamic_pointer_cast<arrow::StructArray>(arrow_array);
+			auto	sub_arrays = comp_array->fields();
+
+			for (int k=0; k < sub_arrays.size(); k++)
+				arrow_arrays_vector.push_back(sub_arrays[k]);
+		}
 	}
 };
 
+// ----------------------------------------------------------------
+//
+// Embedding the Statistics (Arrow)
+//
+// ----------------------------------------------------------------
+static void
+arrow_enables_statistics(pgsqlHandlerVector &pgsql_handlers)
+{
+	if (strcmp(stat_embedded_columns, "*") == 0)
+	{
+		for (int j=0; j < pgsql_handlers.size(); j++)
+			pgsql_handlers[j]->enableStats();
+	}
+	else
+	{
+		char   *temp = (char *)alloca(strlen(stat_embedded_columns) + 1);
+		char   *tok, *pos;
+
+		strcpy(temp, stat_embedded_columns);
+		for (tok = strtok_r(temp, ",", &pos);
+			 tok != NULL;
+			 tok = strtok_r(NULL, ",", &pos))
+		{
+			auto    cname = std::string(__trim(tok));
+			bool    found = false;
+
+			for (int j=0; j < pgsql_handlers.size(); j++)
+			{
+				auto    handler = pgsql_handlers[j];
+
+				if (handler->attname == cname)
+				{
+					handler->enableStats();
+					found = true;
+					break;
+				}
+			}
+			if (!found)
+				Info("-S,--stat tried to enable min/max statistics on '%s' but not found, skipped",
+					 cname.c_str());
+		}
+	}
+}
+
+// ----------------------------------------------------------------
+//
+// Construction of Schema Definition
+//
+// ----------------------------------------------------------------
 #define WITH_RECURSIVE_PG_BASE_TYPE							\
 	"WITH RECURSIVE pg_base_type AS ("						\
 	"  SELECT 0 depth, oid type_id, oid base_id,"			\
@@ -955,7 +1385,7 @@ pgsql_define_arrow_field(arrowField &arrow_field,
 			scale     = (((atttypmod - sizeof(int32_t)) & 0x7ff) ^ 1024) - 1024;
 		}
 		builder = std::make_shared<arrow::Decimal128Builder>
-			(arrow::decimal256(precision, scale), pool);
+			(arrow::decimal128(precision, scale), pool);
 		handler = std::make_shared<pgsqlNumericHandler>();
 	}
 	else if (strcmp(typname, "date") == 0 &&
@@ -1052,6 +1482,12 @@ out:
 	 */
 	handler->attname = std::string(attname);
 	handler->typname = std::string(typname);
+	handler->type_oid = atttypid;
+	handler->type_mod = atttypmod;
+	handler->type_align = attalign;
+	handler->type_byval = (attbyval == 't');
+	handler->type_len = attlen;
+	handler->stats_enabled = false;
 	handler->arrow_builder = builder;
 	handler->arrow_array = nullptr;
 	pgsql_handler = handler;
@@ -1132,7 +1568,7 @@ pgsql_define_arrow_list_field(const char *attname, Oid typelemid)
 	/* setup arrow-builder and pgsql-handler */
 	builder = std::make_shared<arrow::ListBuilder>(arrow::default_memory_pool(),
 												   element_builder,
-												   element_field->type());
+												   arrow::list(element_field->type()));
 	handler = std::make_shared<pgsqlListHandler>(element_handler, typelemid);
 	handler->arrow_builder = builder;
 	return handler;
@@ -1231,6 +1667,65 @@ pgsql_define_arrow_composite_field(const char *attname, Oid comptype_relid)
 }
 
 /*
+ * pullup_composite_subfields
+ */
+static void
+pullup_composite_subfields(arrow::FieldVector &arrow_fields,
+						   pgsqlHandlerVector &pgsql_handlers)
+{
+	arrow::FieldVector flatten_fields;
+
+	assert(arrow_fields.size() == pgsql_handlers.size());
+	for (int j=0; j < arrow_fields.size(); j++)
+	{
+		arrowField	field = arrow_fields[j];
+		auto		d_type = field->type();
+
+		if (d_type->id() != arrow::Type::STRUCT)
+			flatten_fields.push_back(field);
+		else
+		{
+			bool	be_flatten = false;
+
+			if (strcmp(flatten_composite_columns, "*") == 0)
+				be_flatten = true;
+			else
+			{
+				char   *temp = (char *)alloca(strlen(flatten_composite_columns) + 1);
+				char   *tok, *pos;
+
+				strcpy(temp, flatten_composite_columns);
+				for (tok = strtok_r(temp, ",", &pos);
+					 tok != NULL;
+					 tok = strtok_r(NULL, ",", &pos))
+				{
+					tok = __trim(tok);
+					if (field->name() == std::string(tok))
+					{
+						be_flatten = true;
+						break;
+					}
+				}
+			}
+			if (!be_flatten)
+				flatten_fields.push_back(field);
+			else
+			{
+				auto	comp_type = std::dynamic_pointer_cast<arrow::StructType>(d_type);
+
+				for (int k=0; k < comp_type->num_fields(); k++)
+				{
+					auto subfield = comp_type->field(k);
+					flatten_fields.push_back(subfield);
+				}
+				pgsql_handlers[j]->composite_flatten = true;
+			}
+		}
+	}
+	arrow_fields = flatten_fields;
+}
+
+/*
  * pgsql_define_arrow_schema
  */
 static void
@@ -1304,6 +1799,12 @@ pgsql_define_arrow_schema(pgsqlHandlerVector &pgsql_handlers)
 		//TODO: flatten columns
 
 	}
+	/* pull up composite sub-fields to flatten fields */
+	if (flatten_composite_columns)
+		pullup_composite_subfields(arrow_fields, pgsql_handlers);
+	/* enables min/max statistics in arrow */
+	if (!parquet_mode && stat_embedded_columns)
+		arrow_enables_statistics(pgsql_handlers);
 	/*
 	 * The primary thread builds and stores the 'arrow_schema', and it shall
 	 * be referenced for compatibility checks by worker threads.
@@ -1466,6 +1967,7 @@ pgsql_flush_record_batch(pgsqlHandlerVector &pgsql_handlers)
 	uint32_t		chunk_id;
 	arrow::Result<int64_t> foffset_before;
 	arrow::Result<int64_t> foffset_after;
+	auto			custom_metadata = std::make_shared<arrow::KeyValueMetadata>();
 
 	/* setup record batch */
 	for (auto cell = pgsql_handlers.begin(); cell != pgsql_handlers.end(); cell++)
@@ -1477,7 +1979,8 @@ pgsql_flush_record_batch(pgsqlHandlerVector &pgsql_handlers)
 			nrows = __nrows;
 		else if (nrows != __nrows)
 			Elog("Bug? number of rows mismatch across the buffers");
-		arrow_arrays.push_back(handler->arrow_array);
+		handler->appendArrays(arrow_arrays);
+		handler->appendStats(custom_metadata);
 	}
 	/* begin critical section */
 	arrow_file_mutex.lock();
@@ -1497,7 +2000,7 @@ pgsql_flush_record_batch(pgsqlHandlerVector &pgsql_handlers)
 	else
 	{
 		/* write out record batch */
-		rv = arrow_file_writer->WriteRecordBatch(*rbatch);
+		rv = arrow_file_writer->WriteRecordBatch(*rbatch, custom_metadata);
 		if (!rv.ok())
 			Elog("failed on arrow::ipc::RecordBatchWriter::WriteRecordBatch: %s",
 				 rv.ToString().c_str());
@@ -2191,7 +2694,7 @@ static void usage(void)
 		<< "  -q, --parquet         Enables Parquet format.\n"
 		<< "  -o, --output=FILENAME result file in Apache Arrow format\n"
 		<< "                        If not given, pg2arrow creates a temporary file.\n"
-		<< "  -S, --stat[=COLUMNS] embeds min/max statistics for each record batch\n"
+		<< "  -S, --stats[=COLUMNS] embeds min/max statistics for each record batch\n"
 		<< "                        COLUMNS is a comma-separated list of the target\n"
 		<< "                        columns if partially enabled.\n"
 		<< "      --flatten[=COLUMNS]    Enables to expand RECORD values into flatten\n"
@@ -2216,7 +2719,8 @@ static void usage(void)
 		<< "      --set=NAME:VALUE config option to set before SQL execution\n"
 		<< "  -v, --verbose        shows verbose output\n"
 		<< "      --help           shows this message\n"
-		<< "\n";
+		<< "\n"
+		<< "pg2arrow version " PGSTROM_VERSION " - reports bugs to <pgstrom@heterodb.com>.\n",
 	_exit(0);
 }
 
@@ -2235,7 +2739,7 @@ parse_options(int argc, char * const argv[])
 		{"parallel-keys",   required_argument, NULL, 'k'},
 		{"parquet",         no_argument,       NULL, 'q'},
 		{"output",          required_argument, NULL, 'o'},
-		{"stat",            required_argument, NULL, 'S'},
+		{"stats",           optional_argument, NULL, 'S'},
 		{"flatten",         optional_argument, NULL, 1002},
 		{"segment-size",    required_argument, NULL, 's'},
 		{"compress",        required_argument, NULL, 'C'},
@@ -2509,6 +3013,17 @@ parse_options(int argc, char * const argv[])
 	//
 	// Check command line option consistency
 	//
+	if (parquet_mode)
+	{
+		if (stat_embedded_columns)
+			Elog("-S (--stat) is valid only Arrow mode. Parquet embeds statistics by the default");
+	}
+	else
+	{
+		if (compression_methods.size() > 0)
+			Elog("-C (--compress) is valid only when Parquet mode (-q, --parquet) is enabled");
+	}
+
 	if (!raw_pgsql_command && !simple_table_name)
 	{
 		if (!dump_meta_filename && !dump_schema_filename)
@@ -2572,8 +3087,6 @@ parse_options(int argc, char * const argv[])
 	}
 	if (batch_segment_sz == 0)
 		batch_segment_sz = (256UL << 20);
-	if (!parquet_mode && compression_methods.size() > 0)
-		Elog("-C (--compress) is valid only when Parquet mode (-q, --parquet) is enabled");
 	if (password_prompt > 0)
 		pgsql_password = pstrdup(getpass("Password: "));
 }

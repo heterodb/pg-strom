@@ -1493,6 +1493,7 @@ typedef struct
 	ParamPathInfo  *param_info;
 	double			num_groups;
 	bool			try_parallel;
+	bool			has_aggfuncs;
 	PathTarget	   *target_upper;
 	PathTarget	   *target_partial;
 	PathTarget	   *target_agg_final;
@@ -1868,6 +1869,60 @@ replace_expression_by_proj_altfuncs(Node *node, void *__priv)
 	return __replace_expression_by_altfunc_common(node, __priv, replace_expression_by_proj_altfuncs);
 }
 
+static Node *
+xpugroupby_build_path_target_expression(Node *node, void *__priv)
+{
+	xpugroupby_build_path_context *con = __priv;
+	ListCell   *lc;
+
+	if (!node)
+		return NULL;
+	if (IsA(node, Aggref))
+	{
+		Aggref *aggref = (Aggref *)node;
+		Node   *altfn_agg	= make_alternative_aggref(con, aggref, true);
+		Node   *altfn_proj	= make_alternative_aggref(con, aggref, false);
+
+		if (!altfn_agg || !altfn_proj)
+		{
+			elog(DEBUG2, "No alternative aggregation: %s",
+				 nodeToString(node));
+			return NULL;
+		}
+		if (exprType((Node *)aggref) != exprType(altfn_agg) ||
+			exprType((Node *)aggref) != exprType(altfn_proj))
+		{
+			elog(ERROR, "Bug? XpuGroupBy catalog is not consistent: %s --> agg:[%s] proj:[%s]",
+				 nodeToString(aggref),
+				 nodeToString(altfn_agg),
+				 nodeToString(altfn_proj));
+		}
+		add_new_column_to_pathtarget(con->target_agg_final, (Expr *)altfn_agg);
+		con->has_aggfuncs = true;
+		return altfn_proj;
+	}
+	/* check whether it is grouping-key expression */
+	foreach (lc, con->groupby_keys)
+	{
+		Node   *groupby_key = lfirst(lc);
+		Node   *newnode;
+
+		if (equal(groupby_key, node))
+		{
+			newnode = copyObject(node);
+			add_new_column_to_pathtarget(con->target_agg_final, (Expr *)newnode);
+			return newnode;
+		}
+	}
+	/* variables must be grouping-key */
+	if (IsA(node, Var))
+	{
+		con->device_executable = false;
+		return NULL;
+	}
+	return expression_tree_mutator(node, xpugroupby_build_path_target_expression, __priv);
+}
+
 static bool
 xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 {
@@ -1875,16 +1930,17 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 	Query		   *parse = root->parse;
 	pgstromPlanInfo *pp_info = con->pp_info;
 	PathTarget	   *target_upper = con->target_upper;
+	ListCell	   *cell;
 	ListCell	   *lc1, *lc2;
 	int				i = 0;
 
 	/*
-	 * Pick up grouping-keys and aggregate-functions to be replaced by
-	 * a pair of final-aggregate and partial-function.
+	 * 1st step: Picks up all grouping keys or non-key distinct clauses.
+	 * These expressions are used in the next step.
 	 */
-	foreach (lc1, target_upper->exprs)
+	foreach (cell, target_upper->exprs)
 	{
-		Expr   *expr = lfirst(lc1);
+		Expr   *expr = lfirst(cell);
 		Index	sortgroupref = get_pathtarget_sortgroupref(target_upper, i++);
 
 		if (sortgroupref &&
@@ -1927,37 +1983,9 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 					 nodeToString(expr));
 				return false;
 			}
-			add_column_to_pathtarget(con->target_agg_final, expr, sortgroupref);
-			add_column_to_pathtarget(con->target_proj_final, expr, sortgroupref);
-			/* to be attached to target-partial later */
 			con->groupby_keys = lappend(con->groupby_keys, expr);
 			con->groupby_keys_refno = lappend_int(con->groupby_keys_refno,
 												  sortgroupref);
-		}
-		else if (IsA(expr, Aggref))
-		{
-			Aggref *aggref = (Aggref *)expr;
-			Expr   *altfn_agg;
-			Expr   *altfn_proj;
-
-			altfn_agg  = (Expr *)make_alternative_aggref(con, aggref, true);
-			altfn_proj = (Expr *)make_alternative_aggref(con, aggref, false);
-			if (!altfn_agg || !altfn_proj)
-			{
-				elog(DEBUG2, "No alternative aggregation: %s",
-					 nodeToString(expr));
-				return false;
-			}
-			if (exprType((Node *)aggref) != exprType((Node *)altfn_agg) ||
-				exprType((Node *)aggref) != exprType((Node *)altfn_proj))
-			{
-				elog(ERROR, "Bug? XpuGroupBy catalog is not consistent: %s --> agg:[%s] proj:[%s]",
-					 nodeToString(aggref),
-					 nodeToString(altfn_agg),
-					 nodeToString(altfn_proj));
-			}
-			add_column_to_pathtarget(con->target_agg_final,  altfn_agg,  0);
-			add_column_to_pathtarget(con->target_proj_final, altfn_proj, 0);
 		}
 		else if (parse->distinctClause)
 		{
@@ -1973,18 +2001,43 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 					 nodeToString(expr));
 				return false;
 			}
-			add_column_to_pathtarget(con->target_agg_final, expr, 0);
-			add_column_to_pathtarget(con->target_proj_final, expr, 0);
-			/* add VREF_NOKEY entries */
 			con->groupby_keys = lappend(con->groupby_keys, expr);
 			con->groupby_keys_refno = lappend_int(con->groupby_keys_refno, 0);
 		}
-		else
+	}
+	/*
+	 * 2nd step: construction of target_proj_final (that can contain CPU-only
+	 * expressions refering the grouping-key or aggregation), and the earlier
+	 * half of the target_agg_file from Aggref node.
+	 */
+	foreach (cell, target_upper->exprs)
+	{
+		Node   *expr = lfirst(cell);
+		Index	sortgroupref = 0;
+
+		/*
+		 * if expression is grouping-key, sortgroupref must be set.
+		 * (no need to compare them using equal(), pointer comparison is enough.
+		 */
+		forboth (lc1, con->groupby_keys,
+				 lc2, con->groupby_keys_refno)
 		{
-			elog(DEBUG2, "unexpected expression on the upper-tlist: %s",
-				 nodeToString(expr));
+			Node   *groupby_key = lfirst(lc1);
+
+			if (groupby_key == expr)
+			{
+				sortgroupref = lfirst_int(lc2);
+				goto found;
+			}
+		}
+		expr = xpugroupby_build_path_target_expression(expr, con);
+		if (!con->device_executable)
+		{
+			elog(DEBUG2, "unexpected expression on the upper-tlist: %s", nodeToString(expr));
 			return false;
 		}
+	found:
+		add_column_to_pathtarget(con->target_proj_final, (Expr *)expr, sortgroupref);
 	}
 
 	/*
@@ -2039,55 +2092,86 @@ static void
 try_add_final_groupby_paths(xpugroupby_build_path_context *con, Path *part_path)
 {
 	Query	   *parse = con->root->parse;
-	Path	   *agg_path;
-	Path	   *dummy_path;
+	Path	   *__path;
+	bool		needs_projection = true;
+
+	if (list_length(con->target_agg_final->exprs) == list_length(con->target_proj_final->exprs))
+	{
+		ListCell   *lc1, *lc2;
+
+		forboth (lc1, con->target_agg_final->exprs,
+				 lc2, con->target_proj_final->exprs)
+		{
+			if (!equal(lfirst(lc1), lfirst(lc2)))
+				break;
+		}
+		if (!lc1 && !lc2)
+			needs_projection = false;
+	}
 
 	if (parse->groupClause)
 	{
 		Assert(grouping_is_hashable(parse->groupClause));
-		agg_path = (Path *)create_agg_path(con->root,
-										   con->group_rel,
-										   part_path,
-										   con->target_agg_final,
-										   AGG_HASHED,
-										   AGGSPLIT_SIMPLE,
-										   parse->groupClause,
-										   con->havingAggQuals,
-										   &con->final_agg_clause_costs,
-										   con->num_groups);
-		dummy_path = pgstrom_create_dummy_path(con->root, agg_path);
-
-		add_path(con->group_rel, dummy_path);
+		__path = (Path *)create_agg_path(con->root,
+										 con->group_rel,
+										 part_path,
+										 con->target_agg_final,
+										 AGG_HASHED,
+										 AGGSPLIT_SIMPLE,
+										 parse->groupClause,
+										 con->havingAggQuals,
+										 &con->final_agg_clause_costs,
+										 con->num_groups);
+		if (needs_projection)
+			__path = (Path *)create_projection_path(con->root,
+													con->group_rel,
+													__path,
+													con->target_proj_final);
+		if (con->has_aggfuncs)
+			__path = pgstrom_create_dummy_path(con->root, __path);
+		add_path(con->group_rel, __path);
 	}
 	else if (parse->distinctClause)
 	{
 		Assert(grouping_is_hashable(parse->distinctClause));
-		agg_path = (Path *)create_agg_path(con->root,
-										   con->group_rel,
-										   part_path,
-										   con->target_agg_final,
-										   AGG_HASHED,
-										   AGGSPLIT_SIMPLE,
-										   parse->distinctClause,
-										   con->havingAggQuals,
-										   &con->final_agg_clause_costs,
-										   con->num_groups);
-		add_path(con->group_rel, agg_path);
+		__path = (Path *)create_agg_path(con->root,
+										 con->group_rel,
+										 part_path,
+										 con->target_agg_final,
+										 AGG_HASHED,
+										 AGGSPLIT_SIMPLE,
+										 parse->distinctClause,
+										 con->havingAggQuals,
+										 &con->final_agg_clause_costs,
+										 con->num_groups);
+		if (needs_projection)
+			__path = (Path *)create_projection_path(con->root,
+													con->group_rel,
+													__path,
+													con->target_proj_final);
+		Assert(!con->has_aggfuncs);
+		add_path(con->group_rel, __path);
 	}
 	else
 	{
-		agg_path = (Path *)create_agg_path(con->root,
-										   con->group_rel,
-										   part_path,
-										   con->target_agg_final,
-										   AGG_PLAIN,
-										   AGGSPLIT_SIMPLE,
-										   parse->groupClause,
-										   con->havingAggQuals,
-										   &con->final_agg_clause_costs,
-										   con->num_groups);
-		dummy_path = pgstrom_create_dummy_path(con->root, agg_path);
-		add_path(con->group_rel, dummy_path);
+		__path = (Path *)create_agg_path(con->root,
+										 con->group_rel,
+										 part_path,
+										 con->target_agg_final,
+										 AGG_PLAIN,
+										 AGGSPLIT_SIMPLE,
+										 parse->groupClause,
+										 con->havingAggQuals,
+										 &con->final_agg_clause_costs,
+										 con->num_groups);
+		if (needs_projection)
+			__path = (Path *)create_projection_path(con->root,
+													con->group_rel,
+													__path,
+													con->target_proj_final);
+		if (con->has_aggfuncs)
+			__path = pgstrom_create_dummy_path(con->root, __path);
+		add_path(con->group_rel, __path);
 	}
 }
 
@@ -2521,8 +2605,11 @@ __try_add_xpupreagg_normal_path(PlannerInfo *root,
 								   &num_groups);
 			__path->pathkeys = __sortkeys_upper;
 		}
-		/* inject dummy path to resolve outer-reference by Aggref or others */
-		__path = pgstrom_create_dummy_path(root, __path);
+		/*
+		 * inject dummy path to resolve outer-references by Aggref
+		 */
+		if (con.has_aggfuncs)
+			__path = pgstrom_create_dummy_path(root, __path);
 		/* add fully-work */
 		add_path(group_rel, __path);
 

@@ -2866,9 +2866,9 @@ gpuClientWriteBackPartial(gpuClient  *gclient,
 	memset(&resp, 0, sizeof(resp));
 	resp.magic  = XpuCommandMagicNumber;
 	resp.tag    = XpuCommandTag__SuccessHalfWay;
+	resp.repeat_id = -1;		/* shall not be checked */
 	resp.u.results.chunks_nitems = 1;
 	resp.u.results.chunks_offset = resp_sz;
-	resp.u.results.scan_repeat_id = -1;		/* should not be checked */
 
 	iov = &iov_array[iovcnt++];
 	iov->iov_base = &resp;
@@ -2893,7 +2893,7 @@ static void
 gpuClientWriteBackNormal(gpuClient  *gclient,
 						 kern_exec_results *kern_stats,
 						 kern_data_store *kds,
-						 int32_t scan_repeat_id)
+						 int32_t orig_repeat_id)
 {
 	struct iovec	iov_array[10];
 	struct iovec   *iov;
@@ -2907,9 +2907,9 @@ gpuClientWriteBackNormal(gpuClient  *gclient,
 	memset(resp, 0, resp_sz);
 	resp->magic  = XpuCommandMagicNumber;
 	resp->tag    = XpuCommandTag__Success;
+	resp->repeat_id = orig_repeat_id;
 	memcpy(&resp->u.results, kern_stats,
 		   offsetof(kern_exec_results, stats[kern_stats->num_rels]));
-	resp->u.results.scan_repeat_id = scan_repeat_id;
 	/* sanity checks */
 	assert(resp->u.results.chunks_offset == 0 &&
 		   resp->u.results.chunks_nitems == 0 &&
@@ -4254,7 +4254,7 @@ gpuservHandleGpuTaskExec(gpuContext *gcontext,
 		kbuf_parts = KERN_MULTIRELS_PARTITION_DESC((kern_multirels *)m_kmrels, -1);
 		if (kbuf_parts)
 		{
-			int32_t		repeat_id = xcmd->u.task.scan_repeat_id;
+			int32_t		repeat_id = xcmd->repeat_id;
 
 			part_gcontexts = alloca(sizeof(gpuContext *) * kbuf_parts->hash_divisor);
 			part_reminders = alloca(sizeof(uint32_t) * kbuf_parts->hash_divisor);
@@ -4337,8 +4337,7 @@ gpuservHandleGpuTaskExec(gpuContext *gcontext,
 								 * so no memory leak problems.
 								 */
 		}
-		gpuClientWriteBackNormal(gclient, kern_stats, kds_dst,
-								 xcmd->u.task.scan_repeat_id);
+		gpuClientWriteBackNormal(gclient, kern_stats, kds_dst, xcmd->repeat_id);
 	}
 bailout:
 	THREAD_GPU_CONTEXT_VALIDATION_CHECK(gcontext);
@@ -5762,9 +5761,9 @@ gpuservHandleGpuTaskFinal(gpuContext *gcontext,
 	memset(resp, 0, resp_sz);
 	resp->magic = XpuCommandMagicNumber;
 	resp->tag   = XpuCommandTag__Success;
+	resp->repeat_id = xcmd->repeat_id;	/* repeat-id of the final command */
 	resp->u.results.chunks_nitems = 0;
 	resp->u.results.chunks_offset = resp_sz;
-	resp->u.results.scan_repeat_id = INT_MAX;	/* repeat-id of the final command */
 	resp->u.results.num_rels = num_rels;
 
 	iov_array = alloca(sizeof(struct iovec) * iovmax);

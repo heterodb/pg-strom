@@ -1,5 +1,10 @@
 #
-# Makefile for pcap2arrow
+# PG-Strom Makefile
+#
+include ../Makefile.common
+
+#
+# Makefile for arrow-tools
 #
 CXX          ?= g++
 PG_CONFIG    ?= pg_config
@@ -11,13 +16,15 @@ HAS_PF_RING = $(shell test -e /usr/include/pfring.h && echo -n yes)
 HAS_LIBARROW = $(shell pkgconf --exists arrow>/dev/null 2>&1 && echo -n yes)
 HAS_PARQUET = $(shell pkgconf --exists parquet>/dev/null 2>&1 && echo -n yes)
 
-ALL_PROGS = arrow2csv_legacy
+ALL_PROGS = arrow2csv-legacy
 ifeq ($(HAS_PG_CONFIG),yes)
+ALL_PROGS += pg2arrow-legacy
+ifeq ($(HAS_LIBARROW),yes)
 ALL_PROGS += pg2arrow
-ALL_PROGS += pg2arrow_next
+endif
 endif
 ifeq ($(HAS_MYSQL_CONFIG),yes)
-ALL_PROGS += mysql2arrow_legacy
+ALL_PROGS += mysql2arrow-legacy
 endif
 ifeq ($(HAS_PF_RING),yes)
 ALL_PROGS += pcap2arrow
@@ -42,7 +49,9 @@ CLEAN_OBJS = $(PG2ARROW_OBJS) $(TSV2ARROW_OBJS) $(ARROW2CSV_OBJS) \
              $(PG2ARROW_LEGACY_OBJS) $(MYSQL2ARROW_LEGACY_OBJS) \
              $(ARROW2CSV_LEGACY_OBJS) $(ALL_PROGS)
 
-CFLAGS = -O2 -fPIC -g -Wall -I. -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64
+CFLAGS = -O2 -fPIC -g -Wall -I. -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64 \
+         -DPGSTROM_VERSION=\"$(PGSTROM_VERSION)\"
+
 ifeq ($(HAS_PG_CONFIG),yes)
 CFLAGS += -I $(shell $(PG_CONFIG) --includedir)
 endif
@@ -68,7 +77,7 @@ TSV2ARROW_LDFLAGS += $(shell pkgconf --libs arrow)
 ARROW2CSV_LDFLAGS += $(shell pkgconf --libs arrow)
 endif
 endif
-CPPFLAGS += -std=c++17 $(CFLAGS)
+CPPFLAGS += -std=c++17 $(CFLAGS) -Wno-sign-compare
 
 PREFIX		?= /usr/local
 BINDIR		?= $(PREFIX)/bin
@@ -79,21 +88,21 @@ all: $(ALL_PROGS)
 # Only if pg_config is available
 #
 ifeq ($(HAS_PG_CONFIG),yes)
-pg2arrow_next: $(PG2ARROW_OBJS)
+pg2arrow: $(PG2ARROW_OBJS)
 	$(CXX) $(CPPFLAGS) -o $@ $(PG2ARROW_OBJS) $(PG2ARROW_LDFLAGS)
 
-install-pg2arrow_next: pg2arrow_next
+install-pg2arrow: pg2arrow
 	mkdir -p $(DESTDIR)$(BINDIR) && \
-	install -m 0755 pg2arrow $(DESTDIR)$(BINDIR)
+	install -m 0755 $< $(DESTDIR)$(BINDIR)
 
-pg2arrow: $(PG2ARROW_LEGACY_OBJS)
+pg2arrow-legacy: $(PG2ARROW_LEGACY_OBJS)
 	$(CC) -o $@ $(PG2ARROW_LEGACY_OBJS) -lpq -lpthread \
 	$(shell $(PG_CONFIG) --ldflags) \
 	-L $(shell $(PG_CONFIG) --libdir)
 
-install-pg2arrow: pg2arrow_legacy
+install-pg2arrow-legacy: pg2arrow-legacy
 	mkdir -p $(DESTDIR)$(BINDIR) && \
-	install -m 0755 pg2arrow_legacy $(DESTDIR)$(BINDIR)
+	install -m 0755 $< $(DESTDIR)$(BINDIR)
 
 __pgsql2arrow.o: sql2arrow.c
 	$(CC) $(CFLAGS) -D__PG2ARROW__ -c -o $@ $<
@@ -103,14 +112,14 @@ endif
 # Only if mysql_config is available
 #
 ifeq ($(HAS_MYSQL_CONFIG),yes)
-mysql2arrow_legacy: $(MYSQL2ARROW_LEGACY_OBJS)
+mysql2arrow-legacy: $(MYSQL2ARROW_LEGACY_OBJS)
 	$(CC) -o $@ $(MYSQL2ARROW_LEGACY_OBJS) \
 	$(shell $(MYSQL_CONFIG) --libs) \
 	-Wl,-rpath,$(shell $(MYSQL_CONFIG) --variable=pkglibdir)
 
-install-mysql2arrow_legacy: mysql2arrow_legacy
+install-mysql2arrow-legacy: mysql2arrow-legacy
 	mkdir -p $(DESTDIR)$(BINDIR) && \
-	install -m 0755 mysql2arrow_legacy $(DESTDIR)$(BINDIR)
+	install -m 0755 $< $(DESTDIR)$(BINDIR)
 
 __mysql2arrow.o: sql2arrow.c
 	$(CC) $(CFLAGS) -D__MYSQL2ARROW__ -c -o $@ $<
@@ -141,22 +150,22 @@ install-vcf2arrow: vcf2arrow
 #
 # Arrow2CSV(legacy)
 #
-install-arrow2csv_legacy: arrow2csv_legacy
-	mkdir -p $(DESTDIR)$(BINDIR) && \
-	install -m 0755 arrow2csv_legacy $(DESTDIR)$(BINDIR)
-
-arrow2csv_legacy: $(ARROW2CSV_LEGACY_OBJS)
+arrow2csv-legacy: $(ARROW2CSV_LEGACY_OBJS)
 	$(CC) -o $@ $(ARROW2CSV_LEGACY_OBJS)
+
+install-arrow2csv-legacy: arrow2csv-legacy
+	mkdir -p $(DESTDIR)$(BINDIR) && \
+	install -m 0755 arrow2csv-legacy $(DESTDIR)$(BINDIR)
 
 #
 # Arrow2CSV
 #
-install-arrow2csv: arrow2csv
-	mkdir -p $(DESTDIR)$(BINDIR) && \
-	install -m 0755 arrow2csv $(DESTDIR)$(BINDIR)
-
 arrow2csv: $(ARROW2CSV_OBJS)
 	$(CXX) $(CPPFLAGS) -o $@ $(ARROW2CSV_OBJS) $(ARROW2CSV_LDFLAGS)
+
+install-arrow2csv: arrow2csv
+	mkdir -p $(DESTDIR)$(BINDIR) && \
+	install -m 0755 $< $(DESTDIR)$(BINDIR)
 
 #
 # TSV2Arrow
@@ -174,7 +183,7 @@ tsv2arrow: $(TSV2ARROW_OBJS)
 .c.o:
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-install:  $(addprefix install-,$(ALL_PROGS))
+install: $(addprefix install-,$(ALL_PROGS))
 
 clean:
 	rm -f $(CLEAN_OBJS)

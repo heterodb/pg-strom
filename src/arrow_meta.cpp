@@ -798,6 +798,20 @@ __dumpArrowMessage(std::ostringstream &json,
 					NewLine + __SPACES("body"));
 	json << "," << NewLine
 		 <<"\"bodyLength\" : " << node->bodyLength;
+	if (node->_num_custom_metadata > 0)
+	{
+		auto	__NewLine = NewLine + __SPACES("custom_metadata");
+		json << "," << NewLine << "\"custom_metadata\" : [";
+		for (int i=0; i < node->_num_custom_metadata; i++)
+		{
+			if (i == 0)
+				json << " ";
+			else
+				json << "," << __NewLine;
+			__dumpArrowNode(json, &node->custom_metadata[i].node,
+							__NewLine + __ARRAY_INDENT);
+		}
+	}	
 }
 static inline void
 __dumpArrowBlock(std::ostringstream &json,
@@ -1340,6 +1354,7 @@ __copyArrowMessage(ArrowMessage *dest, const ArrowMessage *src)
 	COPY_SCALAR(version);
 	__copyArrowNode(&dest->body.node, &src->body.node);
 	COPY_SCALAR(bodyLength);
+	COPY_VECTOR(custom_metadata, ArrowKeyValue);
 }
 
 static void
@@ -1821,10 +1836,22 @@ static inline bool
 __equalArrowMessage(const ArrowMessage *a,
 					const ArrowMessage *b)
 {
-	return (a->version == b->version &&
-			__equalArrowNode(&a->body.node,
-							 &b->body.node) &&
-			a->bodyLength == b->bodyLength);
+	if (a->version != b->version)
+		return false;
+	if (!__equalArrowNode(&a->body.node,
+						  &b->body.node))
+		return false;
+	if (a->bodyLength != b->bodyLength)
+		return false;
+	if (a->_num_custom_metadata != b->_num_custom_metadata)
+		return false;
+	for (int i=0; i < a->_num_custom_metadata; i++)
+	{
+		if (!__equalArrowNode(&a->custom_metadata[i].node,
+							  &b->custom_metadata[i].node))
+			return false;
+	}
+	return true;
 }
 
 static inline bool
@@ -2641,6 +2668,7 @@ readArrowMessageBlock(ArrowMessage *node,
 	auto	buffer = rv.ValueOrDie();
 	auto	fb_base = buffer->data() + sizeof(uint32_t);	/* Continuation token (0xffffffff) */
 	auto	message = org::apache::arrow::flatbuf::GetSizePrefixedMessage(fb_base);
+	auto	custom_metadata = message->custom_metadata();
 
 	INIT_ARROW_NODE(node, Message);
 	switch (message->header_type())
@@ -2667,6 +2695,19 @@ readArrowMessageBlock(ArrowMessage *node,
 		default:
 			Elog("corrupted arrow file? unknown message type %d",
 				 (int)message->header_type());
+	}
+	if (custom_metadata && custom_metadata->size() > 0)
+	{
+		node->_num_custom_metadata = custom_metadata->size();
+		node->custom_metadata = (ArrowKeyValue *)
+			__palloc(sizeof(ArrowKeyValue) * node->_num_custom_metadata);
+		for (int i=0; i < node->_num_custom_metadata; i++)
+		{
+			auto	kv = (*custom_metadata)[i];
+			readArrowKeyValue(&node->custom_metadata[i],
+							  kv->key()->str(),
+							  kv->value()->str());
+		}
 	}
 }
 
@@ -3021,7 +3062,7 @@ __readParquetFieldMetadata(ArrowField *node,
 		}
 		case arrow::Type::type::TIME32:
 		case arrow::Type::type::TIME64: {
-			const auto tm_type = arrow::internal::checked_pointer_cast<arrow::TimestampType>(__type);
+			const auto tm_type = arrow::internal::checked_pointer_cast<arrow::TimeType>(__type);
 			INIT_ARROW_TYPE_NODE(&node->type, Time);
 			node->type.Time.unit = __transformArrowTimeUnit(tm_type->unit());
 			node->type.Time.bitWidth = (__type->id() == arrow::Type::type::TIME32 ? 32 : 64);

@@ -996,7 +996,7 @@ static void __usage(const char *fmt,...)
 		  "-v|--verbose          verbose output\n"
 		  "-h|--help             print this message\n"
 		  "\n"
-		  "Report bugs to <pgstrom@heterodb.com>\n",
+		  "arrow2csv version " PGSTROM_VERSION " - reports bugs to <pgstrom@heterodb.com>.\n",
 		  stderr);
 	exit(1);
 }

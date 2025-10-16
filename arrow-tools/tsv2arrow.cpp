@@ -258,7 +258,7 @@ static void __usage(const char *fmt,...)
 		  "Example)\n"
 		  "  -S user_id:uint:not_null,name:text,mail:text,birthday:date:my_key=comment\n"
 		  "\n"
-		  "Report bugs to <pgstrom@heterodb.com>.\n",
+		  "tsv2arrow version " PGSTROM_VERSION " - reports bugs to <pgstrom@heterodb.com>.\n",
 		  stderr);
 	exit(1);
 }

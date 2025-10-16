@@ -857,6 +857,8 @@ typedef struct		ArrowMessage
 	ArrowMetadataVersion version;
 	ArrowMessageBody body;
 	uint64_t		bodyLength;
+	ArrowKeyValue  *custom_metadata;
+	int				_num_custom_metadata;
 } ArrowMessage;
 
 /*
