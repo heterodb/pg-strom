@@ -122,7 +122,7 @@ $(foreach candidate,$(BCXX_CANDIDATES),\
 # Explicitly define rules for generating .bc files (LLVM bit code)
 ifneq ($(findstring clang,$(BCXX)),)
 %.bc: %.cpp
-	$(BCXX) -xc++ -std=c++17 $(CPPFLAGS) $(CXXFLAGS) -flto=thin -emit-llvm -c -o $@ $
+	$(BCXX) -xc++ -std=c++17 $(CPPFLAGS) $(CXXFLAGS) -flto=thin -emit-llvm -c -o $@ $<
 endif
 
 #
