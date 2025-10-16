@@ -104,7 +104,6 @@ EXTRA_CLEAN = $(CUDA_OBJS) $(GENERATED-HEADERS) \
               $(shell ls -d pgstrom-gpucode-V*-*.fatbin 2>/dev/null)
 EXTENSION = pg_strom
 PG_CPPFLAGS := $(PGSTROM_FLAGS) -I $(CUDA_IPATH)
-#PG_CXXFLAGS := -std=c++17 -Wno-sign-compare
 PG_CXXFLAGS += -std=c++17 -Wno-sign-compare
 SHLIB_LINK += -L $(CUDA_LPATH) -lcuda
 
@@ -113,9 +112,18 @@ include $(PGXS)
 
 override CXXFLAGS += -std=c++17
 
-# .bcファイル（LLVMビットコード）生成用のルールを明示的に定義
+# Search the your clang
+BCXX_CANDIDATES := clang++ clang++-19 clang++-18 clang++-17 clang++-16 clang++-15
+BCXX := $(CXX)
+$(foreach candidate,$(BCXX_CANDIDATES),\
+  $(if $(shell which $(candidate) 2>/dev/null),\
+    $(eval BCXX := $(candidate))$(eval $(info Found C++ compiler for .bc: $(BCXX))),))
+
+# Explicitly define rules for generating .bc files (LLVM bit code)
+ifneq ($(findstring clang,$(BCXX)),)
 %.bc: %.cpp
-	clang++ -xc++ -std=c++17 $(CPPFLAGS) $(CXXFLAGS) -flto=thin -emit-llvm -c -o $@ $<
+	$(BCXX) -xc++ -std=c++17 $(CPPFLAGS) $(CXXFLAGS) -flto=thin -emit-llvm -c -o $@ $
+endif
 
 #
 # Device Attributes
