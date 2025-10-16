@@ -441,7 +441,7 @@ parquetReadArrowTable(std::shared_ptr<arrow::Table> table,
 					  void *malloc_private)
 {
 	size_t		kds_length = KDS_HEAD_LENGTH(kds_head) + kds_head->arrow_virtual_usage;
-	size_t		curr_pos = kds_length;
+	size_t		curr_pos = ARROW_ALIGN(kds_length);
 	kern_data_store *kds;
 
 	/*
