@@ -144,6 +144,7 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 	privs = lappend(privs, __makeByteaConst(pp_info->kexp_groupby_keyload));
 	privs = lappend(privs, __makeByteaConst(pp_info->kexp_groupby_keycomp));
 	privs = lappend(privs, __makeByteaConst(pp_info->kexp_groupby_actions));
+	privs = lappend(privs, __makeByteaConst(pp_info->kexp_gpusort_keydesc));
 	/* Kvars definitions */
 	foreach (lc, pp_info->kvars_deflist)
 	{
@@ -165,7 +166,18 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 	privs = lappend(privs, pp_info->groupby_actions);
 	privs = lappend(privs, pp_info->groupby_typmods);
 	privs = lappend(privs, makeInteger(pp_info->groupby_prepfn_bufsz));
+	exprs = lappend(exprs, pp_info->gpusort_keys_expr);
+	privs = lappend(privs, pp_info->gpusort_keys_kind);
+	privs = lappend(privs, pp_info->gpusort_keys_refs);
+	privs = lappend(privs, makeInteger(pp_info->gpusort_htup_margin));
+	privs = lappend(privs, makeInteger(pp_info->gpusort_limit_count));
+	privs = lappend(privs, makeInteger(pp_info->window_rank_func));
+	privs = lappend(privs, makeInteger(pp_info->window_rank_limit));
+	privs = lappend(privs, makeInteger(pp_info->window_partby_nkeys));
+	privs = lappend(privs, makeInteger(pp_info->window_orderby_nkeys));
 	exprs = lappend(exprs, pp_info->projection_hashkeys);
+	privs = lappend(privs, makeInteger(pp_info->select_into_relid));
+	privs = lappend(privs, pp_info->select_into_proj);
 	/* inner relations */
 	privs = lappend(privs, makeInteger(pp_info->sibling_param_id));
 	privs = lappend(privs, makeInteger(pp_info->num_rels));
@@ -253,6 +265,7 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	pp_data.kexp_groupby_keyload   = __getByteaConst(list_nth(privs, pindex++));
 	pp_data.kexp_groupby_keycomp   = __getByteaConst(list_nth(privs, pindex++));
 	pp_data.kexp_groupby_actions   = __getByteaConst(list_nth(privs, pindex++));
+	pp_data.kexp_gpusort_keydesc   = __getByteaConst(list_nth(privs, pindex++));
 	/* Kvars definitions */
 	kvars_deflist_privs = list_nth(privs, pindex++);
 	kvars_deflist_exprs = list_nth(exprs, eindex++);
@@ -273,7 +286,18 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	pp_data.groupby_actions = list_nth(privs, pindex++);
 	pp_data.groupby_typmods = list_nth(privs, pindex++);
 	pp_data.groupby_prepfn_bufsz = intVal(list_nth(privs, pindex++));
+	pp_data.gpusort_keys_expr = list_nth(exprs, eindex++);
+	pp_data.gpusort_keys_kind = list_nth(privs, pindex++);
+	pp_data.gpusort_keys_refs = list_nth(privs, pindex++);
+	pp_data.gpusort_htup_margin = intVal(list_nth(privs, pindex++));
+	pp_data.gpusort_limit_count = intVal(list_nth(privs, pindex++));
+	pp_data.window_rank_func = intVal(list_nth(privs, pindex++));
+	pp_data.window_rank_limit = intVal(list_nth(privs, pindex++));
+	pp_data.window_partby_nkeys = intVal(list_nth(privs, pindex++));
+	pp_data.window_orderby_nkeys = intVal(list_nth(privs, pindex++));
 	pp_data.projection_hashkeys = list_nth(exprs, eindex++);
+	pp_data.select_into_relid = intVal(list_nth(privs, pindex++));
+	pp_data.select_into_proj = list_nth(privs, pindex++);
 	/* inner relations */
 	pp_data.sibling_param_id = intVal(list_nth(privs, pindex++));
 	pp_data.num_rels = intVal(list_nth(privs, pindex++));
@@ -828,6 +852,7 @@ pgstrom_copy_pathnode(const Path *pathnode)
 					subpaths = lappend(subpaths, sp);
 				}
 				b->custom_paths = subpaths;
+				b->custom_private = list_copy(a->custom_private);
 				return &b->path;
 			}
 		case T_NestPath:
@@ -968,7 +993,12 @@ pgstrom_copy_pathnode(const Path *pathnode)
 			{
 				SetOpPath	   *a = (SetOpPath *)pathnode;
 				SetOpPath	   *b = pmemdup(a, sizeof(SetOpPath));
+#if PG_VERSION_NUM < 180000
 				b->subpath = pgstrom_copy_pathnode(a->subpath);
+#else
+				b->leftpath = pgstrom_copy_pathnode(a->leftpath);
+				b->rightpath = pgstrom_copy_pathnode(a->rightpath);
+#endif
 				return &b->path;
 			}
 		case T_RecursiveUnionPath:
@@ -1954,6 +1984,111 @@ pgstrom_abort_if(PG_FUNCTION_ARGS)
 		elog(ERROR, "abort transaction");
 
 	PG_RETURN_VOID();
+}
+
+/*
+ * pgstrom_fetch_token_by_(colon|semicolon|comma)
+ */
+static text *
+__fetch_token_by_delim(text *__str, text *__key, char delim)
+{
+	const char *str = VARDATA_ANY(__str);
+	const char *key = VARDATA_ANY(__key);
+	size_t		str_len = VARSIZE_ANY_EXHDR(__str);
+	size_t		key_len = VARSIZE_ANY_EXHDR(__key);
+	const char *end, *pos, *base;
+
+	/*
+	 * triming whitespaces of the key head/tail
+	 */
+	while (key_len > 0 && isspace(*key))
+	{
+		key++;
+		key_len--;
+	}
+	if (key_len == 0)
+		return NULL;
+	while (key_len > 0 && isspace(key[key_len-1]))
+		key_len--;
+	if (key_len == 0)
+		return NULL;
+	/*
+	 * split a token by the delimiter for each
+	 */
+	if (str_len == 0)
+		return NULL;
+	end = str + str_len - 1;
+	pos = base = str;
+	while (pos <= end)
+	{
+		if (*pos == delim || pos == end)
+		{
+			if (pos - base >= key_len && strncmp(base, key, key_len) == 0)
+			{
+				const char *__k = (base + key_len);
+
+				while (isspace(*__k) && __k < pos)
+					__k++;
+				if (__k < pos && *__k == '=')
+				{
+					size_t	len = (pos - __k) - 1;
+					text   *t = palloc(VARHDRSZ + len + 1);
+
+					if (len > 0)
+						memcpy(t->vl_dat, __k+1, len);
+					t->vl_dat[len] = '\0';
+					SET_VARSIZE(t, VARHDRSZ + len);
+					return t;
+				}
+			}
+			base = pos + 1;
+		}
+		else if (pos == base && isspace(*pos))
+		{
+			base++;
+		}
+		pos++;
+	}
+	return NULL;
+}
+
+PG_FUNCTION_INFO_V1(pgstrom_fetch_token_by_colon);
+PUBLIC_FUNCTION(Datum)
+pgstrom_fetch_token_by_colon(PG_FUNCTION_ARGS)
+{
+	text   *str = PG_GETARG_TEXT_PP(0);
+	text   *key = PG_GETARG_TEXT_PP(1);
+	text   *result = __fetch_token_by_delim(str, key, ':');
+
+	if (!result)
+		PG_RETURN_NULL();
+	PG_RETURN_POINTER(result);
+}
+
+PG_FUNCTION_INFO_V1(pgstrom_fetch_token_by_semicolon);
+PUBLIC_FUNCTION(Datum)
+pgstrom_fetch_token_by_semicolon(PG_FUNCTION_ARGS)
+{
+	text   *str = PG_GETARG_TEXT_PP(0);
+	text   *key = PG_GETARG_TEXT_PP(1);
+	text   *result = __fetch_token_by_delim(str, key, ';');
+
+	if (!result)
+		PG_RETURN_NULL();
+    PG_RETURN_POINTER(result);
+}
+
+PG_FUNCTION_INFO_V1(pgstrom_fetch_token_by_comma);
+PUBLIC_FUNCTION(Datum)
+pgstrom_fetch_token_by_comma(PG_FUNCTION_ARGS)
+{
+	text   *str = PG_GETARG_TEXT_PP(0);
+	text   *key = PG_GETARG_TEXT_PP(1);
+	text   *result = __fetch_token_by_delim(str, key, ',');
+
+	if (!result)
+		PG_RETURN_NULL();
+	PG_RETURN_POINTER(result);
 }
 
 /*

@@ -732,14 +732,14 @@ out:
 	Assert(scan_repeat_id >= 0);
 	/* XXX - debug message */
 	if (scan_repeat_id > 0 && scan_repeat_id != pts->last_repeat_id)
-		elog(NOTICE, "direct scan on '%s' moved into %dth loop for inner-buffer partitions (pid: %u)  scan_block_count=%lu scan_block_nums=%u scan_block_start=%u num_scan_repeats=%u curr_repeat_id=%d curr_block_num=%lu curr_block_tail=%lu",
+		elog(NOTICE, "direct scan on '%s' moved into %dth loop for inner-buffer partitions (pid: %u)  scan_block_count=%lu scan_block_nums=%u scan_block_start=%u num_scan_repeats=%u scan_repeat_id=%d curr_block_num=%lu curr_block_tail=%lu",
 			 RelationGetRelationName(pts->css.ss.ss_currentRelation),
 			 scan_repeat_id+1, MyProcPid,
 			 pg_atomic_read_u64(&ps_state->scan_block_count),
 			 ps_state->scan_block_nums,
 			 ps_state->scan_block_start,
 			 pts->num_scan_repeats,
-			 pts->curr_repeat_id,
+			 scan_repeat_id,
 			 pts->curr_block_num,
 			 pts->curr_block_tail);
 	pts->last_repeat_id = scan_repeat_id;
@@ -773,164 +773,12 @@ out:
 	xcmd = (XpuCommand *)pts->xcmd_buf.data;
 	xcmd->u.task.kds_src_pathname = kds_src_pathname;
 	xcmd->u.task.kds_src_iovec = kds_src_iovec;
-	xcmd->u.task.scan_repeat_id = scan_repeat_id;
+	xcmd->repeat_id = scan_repeat_id;
 	xcmd->length = pts->xcmd_buf.len;
 
 	xcmd_iov[0].iov_base = xcmd;
 	xcmd_iov[0].iov_len  = xcmd->length;
 	*xcmd_iovcnt = 1;
-
-	return xcmd;
-}
-
-static bool
-__kds_row_insert_tuple(kern_data_store *kds, TupleTableSlot *slot)
-{
-	uint64_t   *rowindex = KDS_GET_ROWINDEX(kds);
-	HeapTuple	tuple;
-	size_t		__usage;
-	bool		should_free;
-	kern_tupitem *titem;
-
-	Assert(kds->format == KDS_FORMAT_ROW && kds->hash_nslots == 0);
-	tuple = ExecFetchSlotHeapTuple(slot, false, &should_free);
-
-	__usage = (kds->usage +
-			   MAXALIGN(offsetof(kern_tupitem, htup) + tuple->t_len));
-	if (KDS_HEAD_LENGTH(kds) +
-		sizeof(uint64_t) * (kds->nitems + 1) +
-		__usage > kds->length)
-		return false;	/* no more items! */
-	titem = (kern_tupitem *)((char *)kds + kds->length - __usage);
-	titem->t_len = tuple->t_len;
-	titem->rowid = kds->nitems;
-	memcpy(&titem->htup, tuple->t_data, tuple->t_len);
-	memcpy(&titem->htup.t_ctid, &tuple->t_self, sizeof(ItemPointerData));
-	kds->usage = rowindex[kds->nitems++] = __usage;
-
-	if (should_free)
-		heap_freetuple(tuple);
-	ExecClearTuple(slot);
-
-	return true;
-}
-
-XpuCommand *
-pgstromRelScanChunkNormal(pgstromTaskState *pts,
-						  struct iovec *xcmd_iov, int *xcmd_iovcnt)
-{
-	pgstromSharedState *ps_state = pts->ps_state;
-	TableScanDesc	scan = pts->css.ss.ss_currentScanDesc;
-	TupleTableSlot *slot = pts->base_slot;
-	kern_data_store *kds;
-	XpuCommand	   *xcmd;
-	int				kds_repeat_id = -1;
-	size_t			sz1, sz2;
-
-	pts->xcmd_buf.len = __XCMD_KDS_SRC_OFFSET(&pts->xcmd_buf) + PGSTROM_CHUNK_SIZE;
-	enlargeStringInfo(&pts->xcmd_buf, 0);
-	kds = __XCMD_GET_KDS_SRC(&pts->xcmd_buf);
-	kds->nitems = 0;
-	kds->usage = 0;
-	kds->length = PGSTROM_CHUNK_SIZE;
-
-	while (!pts->scan_done)
-	{
-		if (!TTS_EMPTY(slot))
-		{
-			Assert(pts->curr_repeat_id >= 0);
-			if (!__kds_row_insert_tuple(kds, slot))
-				break;
-			if (kds_repeat_id < 0)
-				kds_repeat_id = pts->curr_repeat_id;
-		}
-		Assert(TTS_EMPTY(slot));
-
-		if (pts->curr_repeat_id < 0)
-		{
-			if (pts->br_state)
-			{
-				/* scan by BRIN index */
-				TBMIterateResult *tbm = pts->curr_tbm;
-				uint64_t	raw_index = pts->curr_block_num++;
-
-				if (raw_index >= pts->curr_block_tail)
-				{
-					int		__repeat_id = pgstromBrinIndexNextChunk(pts);
-
-					if (__repeat_id < 0)
-					{
-						pts->scan_done = true;
-						break;
-					}
-					raw_index = pts->curr_block_num++;
-				}
-				tbm->blockno = raw_index % ps_state->scan_block_nums;
-				tbm->ntuples = -1;
-				tbm->recheck = true;
-				if (!table_scan_bitmap_next_block(scan, tbm))
-					continue;
-				pts->curr_repeat_id = (raw_index / ps_state->scan_block_nums);
-			}
-			else
-			{
-				uint64_t	raw_index = pg_atomic_fetch_add_u64(&ps_state->scan_block_count, 1);
-				uint64_t	scan_limit = (ps_state->scan_block_nums *
-										  pts->num_scan_repeats);
-				if (raw_index < scan_limit)
-				{
-					TBMIterateResult *tbm = pts->curr_tbm;
-
-					tbm->blockno = (raw_index % ps_state->scan_block_nums);
-					tbm->ntuples = -1;
-					tbm->recheck = true;
-					if (!table_scan_bitmap_next_block(scan, tbm))
-						continue;
-					pts->curr_repeat_id = (raw_index / ps_state->scan_block_nums);
-				}
-				else
-				{
-					pts->scan_done = true;
-					break;
-				}
-			}
-		}
-		Assert(pts->curr_repeat_id >= 0);
-		if (kds_repeat_id >= 0 && kds_repeat_id != pts->curr_repeat_id)
-			break;		/* never mixture different repeat_id in same KDS */
-		if (!table_scan_bitmap_next_tuple(scan, pts->curr_tbm, slot))
-			pts->curr_repeat_id = -1;	/* load next */
-		else if (!__kds_row_insert_tuple(kds, slot))
-			break;		/* KDS fill up */
-		else if (kds_repeat_id < 0)
-			kds_repeat_id = pts->curr_repeat_id;
-	}
-	if (kds->nitems == 0)
-		return NULL;
-	Assert(kds_repeat_id >= 0);
-	/* XXX - debug message */
-	if (kds_repeat_id > 0 && kds_repeat_id != pts->last_repeat_id)
-		elog(NOTICE, "normal scan on '%s' moved into %dth loop for inner-buffer partitions (pid: %u)",
-			 RelationGetRelationName(pts->css.ss.ss_currentRelation),
-			 kds_repeat_id+1,
-			 MyProcPid);
-	pts->last_repeat_id = kds_repeat_id;
-
-	/* setup iovec that may skip the hole between row-index and tuples-buffer */
-	sz1 = ((KDS_BODY_ADDR(kds) - pts->xcmd_buf.data) +
-		   MAXALIGN(sizeof(uint64_t) * kds->nitems));
-	sz2 = kds->usage;
-	Assert(sz1 + sz2 <= pts->xcmd_buf.len);
-	kds->length = (KDS_HEAD_LENGTH(kds) +
-				   MAXALIGN(sizeof(uint64_t) * kds->nitems) + sz2);
-	xcmd = (XpuCommand *)pts->xcmd_buf.data;
-	xcmd->u.task.scan_repeat_id = kds_repeat_id;
-	xcmd->length = sz1 + sz2;
-	xcmd_iov[0].iov_base = xcmd;
-	xcmd_iov[0].iov_len  = sz1;
-	xcmd_iov[1].iov_base = (pts->xcmd_buf.data + pts->xcmd_buf.len - sz2);
-	xcmd_iov[1].iov_len  = sz2;
-	*xcmd_iovcnt = 2;
 
 	return xcmd;
 }

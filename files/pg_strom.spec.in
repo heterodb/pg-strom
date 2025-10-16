@@ -18,11 +18,13 @@ AutoReqProv: no
 %define __pg_config_15  /usr/pgsql-15/bin/pg_config
 %define __pg_config_16  /usr/pgsql-16/bin/pg_config
 %define __pg_config_17  /usr/pgsql-17/bin/pg_config
-%define __heterodb_extra_min_version 5.4
+%define __pg_config_18  /usr/pgsql-18/bin/pg_config
+%define __heterodb_extra_min_version 6.5
 
 %define __HAS_PG15      %(test -x %{__pg_config_15} && echo -n 1 || echo -n 0)
 %define __HAS_PG16      %(test -x %{__pg_config_16} && echo -n 1 || echo -n 0)
 %define __HAS_PG17      %(test -x %{__pg_config_17} && echo -n 1 || echo -n 0)
+%define __HAS_PG18      %(test -x %{__pg_config_18} && echo -n 1 || echo -n 0)
 
 %define __make_options_common VERSION=%{version} RELEASE=%{release} GITHASH=%{__githash} DESTDIR=%{buildroot} CUDA_PATH=%{__cuda_path}
 
@@ -39,9 +41,13 @@ Summary: PG-Strom extension module for PostgreSQL v15
 Group: Applications/Databases
 BuildRequires: postgresql15
 BuildRequires: postgresql15-devel
+BuildRequires: arrow-devel >= 21
+BuildRequires: parquet-devel >= 21
 Requires: postgresql15-server
 Requires: heterodb-extra >= %{__heterodb_extra_min_version}
 Requires: %{name}
+Requires: arrow-devel >= 21
+Requires: parquet-devel >= 21
 Requires(post): %{_sbindir}/update-alternatives
 Requires(postun): %{_sbindir}/update-alternatives
 
@@ -64,9 +70,13 @@ Summary: PG-Strom extension module for PostgreSQL v16
 Group: Applications/Databases
 BuildRequires: postgresql16
 BuildRequires: postgresql16-devel
+BuildRequires: arrow-devel >= 21
+BuildRequires: parquet-devel >= 21
 Requires: postgresql16-server
 Requires: heterodb-extra >= %{__heterodb_extra_min_version}
 Requires: %{name}
+Requires: arrow-devel >= 21
+Requires: parquet-devel >= 21
 Requires(post): %{_sbindir}/update-alternatives
 Requires(postun): %{_sbindir}/update-alternatives
 
@@ -89,9 +99,13 @@ Summary: PG-Strom extension module for PostgreSQL v17
 Group: Applications/Databases
 BuildRequires: postgresql17
 BuildRequires: postgresql17-devel
+BuildRequires: arrow-devel >= 21
+BuildRequires: parquet-devel >= 21
 Requires: postgresql17-server
 Requires: heterodb-extra >= %{__heterodb_extra_min_version}
 Requires: %{name}
+Requires: arrow-devel >= 21
+Requires: parquet-devel >= 21
 Requires(post): %{_sbindir}/update-alternatives
 Requires(postun): %{_sbindir}/update-alternatives
 
@@ -105,16 +119,52 @@ PG-Strom %{version}-%{release} built for PostgreSQL v17, based on %{__githash}
 %define __make_options_17  PG_CONFIG=%{__pg_config_17} %{__make_options_common} BINDIR=%{__pkgbindir_17}
 %endif
 
+# ----------------------------------------------------------------
+#  PostgreSQL 18 subpackage
+# ----------------------------------------------------------------
+%if %{__HAS_PG18}
+%package PG18
+Summary: PG-Strom extension module for PostgreSQL v18
+Group: Applications/Databases
+BuildRequires: postgresql18
+BuildRequires: postgresql18-devel
+BuildRequires: arrow-devel >= 21
+BuildRequires: parquet-devel >= 21
+Requires: postgresql18-server
+Requires: heterodb-extra >= %{__heterodb_extra_min_version}
+Requires: %{name}
+Requires: arrow-devel >= 21
+Requires: parquet-devel >= 21
+Requires(post): %{_sbindir}/update-alternatives
+Requires(postun): %{_sbindir}/update-alternatives
+
+%description PG18
+PG-Strom %{version}-%{release} built for PostgreSQL v18, based on %{__githash}
+
+%define __pkglibdir_18     %(%{__pg_config_18} --pkglibdir)
+%define __pkgbindir_18     %(%{__pg_config_18} --bindir)
+%define __pkgsharedir_18   %(%{__pg_config_18} --sharedir)
+%define __systemd_conf_18  %{_unitdir}/postgresql-17.service.d/pg_strom.conf
+%define __make_options_18  PG_CONFIG=%{__pg_config_17} %{__make_options_common} BINDIR=%{__pkgbindir_18}
+%endif
+
 %prep
 %setup -q -n @@STROM_TARBALL@@
 %if %{__HAS_PG15}
-%{__cp} -R . ../PG15
+%{__rm} -rf ../PG15
+%{__cp} -dpR . ../PG15
 %endif
 %if %{__HAS_PG16}
-%{__cp} -R . ../PG16
+%{__rm} -rf ../PG16
+%{__cp} -dpR . ../PG16
 %endif
 %if %{__HAS_PG17}
-%{__cp} -R . ../PG17
+%{__rm} -rf ../PG17
+%{__cp} -dpR . ../PG17
+%endif
+%if %{__HAS_PG18}
+%{__rm} -rf ../PG18
+%{__cp} -dpR . ../PG18
 %endif
 
 %build
@@ -142,6 +192,14 @@ pushd ../PG17
 popd
 %endif
 
+%if %{__HAS_PG18}
+pushd ../PG18
+%{__make} -C src -j 12 %{__make_options_18}
+%{__make} -C arrow-tools -j 6 %{__make_options_18} pg2arrow
+%{__make} -C arrow-tools -j 6 %{__make_options_18} arrow2csv
+popd
+%endif
+
 %install
 rm -rf %{buildroot}
 
@@ -150,6 +208,7 @@ pushd ../PG15
 %{__make} -C src         %{__make_options_15} CUDA_PATH=%{__cuda_path} install
 %{__make} -C arrow-tools %{__make_options_15} install-pg2arrow
 %{__make} -C arrow-tools %{__make_options_15} install-arrow2csv
+%{__make} -C arrow-tools %{__make_options_15} install-tsv2arrow
 %{__install} -Dpm 644 %{SOURCE1} %{buildroot}/%{__systemd_conf_15}
 popd
 %endif
@@ -159,6 +218,7 @@ pushd ../PG16
 %{__make} -C src         %{__make_options_16} CUDA_PATH=%{__cuda_path} install
 %{__make} -C arrow-tools %{__make_options_16} install-pg2arrow
 %{__make} -C arrow-tools %{__make_options_16} install-arrow2csv
+%{__make} -C arrow-tools %{__make_options_16} install-tsv2arrow
 %{__install} -Dpm 644 %{SOURCE1} %{buildroot}/%{__systemd_conf_16}
 popd
 %endif
@@ -168,7 +228,18 @@ pushd ../PG17
 %{__make} -C src         %{__make_options_17} CUDA_PATH=%{__cuda_path} install
 %{__make} -C arrow-tools %{__make_options_17} install-pg2arrow
 %{__make} -C arrow-tools %{__make_options_17} install-arrow2csv
+%{__make} -C arrow-tools %{__make_options_17} install-tsv2arrow
 %{__install} -Dpm 644 %{SOURCE1} %{buildroot}/%{__systemd_conf_17}
+popd
+%endif
+
+%if %{__HAS_PG18}
+pushd ../PG18
+%{__make} -C src         %{__make_options_18} CUDA_PATH=%{__cuda_path} install
+%{__make} -C arrow-tools %{__make_options_18} install-pg2arrow
+%{__make} -C arrow-tools %{__make_options_18} install-arrow2csv
+%{__make} -C arrow-tools %{__make_options_18} install-tsv2arrow
+%{__install} -Dpm 644 %{SOURCE1} %{buildroot}/%{__systemd_conf_18}
 popd
 %endif
 
@@ -180,12 +251,14 @@ rm -rf %{buildroot}
 if [ "$1" -eq 1 ]; then
     /usr/sbin/update-alternatives --install /usr/bin/pg2arrow   pgsql-pg2arrow   %{__pkgbindir_15}/pg2arrow   1500 || exit 0
     /usr/sbin/update-alternatives --install /usr/bin/arrow2csv  pgsql-arrow2csv  %{__pkgbindir_15}/arrow2csv  1500 || exit 0
+    /usr/sbin/update-alternatives --install /usr/bin/tsv2arrow  pgsql-tsv2arrow  %{__pkgbindir_15}/tsv2arrow  1500 || exit 0
 fi
 
 %postun PG15
 if [ "$1" -eq 0 ]; then
     /usr/sbin/update-alternatives --remove pgsql-pg2arrow   %{__pkgbindir_15}/pg2arrow   || exit 0
     /usr/sbin/update-alternatives --remove pgsql-arrow2csv  %{__pkgbindir_15}/arrow2csv  || exit 0
+	/usr/sbin/update-alternatives --remove pgsql-tsv2arrow  %{__pkgbindir_15}/tsv2arrow  || exit 0
 fi
 %endif
 
@@ -194,12 +267,14 @@ fi
 if [ "$1" -eq 1 ]; then
     /usr/sbin/update-alternatives --install /usr/bin/pg2arrow   pgsql-pg2arrow   %{__pkgbindir_16}/pg2arrow   1600 || exit 0
     /usr/sbin/update-alternatives --install /usr/bin/arrow2csv  pgsql-arrow2csv  %{__pkgbindir_16}/arrow2csv  1600 || exit 0
+    /usr/sbin/update-alternatives --install /usr/bin/tsv2arrow  pgsql-tsv2arrow  %{__pkgbindir_16}/tsv2arrow  1600 || exit 0
 fi
 
 %postun PG16
 if [ "$1" -eq 0 ]; then
     /usr/sbin/update-alternatives --remove pgsql-pg2arrow   %{__pkgbindir_16}/pg2arrow   || exit 0
     /usr/sbin/update-alternatives --remove pgsql-arrow2csv  %{__pkgbindir_16}/arrow2csv  || exit 0
+    /usr/sbin/update-alternatives --remove pgsql-tsv2arrow  %{__pkgbindir_16}/tsv2arrow  || exit 0
 fi
 %endif
 
@@ -208,11 +283,28 @@ fi
 if [ "$1" -eq 1 ]; then
     /usr/sbin/update-alternatives --install /usr/bin/pg2arrow   pgsql-pg2arrow   %{__pkgbindir_17}/pg2arrow   1700 || exit 0
     /usr/sbin/update-alternatives --install /usr/bin/arrow2csv  pgsql-arrow2csv  %{__pkgbindir_17}/arrow2csv  1700 || exit 0
+	/usr/sbin/update-alternatives --install /usr/bin/tsv2arrow  pgsql-tsv2arrow  %{__pkgbindir_17}/tsv2arrow  1700 || exit 0
 fi
 %postun PG17
 if [ "$1" -eq 0 ]; then
     /usr/sbin/update-alternatives --remove pgsql-pg2arrow   %{__pkgbindir_17}/pg2arrow   || exit 0
     /usr/sbin/update-alternatives --remove pgsql-arrow2csv  %{__pkgbindir_17}/arrow2csv  || exit 0
+    /usr/sbin/update-alternatives --remove pgsql-tsv2arrow  %{__pkgbindir_17}/tsv2arrow  || exit 0
+fi
+%endif
+
+%if %{__HAS_PG18}
+%post PG18
+if [ "$1" -eq 1 ]; then
+    /usr/sbin/update-alternatives --install /usr/bin/pg2arrow   pgsql-pg2arrow   %{__pkgbindir_18}/pg2arrow   1800 || exit 0
+    /usr/sbin/update-alternatives --install /usr/bin/arrow2csv  pgsql-arrow2csv  %{__pkgbindir_18}/arrow2csv  1800 || exit 0
+	/usr/sbin/update-alternatives --install /usr/bin/tsv2arrow  pgsql-tsv2arrow  %{__pkgbindir_18}/tsv2arrow  1800 || exit 0
+fi
+%postun PG18
+if [ "$1" -eq 0 ]; then
+    /usr/sbin/update-alternatives --remove pgsql-pg2arrow   %{__pkgbindir_18}/pg2arrow   || exit 0
+    /usr/sbin/update-alternatives --remove pgsql-arrow2csv  %{__pkgbindir_18}/arrow2csv  || exit 0
+    /usr/sbin/update-alternatives --remove pgsql-tsv2arrow  %{__pkgbindir_18}/tsv2arrow  || exit 0
 fi
 %endif
 
@@ -225,6 +317,7 @@ fi
 %{__pkglibdir_15}/pg_strom.so
 %{__pkgbindir_15}/pg2arrow
 %{__pkgbindir_15}/arrow2csv
+%{__pkgbindir_15}/tsv2arrow
 %{__pkgsharedir_15}/extension/pg_strom.control
 %{__pkgsharedir_15}/pg_strom/*
 %{__systemd_conf_15}
@@ -236,6 +329,7 @@ fi
 %{__pkglibdir_16}/pg_strom.so
 %{__pkgbindir_16}/pg2arrow
 %{__pkgbindir_16}/arrow2csv
+%{__pkgbindir_16}/tsv2arrow
 %{__pkgsharedir_16}/extension/pg_strom.control
 %{__pkgsharedir_16}/pg_strom/*
 %{__systemd_conf_16}
@@ -247,13 +341,44 @@ fi
 %{__pkglibdir_17}/pg_strom.so
 %{__pkgbindir_17}/pg2arrow
 %{__pkgbindir_17}/arrow2csv
+%{__pkgbindir_17}/tsv2arrow
 %{__pkgsharedir_17}/extension/pg_strom.control
 %{__pkgsharedir_17}/pg_strom/*
 %{__systemd_conf_17}
 %{__pkglibdir_17}/bitcode/pg_strom*
 %endif
 
+%if %{__HAS_PG18}
+%files PG18
+%{__pkglibdir_18}/pg_strom.so
+%{__pkgbindir_18}/pg2arrow
+%{__pkgbindir_18}/arrow2csv
+%{__pkgbindir_18}/tsv2arrow
+%{__pkgsharedir_18}/extension/pg_strom.control
+%{__pkgsharedir_18}/pg_strom/*
+%{__systemd_conf_18}
+%{__pkglibdir_18}/bitcode/pg_strom*
+%endif
+
 %changelog
+* Fri Oct 31 2025 KaiGai Kohei <kaigai@heterodb.com> - 6.1-1
+- Add support of Apache Paqeut file format in arrow_fdw
+- pg2arrow was refactored using libarrow/libparquet
+- Add tsv2arrow and arrow2csv based on libarrow/libparquet
+- Add SELECT INTO Direct mode
+- Reduction of GPU kernel memory footpoint using MinimalTuple
+- Add supports for PostgreSQL v18
+- various bug fixes
+
+* Tue Apr 1 2025 KaiGai Kohei <kaigai@heterodb.com> - 6.0-1
+- GPU-Sort and a few Window-functions support
+- Partitioned Pinned Inner Buffer
+- Arrow_Fdw Virtual Columns
+- AVG(numeric), SUM(numeric) accuracy improvement
+- GpuPreAgg final merge on GPU device
+- Improved GPU-tasks scheduling
+- various bug fixes
+
 * Sun Jul 28 2024 KaiGai Kohei <kaigai@heterodb.com> - 5.2-2
 - fixed two critical bugs (#817, #812)
 

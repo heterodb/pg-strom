@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="author" content="PG-Strom Development Team" />
+      <link rel="shortcut icon" href="../img/favicon.ico" />
+    <title>GPU-Sort - PG-Strom Manual</title>
+    <link rel="stylesheet" href="../css/theme.css" />
+    <link rel="stylesheet" href="../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+        <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet" />
+        <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet" />
+        <link href="../custom.css" rel="stylesheet" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "GPU-Sort";
+        var mkdocs_page_input_path = "gpusort.md";
+        var mkdocs_page_url = null;
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+          <a href=".." class="icon icon-home"> PG-Strom Manual
+        </a><div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" />
+  </form>
+  [<a href="../ja/gpusort/" style="color: #cccccc">Japanese</a> | <strong>English</strong>]
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="..">Home</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../install/">Install</a>
+                </li>
+              </ul>
+              <p class="caption"><span class="caption-text">Tutorial</span></p>
+              <ul class="current">
+                  <li class="toctree-l1"><a class="reference internal" href="../operations/">Basic Operations</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../brin/">BRIN Index</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../partition/">Partitioning</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../postgis/">PostGIS</a>
+                  </li>
+                  <li class="toctree-l1 current"><a class="reference internal current" href="#">GPU-Sort</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#gpu-task-execution">GPU Task Execution</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#enables-gpu-sort">Enables GPU-Sort</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#row-reductions-by-gpu-sort">Row reductions by GPU-Sort</a>
+    </li>
+    </ul>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../troubles/">Trouble Shooting</a>
+                  </li>
+              </ul>
+              <p class="caption"><span class="caption-text">Advanced Features</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../ssd2gpu/">GPUDirect SQL</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../arrow_fdw/">Apache Arrow</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../gpucache/">GPU Cache</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../pinned_buffer/">Pinned Inner Buffer</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../fluentd/">connect with Fluentd</a>
+                  </li>
+              </ul>
+              <p class="caption"><span class="caption-text">References</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../ref_types/">Data Types</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../ref_devfuncs/">Functions and Operators</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../ref_sqlfuncs/">SQL Objects</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../ref_params/">GUC Parameters</a>
+                  </li>
+              </ul>
+              <p class="caption"><span class="caption-text">Release Note</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v6.0/">PG-Strom v6.0</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v5.2/">PG-Strom v5.2</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v5.1/">PG-Strom v5.1</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v5.0/">PG-Strom v5.0</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v3.0/">PG-Strom v3.0</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v2.3/">PG-Strom v2.3</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v2.2/">PG-Strom v2.2</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v2.0/">PG-Strom v2.0</a>
+                  </li>
+              </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="..">PG-Strom Manual</a>
+        
+      </nav>
+      <div class="wy-nav-content">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
+          <li class="breadcrumb-item">Tutorial</li>
+      <li class="breadcrumb-item active">GPU-Sort</li>
+    <li class="wy-breadcrumbs-aside">
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
+              
+                <h1 id="gpu-sort">GPU-Sort</h1>
+<p>This chapter introduces the GPU-Sort and related features.</p>
+<h2 id="gpu-task-execution">GPU Task Execution</h2>
+<p><img alt="PG-Strom execution mode" src="../img/pgstrom_execution_mode.png" /></p>
+<p>To explain the conditions for using GPU-Sort, we first need to know how PG-Strom processes SQL workloads.</p>
+<p>When GPU-Scan and GPU-Join read a table to be processed, they divide the data into chunks of about 64MB and read it from storage to GPU, evaluate WHERE clauses and JOIN conditions on GPU, and write the processing results back to CPU.</p>
+<p>At this time, the GPU memory used for Scan/Join processing is released and reused to process the next 64MB chunk. Normally, data reading from storage, Scan/Join processing on GPU, and writing back to CPU are executed concurrently, but GPU memory is still released and reused one after another, so PG-Strom does not use much GPU memory.</p>
+<p>On the other hand, GPU-PreAgg is different. Due to the nature of the workload, the results of the aggregation process are stored on the GPU (Dam execution), and then written back to the CPU in one go. Therefore, when GPU-PreAgg is completed, almost all of the data is in the GPU memory.</p>
+<p>Due to the nature of the sorting process, all of the data to be sorted must be loaded onto the GPU in order to execute GPU-Sort.
+In other words, in the case of GPU-Sort, which does not involve aggregation operations and has only GPU-Scan and GPU-Join as its lower nodes, the execution results must be stored in the GPU memory as in GPU-PreAgg. This is the same execution method used in <a href="../pinned_buffer/">Inner Pinned Buffer in GpuJoin</a>, and when the results of GPU-Scan/Join are used in the next step, they are kept in the GPU memory instead of being returned to the CPU.</p>
+<h2 id="enables-gpu-sort">Enables GPU-Sort</h2>
+<p>Due to the nature of sorting workloads, all the target data must be stored in GPU memory.</p>
+<p>Therefore, it is a basic premise that the data to be sorted must fix in the GPU memory capacity, but there is one more thing to consider.</p>
+<p>Various GPU processes in PG-Strom have a mechanism called CPU-Fallback, which re-executes the processing of operators and SQL functions on the CPU if they cannot be completed on the GPU. Typically, this is the case when variable-length data does not fit into the PostgreSQL block size (8kB) and is stored in an external TOAST table. CPU-Fallback is a function to ensure continuity of processing even for extremely exceptional data, but rows that are subject to CPU-Fallback are stored in the CPU and do not exist in GPU memory, which causes an obstacle when sorting.</p>
+<p>Therefore, the GPU-Sort function works only when the CPU-Fallback function is disabled, i.e., when <code>pg_strom.cpu_fallback=off</code> is set.</p>
+<p><img alt="GPU-Sort with Window-Functions" src="../img/window_functions.png" /></p>
+<p>If CPU-Fallback is disabled, the complete results of GPU-Scan/Join/PreAgg are guaranteed to be in GPU memory, so PG-Strom can perform parallel sorting based on the Bitonic-Sorting algorithm and return the sorted results to the CPU.</p>
+<p>When used with a window function that limits the number of rows, such as the LIMIT clause or <code>rank() &lt; 4</code>, it will reduce the number of data returned to the CPU based on these optimization hints. This should contribute to speedup by reducing the number of data to be processed by the CPU.</p>
+<p>The following execution plan shows the result of narrowing down the number of rows using a window function (<code>rank() &lt; 4</code>) without enabling GPU-Sort.</p>
+<pre><code>=# explain analyze
+   select * from (
+       select c_region, c_nation, c_city, lo_orderdate, sum(lo_revenue) lo_rev,
+              rank() over(partition by c_region, c_nation, c_city
+                          order by sum(lo_revenue)) cnt
+         from lineorder, customer
+        where lo_custkey = c_custkey
+          and lo_shipmode in ('RAIL','SHIP')
+         group by c_region, c_nation, c_city, lo_orderdate
+   ) subqry
+   where cnt &lt; 4;
+                                                                             QUERY PLAN
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ WindowAgg  (cost=32013352.01..33893039.51 rows=75187500 width=84) (actual time=13158.987..13335.106 rows=750 loops=1)
+   Run Condition: (rank() OVER (?) &lt; 4)
+   -&gt;  Sort  (cost=32013352.01..32201320.76 rows=75187500 width=76) (actual time=13158.976..13238.136 rows=601500 loops=1)
+         Sort Key: customer.c_region, customer.c_nation, customer.c_city, (pgstrom.sum_numeric((pgstrom.psum(lineorder.lo_revenue))))
+         Sort Method: quicksort  Memory: 76268kB
+         -&gt;  HashAggregate  (cost=15987574.35..18836475.71 rows=75187500 width=76) (actual time=9990.801..10271.543 rows=601500 loops=1)
+               Group Key: customer.c_region, customer.c_nation, customer.c_city, lineorder.lo_orderdate
+               Planned Partitions: 8  Batches: 1  Memory Usage: 516113kB
+               -&gt;  Custom Scan (GpuPreAgg) on lineorder  (cost=4967906.38..5907750.13 rows=75187500 width=76) (actual time=9175.476..9352.529 rows=1203000 loops=1)
+                     GPU Projection: pgstrom.psum(lo_revenue), c_region, c_nation, c_city, lo_orderdate
+                     GPU Scan Quals: (lo_shipmode = ANY ('{RAIL,SHIP}'::bpchar[])) [plan: 600046000 -&gt; 171773200, exec: 1311339 -&gt; 362780]
+                     GPU Join Quals [1]: (lo_custkey = c_custkey) [plan: 171773200 -&gt; 171773200, exec: 362780 -&gt; 322560
+                     GPU Outer Hash [1]: lo_custkey
+                     GPU Inner Hash [1]: c_custkey
+                     GPU Group Key: c_region, c_nation, c_city, lo_orderdate
+                     Scan-Engine: GPU-Direct with 2 GPUs &lt;0,1&gt;; direct=11395910, ntuples=1311339
+                     -&gt;  Seq Scan on customer  (cost=0.00..81963.11 rows=3000011 width=46) (actual time=0.008..519.064 rows=3000000 loops=1)
+ Planning Time: 1.395 ms
+ Execution Time: 13494.808 ms
+(19 rows)
+</code></pre>
+<p>After GPU-PreAgg, HashAggregate is run to aggregate the partial aggregation results, and Sort is run to sort the aggregated values. Finally, WindowAgg is run to narrow down the results to the top three <code>sum(lo_revenue)</code> for each <code>c_region</code>, <code>c_nation</code>, and <code>c_city</code>.
+The processing time for GPU-PreAgg is 9.352 seconds, so we can see that roughly 4 seconds of the latter half of the process was spent on the CPU.</p>
+<p>On the other hand, the following execution plan disables CPU-Fallback by setting <code>pg_strom.cpu_fallback=off</code> (i.e. enables GPU-Sort).</p>
+<pre><code>=# set pg_strom.cpu_fallback = off;
+SET
+=# explain analyze
+   select * from (
+       select c_region, c_nation, c_city, lo_orderdate, sum(lo_revenue) lo_rev,
+              rank() over(partition by c_region, c_nation, c_city
+                          order by sum(lo_revenue)) cnt
+         from lineorder, customer
+        where lo_custkey = c_custkey
+          and lo_shipmode in ('RAIL','SHIP')
+         group by c_region, c_nation, c_city, lo_orderdate
+   ) subqry
+   where cnt &lt; 4;
+                                                                       QUERY PLAN
+--------------------------------------------------------------------------------------------------------------------------------------------------------
+ WindowAgg  (cost=5595978.47..5602228.47 rows=125000 width=84) (actual time=9596.930..9598.194 rows=750 loops=1)
+   Run Condition: (rank() OVER (?) &lt; 4)
+   -&gt;  Result  (cost=5595978.47..5599415.97 rows=125000 width=76) (actual time=9596.918..9597.292 rows=750 loops=1)
+         -&gt;  Custom Scan (GpuPreAgg) on lineorder  (cost=5595978.47..5597540.97 rows=125000 width=76) (actual time=9596.912..9597.061 rows=750 loops=1)
+               GPU Projection: pgstrom.psum(lo_revenue), c_region, c_nation, c_city, lo_orderdate
+               GPU Scan Quals: (lo_shipmode = ANY ('{RAIL,SHIP}'::bpchar[])) [plan: 600046000 -&gt; 171773200, exec: 1311339 -&gt; 362780]
+               GPU Join Quals [1]: (lo_custkey = c_custkey) [plan: 171773200 -&gt; 171773200, exec: 362780 -&gt; 322560
+               GPU Outer Hash [1]: lo_custkey
+               GPU Inner Hash [1]: c_custkey
+               GPU Group Key: c_region, c_nation, c_city, lo_orderdate
+               Scan-Engine: GPU-Direct with 2 GPUs &lt;0,1&gt;; direct=11395910, ntuples=1311339
+               GPU-Sort keys: c_region, c_nation, c_city, pgstrom.fsum_numeric((pgstrom.psum(lo_revenue)))
+               Window-Rank Filter: rank() over(PARTITION BY c_region, c_nation, c_city ORDER BY pgstrom.fsum_numeric((pgstrom.psum(lo_revenue)))) &lt; 4
+               -&gt;  Seq Scan on customer  (cost=0.00..81963.11 rows=3000011 width=46) (actual time=0.006..475.006 rows=3000000 loops=1)
+ Planning Time: 0.381 ms
+ Execution Time: 9710.616 ms
+(16 rows)
+</code></pre>
+<p>The <code>HashAggregate</code> and <code>Sort</code> that were in the original query plan have gone, and instead, the lines <code>GPU-Sort keys</code> and <code>Window-Rank Filter</code> have appeared as options for <code>GpuPreAgg</code>.</p>
+<p>This indicates that <code>GpuPreAgg</code> creates the complete aggregation on the GPU, then sorts and outputs it.</p>
+<p>In addition, in this query, filtering is performed using the window function <code>rank()</code>. By pushing down this condition to the lower node <code>GpuPreAgg</code>, rows that are known to be filtered out in advance are removed from the result set, reducing the amount of data transferred from the GPU to the CPU and the number of rows that the CPU needs to copy. These processes are processed in parallel on the GPU memory, so they are generally faster than CPU processing.</p>
+<h2 id="row-reductions-by-gpu-sort">Row reductions by GPU-Sort</h2>
+<p>There are several conditions that must be met for GPU-Sort to be triggered.
+As explained in the previous section, the first prerequisite is that CPU-Fallback is disabled.</p>
+<p>The optimizer will insert GPU-Sort in the following cases:
+- Upper nodes require sorted results, such as in an ORDER BY clause.
+- Window functions are used, and upper nodes require sorted results.</p>
+<p>For these workloads, PG-Strom will generate GPU-PreAgg/Join/Scan execution plans with GPU-Sort.</p>
+<p>In addition, in the following cases, by completing the sorting process on the GPU, it is possible to secondarily reduce the number of rows to be written back to CPU from the GPU.
+- When a LIMIT clause is added to ORDER BY, and the maximum number of rows that should be output is known in advance.
+- When the window function <code>rank()</code> or the like is used, the top number of rows that should be output from each partition is known in advance.</p>
+<p>The following execution plan joins several tables, performs aggregation operations, sorts the results by <code>d_year</code> and <code>revenue</code>, and outputs the top 10.</p>
+<pre><code>=# set pg_strom.cpu_fallback = off;
+SET
+=# explain
+    select c_nation, s_nation, d_year, sum(lo_revenue) as revenue
+      from customer, lineorder, supplier, date1
+     where lo_custkey = c_custkey
+       and lo_suppkey = s_suppkey
+       and lo_orderdate = d_datekey
+       and c_region = 'ASIA'  and s_region = 'ASIA'
+       and d_year &gt;= 1992 and d_year &lt;= 1997
+     group by c_nation, s_nation, d_year
+     order by d_year, revenue
+     limit 10;
+                                                                           QUERY PLAN
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Gather  (cost=19266896.24..19266897.46 rows=10 width=68) (actual time=44024.638..44056.484 rows=10 loops=1)
+   Workers Planned: 2
+   Workers Launched: 2
+   -&gt;  Result  (cost=19265896.24..19265896.46 rows=10 width=68) (actual time=44016.179..44016.185 rows=3 loops=3)
+         -&gt;  Parallel Custom Scan (GpuPreAgg) on lineorder  (cost=19265896.24..19265896.31 rows=10 width=68) (actual time=44016.177..44016.181 rows=3 loops=3)
+               GPU Projection: pgstrom.psum(lo_revenue), c_nation, s_nation, d_year
+               GPU Join Quals [1]: (s_suppkey = lo_suppkey) [plan: 2500011000 -&gt; 494752100, exec: 0 -&gt; 0
+               GPU Outer Hash [1]: lo_suppkey
+               GPU Inner Hash [1]: s_suppkey
+               GPU Join Quals [2]: (c_custkey = lo_custkey) [plan: 494752100 -&gt; 97977410, exec: 0 -&gt; 0
+               GPU Outer Hash [2]: lo_custkey
+               GPU Inner Hash [2]: c_custkey
+               GPU Join Quals [3]: (d_datekey = lo_orderdate) [plan: 97977410 -&gt; 84024450, exec: 0 -&gt; 0
+               GPU Outer Hash [3]: lo_orderdate
+               GPU Inner Hash [3]: d_datekey
+               GPU Group Key: c_nation, s_nation, d_year
+               Scan-Engine: GPU-Direct with 2 GPUs &lt;0,1&gt;; direct=114826068, ntuples=0
+               GPU-Sort keys: d_year, pgstrom.fsum_numeric((pgstrom.psum(lo_revenue)))
+               GPU-Sort Limit: 10
+               -&gt;  Parallel Custom Scan (GpuScan) on supplier  (cost=100.00..78805.87 rows=824560 width=22) (actual time=16.090..104.527 rows=666540 loops=3)
+                     GPU Projection: s_nation, s_suppkey
+                     GPU Scan Quals: (s_region = 'ASIA'::bpchar) [plan: 9999718 -&gt; 824560, exec: 10000000 -&gt; 1999620]
+                     Scan-Engine: GPU-Direct with 2 GPUs &lt;0,1&gt;; direct=168663, ntuples=10000000
+               -&gt;  Parallel Custom Scan (GpuScan) on customer  (cost=100.00..79517.76 rows=2475728 width=22) (actual time=14.848..226.354 rows=2000770 loops=3)
+                     GPU Projection: c_nation, c_custkey
+                     GPU Scan Quals: (c_region = 'ASIA'::bpchar) [plan: 30003780 -&gt; 2475728, exec: 30000000 -&gt; 6002311]
+                     Scan-Engine: GPU-Direct with 2 GPUs &lt;0,1&gt;; direct=519628, ntuples=30000000
+               -&gt;  Parallel Seq Scan on date1  (cost=0.00..69.55 rows=1289 width=8) (actual time=0.009..0.132 rows=731 loops=3)
+                     Filter: ((d_year &gt;= 1992) AND (d_year &lt;= 1997))
+                     Rows Removed by Filter: 121
+ Planning Time: 0.786 ms
+ Execution Time: 44093.114 ms
+(32 rows)
+</code></pre>
+<p>Without GPU-Sort, GPU-PreAgg will generate 4375 partial aggregation results, integrates them with HashAggregate, sorts them with Sort, and outputs only the top 10 with Limit.</p>
+<p>Depending on the scale of the problem, a strategy may be adopted in which partial sort results are generated for each PostgreSQL parallel worker and merge-sorted. In any case, sorting processing, which places a heavy load on the CPU, becomes a troublesome problem as the number of items increases.</p>
+<p>However, if it is known in advance that only the top 10 sorted results will be output, there is no need to return 4365 pieces of data to the CPU in the first place.</p>
+<p>This query execution plan does not include CPU Sort or HashAggregate.
+Instead, as a post-processing step of GPU-PreAgg, the results are sorted based on the key values ​​displayed in the <code>GPU-Sort keys</code> line, and only the 10 rows displayed in the <code>GPU-Sort Limit</code> line are returned. The execution plan is to immediately return the GPU processing results to the client without executing <code>Sort</code> or <code>Limit</code> on the CPU side.</p>
+<p>In addition to the LIMIT clause, window functions can be used as hints to reduce the number of rows. Currently, the following conditional expressions can be used as hints:</p>
+<ul>
+<li><code>rank() OVER(...) &lt; CONST</code></li>
+<li><code>rank() OVER(...) &lt;= CONST</code></li>
+<li><code>dense_rank() OVER(...) &lt; CONST</code></li>
+<li><code>dense_rank() OVER(...) &lt;= CONST</code></li>
+<li><code>row_number() OVER(...) &lt; CONST</code></li>
+<li><code>row_number() OVER(...) &lt;= CONST</code></li>
+</ul>
+<p>If you want to disable CPU-Fallback but not GPU-Sort, you can enable/disable only GPU-Sort by <code>pg_strom.enable_gpusort = [on|off]</code>.</p>
+              
+            </div>
+          </div><footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
+        <a href="../postgis/" class="btn btn-neutral float-left" title="PostGIS"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+        <a href="../troubles/" class="btn btn-neutral float-right" title="Trouble Shooting">Next <span class="icon icon-circle-arrow-right"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+          
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="Versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+    
+      <span><a href="../postgis/" style="color: #fcfcfc">&laquo; Previous</a></span>
+    
+    
+      <span><a href="../troubles/" style="color: #fcfcfc">Next &raquo;</a></span>
+    
+  </span>
+</div>
+    <script src="../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "..";</script>
+    <script src="../js/theme_extra.js"></script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/main.js"></script>
+    <script>
+        jQuery(function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        });
+    </script>
+
+</body>
+</html>

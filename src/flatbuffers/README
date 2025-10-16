@@ -1,0 +1,7 @@
+files in this directory were copied from Apache Arrow v21 source code repository.
+
+https://github.com/apache/arrow/tree/apache-arrow-21.0.0
+ --> cp -R arrow/cpp/thirdparty/flatbuffers/include/flatbuffers/* ./
+ --> cp -R arrow/cpp/src/generated/* ./
+
+When these definitions are changed in the future, we must update these files timely.

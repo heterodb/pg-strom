@@ -864,3 +864,288 @@ PG_BITWISE_OPERATOR_TEMPLATE(int1shl,int1,int1,int4,<<)
 PG_BITWISE_OPERATOR_TEMPLATE(int2shl,int2,int2,int4,<<)
 PG_BITWISE_OPERATOR_TEMPLATE(int4shl,int4,int4,int4,<<)
 PG_BITWISE_OPERATOR_TEMPLATE(int8shl,int8,int8,int4,<<)
+
+/*
+ * Device only type cast functions instead of CoerceViaIO
+ */
+#define PG_DEVCAST_TEXT_TO_INT_TEMPLATE(XTYPE,BTYPE,__MIN,__MAX)		\
+	PUBLIC_FUNCTION(bool)												\
+	pgfn_devcast_text_to_##XTYPE(XPU_PGFUNCTION_ARGS)					\
+	{																	\
+		KEXP_PROCESS_ARGS1(XTYPE,text,arg);								\
+																		\
+		if (XPU_DATUM_ISNULL(&arg))										\
+			result->expr_ops = NULL;									\
+		else if (!xpu_text_is_valid(kcxt, &arg))						\
+			return false;												\
+		else															\
+		{																\
+			const char *str = arg.value;								\
+			int			len = arg.length;								\
+			BTYPE		ival = 0;										\
+			bool		negative = false;								\
+																		\
+			if (*str == '-')											\
+			{															\
+				str++;													\
+				len--;													\
+				negative = true;										\
+			}															\
+			while (len-- > 0)											\
+			{															\
+				int		c = *str++;										\
+																		\
+				if (c < '0' || c > '9')									\
+				{														\
+					STROM_ELOG(kcxt, "invalid input for " #XTYPE);		\
+					return false;										\
+				}														\
+				if (ival > (__MAX/10) ||								\
+					(ival == (__MAX/10) && c > (negative ? '8' : '7')))	\
+				{														\
+					STROM_ELOG(kcxt, #XTYPE ": out of range");			\
+					return false;										\
+				}														\
+				ival = 10 * ival + (c - '0');							\
+			}															\
+			if (negative)												\
+				ival = -ival;											\
+			assert(ival >= __MIN && ival <= __MAX);						\
+			result->expr_ops = &xpu_##XTYPE##_ops;						\
+			result->value = ival;										\
+		}																\
+		return true;													\
+	 }
+PG_DEVCAST_TEXT_TO_INT_TEMPLATE(int1,int32_t,SCHAR_MIN,SCHAR_MAX)
+PG_DEVCAST_TEXT_TO_INT_TEMPLATE(int2,int32_t,SHRT_MIN,SHRT_MAX)
+PG_DEVCAST_TEXT_TO_INT_TEMPLATE(int4,int32_t,INT_MIN,INT_MAX)
+PG_DEVCAST_TEXT_TO_INT_TEMPLATE(int8,int64_t,LONG_MIN,LONG_MAX)
+
+STATIC_FUNCTION(bool)
+__strtof(const char *str, int len, double *p_fval)
+{
+	const char *pos;
+	double		fval = 0.0;
+	double		divisor = 1.0;
+	char		sign = '+';
+	bool		meet_period = false;
+
+	/* skip leading whitespace */
+	while (len > 0 && __isspace(*str))
+	{
+		str++;
+		len--;
+	}
+	if (len == 0)
+		return false;
+	pos = str;
+	/* sign (optional) */
+	if (*pos == '+' || *pos == '-')
+	{
+		sign = *pos;
+		pos++;
+		len--;
+	}
+	/* Decimal */
+	while (len > 0)
+	{
+		int		c = *pos;
+
+		if (c == '.' && !meet_period)
+			meet_period = true;
+		else if (__isdigit(c))
+		{
+			fval = 10.0 * fval + (double)(c - '0');
+			if (meet_period)
+				divisor *= 10.0;
+		}
+		else
+			break;
+		pos++;
+		len--;
+	}
+	/* Exponential */
+	if (len > 0 && (*pos == 'e' || *pos == 'E'))
+	{
+		int		expo = 0;
+		char	expo_sign = '+';
+
+		pos++;
+		len--;
+		if (len == 0)
+			goto out;
+		if (*pos == '+' || *pos == '-')
+		{
+			expo_sign = *pos;
+			pos++;
+			len--;
+		}
+		while (len > 0)
+		{
+			int		c = *pos;
+
+			if (!__isdigit(c))
+				break;
+			expo = 10 * expo + (c - '0');
+			pos++;
+			len--;
+		}
+		if (expo_sign == '+')
+			divisor *= pow(1.0, expo);
+		else
+			fval *= pow(1.0, expo);
+	}
+	/* skip tailing whitespace */
+	while (len > 0 && __isspace(*pos))
+	{
+		pos++;
+		len--;
+	}
+	/* len == 0 if valid digits */
+	if (len == 0)
+	{
+		fval /= divisor;
+		if (sign == '-')
+			fval = -fval;
+		*p_fval = fval;
+		return true;
+	}
+out:
+	assert(pos >= str);
+	len += (pos - str);
+	if (len >= 3 && __strncasecmp(str, "NaN", 3) == 0)
+	{
+		fval = DBL_NAN;
+		str += 3;
+		len -= 3;
+	}
+	else if (len >= 8 && __strncasecmp(str, "Infinity", 8) == 0)
+	{
+		fval = DBL_INF;
+		str += 8;
+		len -= 8;
+	}
+	else if (len >= 9 && __strncasecmp(str, "+Infinity", 9) == 0)
+	{
+		fval = DBL_INF;
+		str += 9;
+		len -= 9;
+	}
+	else if (len >= 9 && __strncasecmp(str, "-Infinity", 9) == 0)
+	{
+		fval = -DBL_INF;
+		str += 9;
+		len -= 9;
+	}
+	else if (len >= 3 && __strncasecmp(str, "inf", 3) == 0)
+	{
+		fval = DBL_INF;
+		str += 3;
+		len -= 3;
+	}
+	else if (len >= 4 && __strncasecmp(str, "+inf", 4) == 0)
+	{
+		fval = DBL_INF;
+		str += 4;
+		len -= 4;
+	}
+	else if (len >= 4 && __strncasecmp(str, "-inf", 4) == 0)
+	{
+		fval = -DBL_INF;
+		str += 4;
+		len -= 4;
+	}
+    /* skip tailing whitespace */
+    while (len > 0 && __isspace(*str))
+    {
+        str++;
+        len--;
+    }
+	if (len == 0)
+	{
+		*p_fval = fval;
+		return true;
+	}
+	return false;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_devcast_text_to_float2(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS1(float2,text,arg);
+	double		fval;
+
+	if (XPU_DATUM_ISNULL(&arg))
+		result->expr_ops = NULL;
+	else if (!xpu_text_is_valid(kcxt, &arg))
+		return false;
+	else if (__strtof(arg.value, arg.length, &fval))
+	{
+		if (isfinite(fval) && (fval < -(double)HALF_MAX ||
+							   fval >  (double)HALF_MAX))
+		{
+			STROM_ELOG(kcxt, "value is out of range for float2");
+			return false;
+		}
+		result->expr_ops = &xpu_float2_ops;
+		result->value = fval;
+	}
+	else
+	{
+		STROM_ELOG(kcxt, "invalid input for float2");
+		return false;
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_devcast_text_to_float4(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS1(float4,text,arg);
+	double		fval;
+
+	if (XPU_DATUM_ISNULL(&arg))
+		result->expr_ops = NULL;
+	else if (!xpu_text_is_valid(kcxt, &arg))
+		return false;
+	else if (__strtof(arg.value, arg.length, &fval))
+	{
+		if (isfinite(fval) && (fval < -(double)FLT_MAX ||
+							   fval >  (double)FLT_MAX))
+		{
+			STROM_ELOG(kcxt, "value is out of range for float4");
+			return false;
+		}
+		result->expr_ops = &xpu_float4_ops;
+		result->value = fval;
+	}
+	else
+	{
+		STROM_ELOG(kcxt, "invalid input for float4");
+		return false;
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_devcast_text_to_float8(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS1(float8,text,arg);
+	double		fval;
+
+	if (XPU_DATUM_ISNULL(&arg))
+		result->expr_ops = NULL;
+	else if (!xpu_text_is_valid(kcxt, &arg))
+		return false;
+	else if (__strtof(arg.value, arg.length, &fval))
+	{
+		result->expr_ops = &xpu_float8_ops;
+		result->value = fval;
+	}
+	else
+	{
+		STROM_ELOG(kcxt, "invalid input for float8");
+		return false;
+	}
+	return true;
+}

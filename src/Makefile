@@ -8,9 +8,9 @@ include ../Makefile.common
 #
 STROM_OBJS = main.o githash.o extra.o codegen.o executor.o fallback.o \
              gpu_device.o gpu_service.o dpu_device.o \
-             gpu_scan.o gpu_join.o gpu_preagg.o gpu_sort.o \
-             relscan.o brin.o gist.o gpu_cache.o \
-             arrow_fdw.o arrow_nodes.o \
+             gpu_scan.o gpu_join.o gpu_preagg.o \
+             relscan.o brin.o gist.o gpu_cache.o select_into.o \
+             arrow_fdw.o arrow_meta.o parquet_read.o \
              misc.o float2.o tinyint.o aggfuncs.o
 GENERATED-HEADERS = gpu_devattrs.h githash.c
 STROM_HEADERS = arrow_defs.h arrow_ipc.h float2.h
@@ -31,7 +31,7 @@ include Makefile.cuda
 __STROM_SQL = pg_strom--4.0--5.0.sql \
               pg_strom--5.0.sql \
               pg_strom--5.0--5.1.sql \
-              pg_strom--5.1--5.3.sql
+              pg_strom--5.1--6.0.sql
 STROM_SQL = $(addprefix sql/,$(__STROM_SQL))
 
 #
@@ -57,15 +57,38 @@ PGSTROM_FLAGS += -DPGSHAREDIR=\"$(shell $(PG_CONFIG) --sharedir)\"   \
         -DCUDA_MAXTHREADS_PER_BLOCK=$(MAXTHREADS_PER_BLOCK) \
         -DCUDA_CORE_FILES="\"$(__CUDA_CORE_FILES)\""      \
         -DCUDA_CORE_HEADERS="\"$(__CUDA_CORE_HEADERS)\""  \
-        -DCUDA_TOOLKIT_BASEDIR="\"$(CUDA_PATH)\""         \
-        -DHOST_COMPILER_BINPATH="\"$(shell dirname $(shell which $(CC)))\""
-
+        -DCUDA_TOOLKIT_BASEDIR="\"$(CUDA_PATH)\""
 #
 # Pre-built Fatbin (only debugging purpose)
 #
 ifeq ($(WITH_FATBIN),1)
 DATA_built = $(CUDA_FATBIN)
 PGSTROM_FLAGS += -DWITH_FATBIN=1
+endif
+
+#
+# libarrow / libparquet
+#
+HAS_LIBARROW = $(shell pkgconf --exists arrow>/dev/null 2>&1   && echo -n yes)
+HAS_PARQUET  = $(shell pkgconf --exists parquet>/dev/null 2>&1 && echo -n yes)
+ifeq ($(HAS_LIBARROW),yes)
+PGSTROM_FLAGS += -DHAS_LIBARROW=1
+PG_CXXFLAGS += $(shell pkgconf --cflags arrow)
+ifeq ($(HAS_PARQUET),yes)
+PGSTROM_FLAGS += -DHAS_PARQUET=1
+PG_CXXFLAGS += $(shell pkgconf --cflags parquet)
+SHLIB_LINK += $(shell pkgconf --libs parquet)
+PARQUET_LIBDIR = $(shell pkgconf --variable=libdir parquet)
+ifneq ($(PARQUET_LIBDIR),)
+SHLIB_LINK += -Wl,-rpath,$(PARQUET_LIBDIR)
+endif
+else
+SHLIB_LINK += $(shell pkgconf --libs arrow)
+ARROW_LIBDIR = $(shell pkgconf --variable=libdir arrow)
+ifneq ($(ARROW_LIBDIR),)
+SHLIB_LINK += -Wl,-rpath,$(ARROW_LIBDIR)
+endif
+endif
 endif
 
 #
@@ -81,7 +104,8 @@ EXTRA_CLEAN = $(CUDA_OBJS) $(GENERATED-HEADERS) \
               $(shell ls -d pgstrom-gpucode-V*-*.fatbin 2>/dev/null)
 EXTENSION = pg_strom
 PG_CPPFLAGS := $(PGSTROM_FLAGS) -I $(CUDA_IPATH)
-SHLIB_LINK := -L $(CUDA_LPATH) -lcuda
+PG_CXXFLAGS := -std=c++17 -Wno-sign-compare
+SHLIB_LINK += -L $(CUDA_LPATH) -lcuda
 
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)

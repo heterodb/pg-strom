@@ -90,6 +90,14 @@ SELECT * FROM ft_2 EXCEPT SELECT * FROM tt_2 ORDER BY id;
 -- Append mode
 --
 \! $PG2ARROW_CMD -c 'SELECT id+3000,-i2,-i4,-i8,-f2,-f4,-f8,c,-num FROM regtest_arrow_utils_temp.tt_1' --append $ARROW_TEST_DATA_DIR/test_pg2arrow_tt1.arrow
+Query results field '?column?' has incompatible name with Arrow field 'id', keep the original one.
+Query results field '?column?' has incompatible name with Arrow field 'i2', keep the original one.
+Query results field '?column?' has incompatible name with Arrow field 'i4', keep the original one.
+Query results field '?column?' has incompatible name with Arrow field 'i8', keep the original one.
+Query results field '?column?' has incompatible name with Arrow field 'f2', keep the original one.
+Query results field '?column?' has incompatible name with Arrow field 'f4', keep the original one.
+Query results field '?column?' has incompatible name with Arrow field 'f8', keep the original one.
+Query results field '?column?' has incompatible name with Arrow field 'num', keep the original one.
 INSERT INTO tt_1 (
   SELECT id+3000,-i2,-i4,-i8,-f2,-f4,-f8,c,-num FROM tt_1
 );

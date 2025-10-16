@@ -87,6 +87,7 @@ typedef struct
 	uint32_t		smx_row_count;	/* current position of outer relation */
 	int				depth;		/* depth when last kernel is suspended */
 	int				scan_done;	/* smallest depth that may produce more tuples */
+	bool			stats_written; /* statistics are already written */
 	/* only KDS_FORMAT_BLOCK */
 	uint32_t		block_id;	/* BLOCK format needs to keep htuples on the */
 	uint32_t		lp_count;	/* lp_items array once, to pull maximum GPU */
@@ -133,8 +134,7 @@ typedef struct {
 	uint32_t		kvecs_ndims;	/* number of kvecs buffers for each warp */
 	uint32_t		extra_sz;
 	uint32_t		n_rels;			/* >0, if JOIN is involved */
-	uint32_t		groupby_prepfn_bufsz;
-	uint32_t		groupby_prepfn_nbufs;
+	uint32_t		groupby_prepfn_nbufs;	/* >0, if prep-func buffer is used */
 	/* GPU-task specific read-only properties. */
 	uint32_t		cuda_dindex;
 	uint32_t		cuda_stack_limit;
@@ -155,7 +155,7 @@ typedef struct {
 		uint32_t	nitems_roj;		/* nitems of RIGHT-OUTER-JOIN tuples */
 		uint32_t	nitems_gist;	/* nitems picked up by GiST index */
 		uint32_t	nitems_out;		/* nitems after this depth */
-	} stats[1];		/* 'n_rels' items */
+	} stats[1]		__attribute__ ((aligned(8)));		/* 'n_rels' items */
 	/*
 	 * variable length fields
 	 * +-----------------------------------+  <---  __KERN_GPUTASK_WARP_OFFSET()
@@ -242,13 +242,6 @@ execGpuScanLoadSource(kern_context *kcxt,
 					  const kern_expression *kexp_move_vars,
 					  char     *dst_kvecs_buffer);
 EXTERN_FUNCTION(int)
-execGpuJoinProjection(kern_context *kcxt,
-					  kern_warp_context *wp,
-					  int n_rels,
-					  kern_data_store *kds_dst,
-					  kern_expression *kexp_projection,
-					  char *kvars_addr_wp);
-EXTERN_FUNCTION(int)
 execGpuPreAggGroupBy(kern_context *kcxt,
 					 kern_warp_context *wp,
 					 int n_rels,
@@ -329,5 +322,25 @@ typedef struct {
 	uint32_t		nitems;
 	uint32_t		redo_items[1];
 } kern_gpucache_redolog;
+
+/*
+ * GPU-Sort + Window-Rank function control structure
+ *
+ * +-------------------------------+
+ * | Partition-Hash (u32) * NITEMS |
+ * +-------------------------------+
+ * | OrderBy-Hash (u32) * NITEMS   |
+ * +-------------------------------+
+ * | Results Array * (NITEMS +...) |
+ * =                               =
+ * |                               |
+ * +-------------------------------+
+ */
+#define GPUSORT_WINDOWRANK_RESULTS_NROOMS(nitems)						\
+	((nitems) +															\
+	 ((nitems) > (1<<11) ? (((nitems) + ((1<<11)-1)) >> 11) : 0) +		\
+	 ((nitems) > (1<<22) ? (((nitems) + ((1<<22)-1)) >> 22) : 0))
+#define GPUSORT_WINDOWRANK_RESULTS_NSTEPS(nitems)						\
+	((nitems) <= (1<<11) ? 1 : ((nitems) <= (1<<22) ? 3 : 5))
 
 #endif	/* CUDA_COMMON_H */

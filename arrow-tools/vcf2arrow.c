@@ -40,9 +40,10 @@ static bool			shows_progress = false;
 static ArrowKeyValue *customMetadata = NULL;
 static int			customMetadata_nrooms = 0;
 static int			customMetadata_nitems = 0;
-static const char **variantNames = NULL;
-static int			variantNames_nitems = 0;
-static int			variantNames_nrooms = 0;
+static const char ***sampleNames = NULL;
+static int			sampleNames_nitems = 0;
+static int			sampleNames_nrooms = 0;
+static struct StringInfoData *sampleNamesMetadata = NULL;
 
 #define Max(a,b)	((a) > (b) ? (a) : (b))
 #define Min(a,b)	((a) < (b) ? (a) : (b))
@@ -65,15 +66,15 @@ static struct {
 	const char	   *name;
 	int				anum;
 } vcf_arrow_column_defs[] = {
-	{ArrowNodeTag__Utf8, "chrom",	VCF_ARROW_ANUM__CHROME},
-	{ArrowType__Int,     "pos",		VCF_ARROW_ANUM__POS},
-	{ArrowNodeTag__Utf8, "id",		VCF_ARROW_ANUM__ID},
-	{ArrowNodeTag__Utf8, "ref",		VCF_ARROW_ANUM__REF},
-	{ArrowNodeTag__Utf8, "alt",		VCF_ARROW_ANUM__ALT},
-	{ArrowNodeTag__Utf8, "qual",	VCF_ARROW_ANUM__QUAL},
-	{ArrowNodeTag__Utf8, "filter",	VCF_ARROW_ANUM__FILTER},
-	{ArrowNodeTag__Utf8, "info",	VCF_ARROW_ANUM__INFO},
-	{ArrowNodeTag__Utf8, "format",	VCF_ARROW_ANUM__FORMAT},
+	{ArrowType__Utf8, "chrom",	VCF_ARROW_ANUM__CHROME},
+	{ArrowType__Int,  "pos",	VCF_ARROW_ANUM__POS},
+	{ArrowType__Utf8, "id",		VCF_ARROW_ANUM__ID},
+	{ArrowType__Utf8, "ref",	VCF_ARROW_ANUM__REF},
+	{ArrowType__Utf8, "alt",	VCF_ARROW_ANUM__ALT},
+	{ArrowType__Utf8, "qual",	VCF_ARROW_ANUM__QUAL},
+	{ArrowType__Utf8, "filter",	VCF_ARROW_ANUM__FILTER},
+	{ArrowType__Utf8, "info",	VCF_ARROW_ANUM__INFO},
+	{ArrowType__Utf8, "format",	VCF_ARROW_ANUM__FORMAT},
 	{-1,NULL},
 };
 
@@ -341,7 +342,7 @@ __preprocess_vcf_header(const char *fname, char *key, char *value,
 	 * first path -> build customMetadata[] array
 	 * second or later -> check customMetadata[] array
 	 */
-	if (!vcf_table)
+	if (!headers_matched)
 	{
 		ArrowKeyValue  *kv;
 
@@ -377,7 +378,7 @@ __preprocess_vcf_header(const char *fname, char *key, char *value,
 }
 
 static void
-__preprocess_vcf_fields(const char *fname, char **saveptr)
+__preprocess_vcf_fields(int file_index, const char *fname, char **saveptr)
 {
 	/* !!CHROM and POS are already checked by the caller!! */
 	char   *id	   = __strtok(NULL, VCF_WHITESPACE, saveptr);
@@ -388,72 +389,55 @@ __preprocess_vcf_fields(const char *fname, char **saveptr)
 	char   *info   = __strtok(NULL, VCF_WHITESPACE, saveptr);
 	char   *format = __strtok(NULL, VCF_WHITESPACE, saveptr);
 	char   *tok;
+	int		j = 0;
 
 	if (!id     || strcasecmp(id,     "ID") != 0 ||
 		!ref    || strcasecmp(ref,    "REF") != 0 ||
 		!alt    || strcasecmp(alt,    "ALT") != 0 ||
 		!qual   || strcasecmp(qual,   "QUAL") != 0 ||
 		!filter || strcasecmp(filter, "FILTER") != 0 ||
-		!info   || strcasecmp(info,   "INFO") != 0 ||
-		!format || strcasecmp(format, "FORMAT") != 0)
+		!info   || strcasecmp(info,   "INFO") != 0)
 	{
 		Elog("VCF file '%s' corrupted? mandatory fields missing", fname);
 	}
-
-	if (!vcf_table)
+	if (format)
 	{
+		if (strcasecmp(format, "FORMAT") != 0)
+			Elog("VCF file '%s' corrupted? not an expected field [%s]", fname, format);
+
 		while ((tok = __strtok(NULL, VCF_WHITESPACE, saveptr)) != NULL)
 		{
-			if (variantNames_nitems == variantNames_nrooms)
+			if (j == sampleNames_nrooms)
 			{
-				variantNames_nrooms += (variantNames_nrooms + 24);
-				variantNames = repalloc(variantNames,
-										sizeof(const char *) *
-										variantNames_nrooms);
-			}
-			variantNames[variantNames_nitems++] = pstrdup(tok);
-		}
-	}
-	else
-	{
-		size_t	sz = sizeof(bool) * variantNames_nitems;
-		bool   *variantMatches = alloca(sz);
+				int		new_nrooms = 2 * sampleNames_nrooms + 16;
 
-		memset(variantMatches, 0, sz);
-		while ((tok = __strtok(NULL, VCF_WHITESPACE, saveptr)) != NULL)
-		{
-			bool	found = false;
-
-			for (int i=0; i < variantNames_nitems; i++)
-			{
-				if (!variantMatches[i] &&
-					strcasecmp(tok, variantNames[i]) == 0)
+				for (int k=0; k < input_file_nitems; k++)
 				{
-					found = true;
-					variantMatches[i] = true;
-					break;
+					sampleNames[k] = (const char **)
+						repalloc(sampleNames[k],
+								 sizeof(const char **) * new_nrooms);
+					for (int i=sampleNames_nrooms; i < new_nrooms; i++)
+						sampleNames[k][i] = NULL;
 				}
+				sampleNames_nrooms = new_nrooms;
 			}
-			if (!found)
-				Elog("VCF file '%s' is not compatible: variant '%s' is missing",
-					 fname, tok);
+			sampleNames[file_index][j++] = pstrdup(tok);
 		}
-		for (int i=0; i < variantNames_nitems; i++)
-		{
-			if (!variantMatches[i])
-				Elog("VCF file '%s' is not compatible: variant '%s' is missing",
-					 fname, variantNames[i]);
-		}
+		sampleNames_nitems = Max(sampleNames_nitems, j);
 	}
+	else if (by_raw_format)
+		Elog("VCF file '%s' has no FORMAT field in spite of --raw-format option", fname);
+		
 }
 
 static void
-preprocess_vcf_file(const char *fname,
-					FILE *filp,
-					long *p_lineno,
+preprocess_vcf_file(int file_index,
 					StringInfo buf,
 					bool *headers_matched)
 {
+	const char *fname = input_filename[file_index];
+	FILE	   *filp = input_filedesc[file_index];
+	long	   *p_lineno = &input_fileline[file_index];
 	char	   *line = NULL;
 	size_t		bufsz = 0;
 	ssize_t		nbytes;
@@ -482,7 +466,7 @@ preprocess_vcf_file(const char *fname,
 		else if (strcasecmp(tok, "#CHROM") == 0 &&
 				 strcasecmp(second, "POS") == 0)
 		{
-			__preprocess_vcf_fields(fname, &pos);
+			__preprocess_vcf_fields(file_index, fname, &pos);
 			break;
 		}
 	}
@@ -640,7 +624,7 @@ __setup_vcf_column_int_buffer(SQLtable *table,
 	column->put_value = vcf_put_int64_value;
 	column->move_value = vcf_move_int64_value;
 	column->write_stat = vcf_write_int64_stat;
-	column->stat_enabled = true;
+	column->stat_enabled = sort_by_pos;
 	return 2;	/* nullmap + values */
 }
 
@@ -678,7 +662,7 @@ __build_vcf_table_buffer(void)
 	nfields = VCF_ARROW_NUM_BASE_FIELDS;
 	if (by_raw_format)
 		nfields++;
-	table = palloc0(offsetof(SQLtable, columns[nfields + variantNames_nitems]));
+	table = palloc0(offsetof(SQLtable, columns[nfields + sampleNames_nitems]));
 	for (int j=0; j < nfields; j++)
 	{
 		const char	   *arrow_name = vcf_arrow_column_defs[j].name;
@@ -692,7 +676,7 @@ __build_vcf_table_buffer(void)
 												  &table->columns[j],
 												  arrow_name);
 				break;
-			case ArrowNodeTag__Utf8:
+			case ArrowType__Utf8:
 				table->numBuffers +=
 					__setup_vcf_column_utf8_buffer(table,
 												   &table->columns[j],
@@ -702,30 +686,25 @@ __build_vcf_table_buffer(void)
 				Elog("Bug? unexpected Arrow type tag for VCF conversion");
 		}
 	}
-	/* extend the "variant" field if multiple fields */
-	for (int j=0; j < variantNames_nitems; j++)
+	/* extend the "sampleXX" fields */
+	for (int j=0; j < sampleNames_nitems; j++)
 	{
 		SQLfield   *column = &table->columns[nfields+j];
-		const char *name = variantNames[j];
-		ArrowKeyValue *kv;
+		char		namebuf[80];
 
+		snprintf(namebuf, sizeof(namebuf), "sample%u", j+1);
 		table->numBuffers +=
-			__setup_vcf_column_utf8_buffer(table, column, name);
-		kv = palloc0(sizeof(ArrowKeyValue));
-		initArrowNode(kv, KeyValue);
-		kv->key = "variant_name";
-		kv->value = name;
-		kv->_key_len = strlen(kv->key);
-		kv->_value_len = strlen(kv->value);
-		column->customMetadata = kv;
-		column->numCustomMetadata = 1;
+			__setup_vcf_column_utf8_buffer(table, column, namebuf);
 	}
-	table->nfields = nfields + variantNames_nitems;
-	table->numFieldNodes = nfields + variantNames_nitems;
-	table->has_statistics = true;
+	table->nfields = nfields + sampleNames_nitems;
+	table->numFieldNodes = nfields + sampleNames_nitems;
 	/* custom-metadata */
 	table->customMetadata    = customMetadata;
 	table->numCustomMetadata = customMetadata_nitems;
+	/* setup metadata-buffer for sample-names */
+	sampleNamesMetadata = palloc0(sizeof(StringInfoData) * sampleNames_nitems);
+	for (int j=0; j < sampleNames_nitems; j++)
+		initStringInfo(&sampleNamesMetadata[j]);
 
 	return table;
 }
@@ -739,22 +718,18 @@ static void setup_vcf_table_buffer(void)
 	bool	   *headers_matched = NULL;
 
 	initStringInfo(&buf);
+	sampleNames = palloc0(sizeof(const char **) * input_file_nitems);
 	for (int i=0; i < input_file_nitems; i++)
 	{
 		if (headers_matched)
 			memset(headers_matched, 0, sizeof(bool) * customMetadata_nitems + 1);
-		preprocess_vcf_file(input_filename[i],
-							input_filedesc[i],
-							&input_fileline[i],
-							&buf,
-							headers_matched);
+		preprocess_vcf_file(i, &buf, headers_matched);
+		/* metadata validation map */
 		if (i == 0)
-		{
-			vcf_table = __build_vcf_table_buffer();
-			/* metadata validation map */
 			headers_matched = alloca(sizeof(bool) * customMetadata_nitems + 1);
-		}
 	}
+	vcf_table = __build_vcf_table_buffer();
+
 	pfree(buf.data);
 	assert(vcf_table != NULL);
 
@@ -796,7 +771,7 @@ static void setup_vcf_table_buffer(void)
  * __flush_vcf_arrow_file
  */
 static void
-__flush_vcf_arrow_file(SQLtable *table)
+__flush_vcf_arrow_file(SQLtable *table, int file_index)
 {
 	ArrowBlock	__block;
 	int			__rb_index;
@@ -804,6 +779,15 @@ __flush_vcf_arrow_file(SQLtable *table)
 	if (table->nitems > 0)
 	{
 		__rb_index = writeArrowRecordBatch(table, &__block);
+		for (int j=0; j < sampleNames_nitems; j++)
+		{
+			StringInfo	str = &sampleNamesMetadata[j];
+			const char *name = sampleNames[file_index][j];
+
+			if (__rb_index > 0)
+				appendStringInfo(str, ",");
+			appendStringInfo(str, "%s", name);
+		}
 		if (shows_progress)
 		{
 			time_t		tv = time(NULL);
@@ -868,8 +852,11 @@ __convert_vcf_variant(SQLfield *column, const char *__format, char *variant)
  * convert_vcf_file
  */
 static void
-convert_vcf_file(const char *fname, FILE *filp, long *p_lineno)
+convert_vcf_file(int file_index)
 {
+//	const char *fname = input_filename[file_index];
+	FILE	   *filp  = input_filedesc[file_index];
+	long	   *p_lineno = &input_fileline[file_index];
 	char	   *line = NULL;
 	size_t		bufsz = 0;
 	ssize_t		nbytes;
@@ -878,6 +865,7 @@ convert_vcf_file(const char *fname, FILE *filp, long *p_lineno)
 	{
 		char	   *tok, *pos;
 		const char *format = NULL;;
+		bool		meet_format = false;
 		int			anum, j=0;
 		size_t		usage = 0;
 
@@ -894,9 +882,10 @@ convert_vcf_file(const char *fname, FILE *filp, long *p_lineno)
 			{
 				usage += sql_field_put_value(&vcf_table->columns[j++], tok, -1);
 			}
-			else if (!format)
+			else if (!meet_format)
 			{
 				format = tok;
+				meet_format = true;
 			}
 			else
 			{
@@ -905,10 +894,40 @@ convert_vcf_file(const char *fname, FILE *filp, long *p_lineno)
 		}
 		vcf_table->nitems++;
 		if (usage >= batch_segment_sz)
-			__flush_vcf_arrow_file(vcf_table);
+			__flush_vcf_arrow_file(vcf_table, file_index);
 	}
+	__flush_vcf_arrow_file(vcf_table, file_index);
 	if (line)
 		free(line);
+}
+
+static void
+attach_vcf_table_metadata(void)
+{
+	int		nfields = VCF_ARROW_NUM_BASE_FIELDS;
+	int		nr_meta = vcf_table->numCustomMetadata;
+
+	if (by_raw_format)
+		nfields++;
+	assert(vcf_table->nfields == nfields + sampleNames_nitems);
+	vcf_table->customMetadata = (ArrowKeyValue *)
+		repalloc(vcf_table->customMetadata,
+				 sizeof(ArrowKeyValue) * (nr_meta + sampleNames_nitems));
+	for (int j=0; j < sampleNames_nitems; j++)
+	{
+		StringInfo	buf = &sampleNamesMetadata[j];
+		char		namebuf[80];
+		ArrowKeyValue *kv;
+
+		kv = &vcf_table->customMetadata[nr_meta + j];
+		snprintf(namebuf, sizeof(namebuf), "sample%u_keys", j+1);
+		initArrowNode(kv, KeyValue);
+		kv->key = pstrdup(namebuf);
+		kv->value = buf->data;
+		kv->_key_len = strlen(kv->key);
+		kv->_value_len = buf->len;
+	}
+	vcf_table->numCustomMetadata += sampleNames_nitems;
 }
 
 /*
@@ -937,8 +956,8 @@ static void usage(const char *format, ...)
 		  "  -m|--user-metadata=KEY=VALUE : a custom key-value pair to be embedded\n"
 		  "     --raw-format      : saves format and variant columns in raw string.\n"
 		  "                        (*) in default, it transformed to KEY=VALUE form.\n"
-		  "     --sort-by-pos     : sort by the POS (optimization for min/max stats)\n"
-		  "                        (*) note that this option preload entire VCF file once.\n"
+//		  "     --sort-by-pos     : sort by the POS (optimization for min/max stats)\n"
+//		  "                        (*) note that this option preload entire VCF file once.\n"
 		  "     --progress        : shows progress of VCF conversion.\n"
 		  "  -h|--help            : print this message.\n"
 		  "  -v|--verbose         : verbose output mode (for software debug)\n",
@@ -958,7 +977,7 @@ static void parse_options(int argc, char * const argv[])
 		{"embedded-headers", required_argument, NULL, 'E'},
 		{"user-metadata",    required_argument, NULL, 'm'},
 		{"raw-format",       no_argument,       NULL, 1001},
-		{"sort-by-pos",      no_argument,       NULL, 1002},
+//		{"sort-by-pos",      no_argument,       NULL, 1002},
 		{"progress",         no_argument,       NULL, 1003},
 		{"help",             no_argument,       NULL, 'h'},
 		{"verbose",          no_argument,       NULL, 'v'},
@@ -1137,10 +1156,8 @@ int main(int argc, char * const argv[])
 	parse_options(argc, argv);
 	setup_vcf_table_buffer();
 	for (int i=0; i < input_file_nitems; i++)
-		convert_vcf_file(input_filename[i],
-						 input_filedesc[i],
-						 &input_fileline[i]);
-	__flush_vcf_arrow_file(vcf_table);
+		convert_vcf_file(i);
+	attach_vcf_table_metadata();
 	writeArrowFooter(vcf_table);
 	return 0;
 }

@@ -61,6 +61,8 @@
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="../postgis/">GPU版PostGIS</a>
                   </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../gpusort/">GPUソート</a>
+                  </li>
                   <li class="toctree-l1"><a class="reference internal" href="../troubles/">トラブルシューティング</a>
                   </li>
               </ul>
@@ -71,6 +73,8 @@
                   <li class="toctree-l1"><a class="reference internal" href="../arrow_fdw/">Apache Arrow</a>
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="../gpucache/">GPUキャッシュ</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../pinned_buffer/">Pinned Inner Buffer</a>
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="../fluentd/">Fluentd連携</a>
                   </li>
@@ -104,6 +108,8 @@
               </ul>
               <p class="caption"><span class="caption-text">リリースノート</span></p>
               <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v6.0/">PG-Strom v6.0</a>
+                  </li>
                   <li class="toctree-l1"><a class="reference internal" href="../release_v5.2/">PG-Strom v5.2</a>
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="../release_v5.1/">PG-Strom v5.1</a>
@@ -159,6 +165,9 @@
 <dd>GpuJoinによるJOINを一括で有効化/無効化する。（GpuHashJoinとGpuGiSTIndexを含む）</dd>
 <dt><code>pg_strom.enable_gpupreagg</code> [型: <code>bool</code> / 初期値: <code>on]</code></dt>
 <dd>GpuPreAggによる集約処理を有効化/無効化する。</dd>
+<dt><code>pg_strom.enable_gpusort</code> [型: <code>bool</code> / 初期値: <code>on]</code></dt>
+<dd>GPU-Sortによるソートを有効化/無効化する。</dd>
+<dd>GPU-Sortの詳細は(こちら)[gpusort.md]を参照してください。</dd>
 <dt><code>pg_strom.enable_numeric_aggfuncs</code> [型: <code>bool</code> / 初期値: <code>on]</code></dt>
 <dd><code>numeric</code>データ型を引数に取る集約演算をGPUで処理するかどうかを制御する。</dd>
 <dd>GPUでの集約演算において<code>numeric</code>データ型は128bit固定小数点変数にマッピングされるため、極端に大きな数、あるいは高精度な数の集計を行う場合はエラーとなってしまいます。そのようなワークロードに対しては、この設定値を <code>off</code> にしてCPUで集約演算を実行するよう強制する事ができます。</dd>
@@ -171,6 +180,8 @@
 <dd><code>off</code>, <code>false</code> ... エラーを発生させCPUでの再実行を行わない</dd>
 <dt><code>pg_strom.regression_test_mode</code> [型: <code>bool</code> / 初期値: <code>off]</code></dt>
 <dd>GPUモデル名など、実行環境に依存して表示が変わる可能性のある<code>EXPLAIN</code>コマンドの出力を抑制します。これはリグレッションテストにおける偽陽性を防ぐための設定で、通常は利用者が操作する必要はありません。</dd>
+<dt><code>pg_strom.explain_developer_mode</code> [型: <code>bool</code> / 初期値: <code>off]</code></dt>
+<dd>EXPLAIN VERBOSEで表示される様々な情報のうち、開発者向けに有用な情報を表示します。これらは一般ユーザやDB管理者にとっては煩雑な情報であるため、通常は初期値のまま利用する事をお勧めします。</dd>
 </dl>
 <h2 id="_2">オプティマイザに関する設定</h2>
 <dl>
@@ -187,6 +198,12 @@
 <dt><code>pg_strom.pinned_inner_buffer_threshold</code> [型: <code>int</code> / 初期値: <code>0</code>]</dt>
 <dd>GpuJoinのINNER表がGpuScanまたはGpuJoinである場合、処理結果の推定サイズがこの設定値よりも大きければ、結果をいったんCPUに戻すことなく、そのままGPU側に保持した上で、続くGpuJoinのINNERバッファとして使用する。</dd>
 <dd>設定値が<code>0</code>の場合、本機能は無効となる。</dd>
+<dt><code>pg_strom.pinned_inner_buffer_partition_size</code> [型: <code>int</code> / 初期値: 自動]</dt>
+<dd>GPU-JoinでPinned Inner Bufferを使用する場合、バッファのサイズがこのパラメータで指定した閾値を越えると、バッファを複数個に分割するよう試みます。このパラメータはGPUメモリの70%～80%程度に自動設定され、通常はユーザが指定する必要はありません。</dd>
+<dd>詳しくは(こちら)[operations.md#gpujoininner-pinned-buffer]を参照してください。</dd>
+<dt><code>pg_strom.extra_ereport_level</code> [型: <code>int</code> / 初期値: 自動]</dt>
+<dd>heterodb-extraモジュールが報告するエラーのレベルを0～2で指定します。</dd>
+<dd>初期値は環境変数<code>HETERODB_EXTRA_EREPORT_LEVEL</code>の値により設定され、未設定の場合は<code>0</code>となります。</dd>
 </dl>
 <h2 id="_3">エグゼキュータに関する設定</h2>
 <dl>
@@ -248,17 +265,6 @@
 <dd>GPUキャッシュの初回ロードは相応に時間のかかる処理ですが、事前に初回ロードを済ませておく事で、検索/分析クエリの初回実行時に応答速度が遅延するのを避けることができます。</dd>
 <dd>なお、本パラメータを '*' に設定すると、GPUキャッシュを持つ全てのテーブルの内容を順にGPUへロードしようと試みます。</dd>
 </dl>
-<!--
-##HyperLogLogの設定
-
-`pg_strom.hll_registers_bits` [型: `int` / 初期値: `9`]
-:    HyperLogLogで使用する HLL Sketch の幅を指定します。
-:    実行時に`2^pg_strom.hll_registers_bits`個のレジスタを割当て、ハッシュ値の下位`pg_strom.hll_registers_bits`ビットをレジスタのセレクタとして使用します。設定可能な値は4～15の範囲内です。
-:    PG-StromのHyperLogLog機能について、詳しくは[HyperLogLog](hll_count.md)を参照してください。
-
-
--->
-
 <h2 id="gpu_1">GPUデバイスに関連する設定</h2>
 <dl>
 <dt><code>pg_strom.gpu_mempool_segment_sz</code> [型: <code>int</code> / 初期値: <code>1GB</code>]</dt>
@@ -273,8 +279,11 @@
 <dt><code>pg_strom.gpu_mempool_release_delay</code> [型: <code>int</code> / 初期値: <code>5000</code>]</dt>
 <dd>GPU Serviceは、あるメモリプール上のセグメントが空になっても、これを直ちに開放しません。そのセグメントが最後に利用されてから、本パラメータで指定された時間（ミリ秒単位）を経過すると、これを開放してシステムに返却します。</dd>
 <dd>一定の遅延を挟む事で、GPUデバイスメモリの割当/解放の頻度を減らす事ができます。</dd>
-<dt><code>pg_strom.gpuserv_debug_output</code> [型: <code>bool</code> / 初期値: <code>false</code>]</dt>
-<dd>GPU Serviceのデバッグメッセージ出力を有効化/無効化します。このメッセージはデバッグにおいて有効である場合がありますが、通常は初期値のまま変更しないで下さい。</dd>
+<dt><code>pg_strom.cuda_toolkit_basedir</code> [型: <code>text</code> / 初期値: <code>/usr/local/cuda</code>]</dt>
+<dd>PG-Stromは起動時にCUDA Toolkitを使用してGPUコードをビルドしますが、その際に利用するCUDA Toolkitのインストールパスを指定します。通常は<code>/usr/local/cuda</code>配下にCUDAツールがインストールされますが、異なるディレクトリを使用する場合は本パラメータを使って設定を変更できます。</dd>
+<dt><code>pg_strom.cuda_stack_limit</code> [型: <code>int</code> / 初期値: <code>32</code>]</dt>
+<dd>PG-StromがSQLワークロードをGPUで実行する際、処理の複雑さに応じてGPUスレッドの使用するスタック領域の大きさを自動的に設定します。例えば、PostGIS関数や再帰呼び出しを含む式表現には比較的大きめのスタックを割り当てます。</dd>
+<dd>このパラメータは、その場合の上限値をkB単位で指定します。</dd>
 <dt><code>pg_strom.cuda_visible_devices</code> [型: <code>text</code> / 初期値: <code>null</code>]</dt>
 <dd>PostgreSQLの起動時に特定のGPUデバイスだけを認識させてい場合は、カンマ区切りでGPUデバイス番号を記述します。</dd>
 <dd>これは環境変数<code>CUDA_VISIBLE_DEVICES</code>を設定するのと同等です。</dd>
@@ -343,7 +352,7 @@ pg_strom.dpu_endpoint_default_port [型: `int` / 初期値: 6543]
           </div><footer>
     <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
         <a href="../ref_sqlfuncs/" class="btn btn-neutral float-left" title="SQLオブジェクト"><span class="icon icon-circle-arrow-left"></span> Previous</a>
-        <a href="../release_v5.2/" class="btn btn-neutral float-right" title="PG-Strom v5.2">Next <span class="icon icon-circle-arrow-right"></span></a>
+        <a href="../release_v6.0/" class="btn btn-neutral float-right" title="PG-Strom v6.0">Next <span class="icon icon-circle-arrow-right"></span></a>
     </div>
 
   <hr/>
@@ -369,7 +378,7 @@ pg_strom.dpu_endpoint_default_port [型: `int` / 初期値: 6543]
       <span><a href="../ref_sqlfuncs/" style="color: #fcfcfc">&laquo; Previous</a></span>
     
     
-      <span><a href="../release_v5.2/" style="color: #fcfcfc">Next &raquo;</a></span>
+      <span><a href="../release_v6.0/" style="color: #fcfcfc">Next &raquo;</a></span>
     
   </span>
 </div>

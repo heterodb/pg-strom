@@ -16,6 +16,7 @@
  * Functions Declaration
  */
 PG_FUNCTION_INFO_V1(pgstrom_partial_nrows);
+PG_FUNCTION_INFO_V1(pgstrom_partial_nrows_filtered);
 
 PG_FUNCTION_INFO_V1(pgstrom_partial_minmax_int64);
 PG_FUNCTION_INFO_V1(pgstrom_partial_minmax_fp64);
@@ -101,11 +102,27 @@ check_float8_value(float8 value, bool inf_is_valid, bool zero_is_valid)
 PUBLIC_FUNCTION(Datum)
 pgstrom_partial_nrows(PG_FUNCTION_ARGS)
 {
-	int		i;
+	int		nargs = PG_NARGS();;
 
-	for (i=0; i < PG_NARGS(); i++)
+	for (int i=0; i < nargs; i++)
 	{
 		if (PG_ARGISNULL(i))
+			PG_RETURN_INT64(0);
+	}
+	PG_RETURN_INT64(1);
+}
+
+PUBLIC_FUNCTION(Datum)
+pgstrom_partial_nrows_filtered(PG_FUNCTION_ARGS)
+{
+	int		nargs = PG_NARGS();
+
+	Assert(nargs > 0);
+	if (PG_ARGISNULL(nargs-1) || !PG_GETARG_BOOL(nargs-1))
+		PG_RETURN_INT64(0);
+	for (int i=1; i < nargs; i++)
+	{
+		if (PG_ARGISNULL(i-1))
 			PG_RETURN_INT64(0);
 	}
 	PG_RETURN_INT64(1);
@@ -119,6 +136,8 @@ pgstrom_partial_minmax_int64(PG_FUNCTION_ARGS)
 {
 	kagg_state__pminmax_int64_packed *r;
 
+	if (PG_NARGS() > 1 && (PG_ARGISNULL(1) || !PG_GETARG_BOOL(1)))
+		PG_RETURN_NULL();
 	r = palloc(sizeof(kagg_state__pminmax_int64_packed));
 	r->attrs = __PAGG_MINMAX_ATTRS__VALID;
 	r->value = PG_GETARG_INT64(0);
@@ -132,6 +151,8 @@ pgstrom_partial_minmax_fp64(PG_FUNCTION_ARGS)
 {
 	kagg_state__pminmax_fp64_packed *r;
 
+	if (PG_NARGS() > 1 && (PG_ARGISNULL(1) || !PG_GETARG_BOOL(1)))
+		PG_RETURN_NULL();
 	r = palloc(sizeof(kagg_state__pminmax_fp64_packed));
 	r->attrs = __PAGG_MINMAX_ATTRS__VALID;
 	r->value = PG_GETARG_FLOAT8(0);
@@ -292,8 +313,11 @@ pgstrom_fminmax_final_numeric(PG_FUNCTION_ARGS)
 PUBLIC_FUNCTION(Datum)
 pgstrom_partial_sum_int(PG_FUNCTION_ARGS)
 {
-	kagg_state__psum_int_packed *r = palloc(sizeof(kagg_state__psum_int_packed));
+	kagg_state__psum_int_packed *r;
 
+	if (PG_NARGS() > 1 && (PG_ARGISNULL(1) || !PG_GETARG_BOOL(1)))
+		PG_RETURN_NULL();
+	r = palloc(sizeof(kagg_state__psum_int_packed));
 	r->nitems = 1;
 	r->sum = PG_GETARG_INT64(0);
 	SET_VARSIZE(r, sizeof(kagg_state__psum_int_packed));
@@ -304,8 +328,11 @@ pgstrom_partial_sum_int(PG_FUNCTION_ARGS)
 PUBLIC_FUNCTION(Datum)
 pgstrom_partial_sum_int64(PG_FUNCTION_ARGS)
 {
-	kagg_state__psum_numeric_packed *r = palloc(sizeof(kagg_state__psum_numeric_packed));
+	kagg_state__psum_numeric_packed *r;
 
+	if (PG_NARGS() > 1 && (PG_ARGISNULL(1) || !PG_GETARG_BOOL(1)))
+		PG_RETURN_NULL();
+	r = palloc(sizeof(kagg_state__psum_numeric_packed));
 	r->attrs = 0;
 	r->nitems = 1;
 	__store_int128_packed(&r->sum, PG_GETARG_INT64(0));
@@ -317,8 +344,11 @@ pgstrom_partial_sum_int64(PG_FUNCTION_ARGS)
 PUBLIC_FUNCTION(Datum)
 pgstrom_partial_sum_fp(PG_FUNCTION_ARGS)
 {
-	kagg_state__psum_fp_packed *r = palloc(sizeof(kagg_state__psum_fp_packed));
+	kagg_state__psum_fp_packed *r;
 
+	if (PG_NARGS() > 1 && (PG_ARGISNULL(1) || !PG_GETARG_BOOL(1)))
+		PG_RETURN_NULL();
+	r = palloc(sizeof(kagg_state__psum_fp_packed));
 	r->nitems = 1;
 	r->sum = PG_GETARG_FLOAT8(0);
 	SET_VARSIZE(r, sizeof(kagg_state__psum_fp_packed));
@@ -335,10 +365,12 @@ pgstrom_partial_sum_numeric(PG_FUNCTION_ARGS)
 	int128_t	value;
 	const char *emsg;
 
-	emsg = __xpu_numeric_from_varlena(&kind,
-									  &weight,
-									  &value,
-									  (varlena *)PG_GETARG_NUMERIC(0));
+	if (PG_NARGS() > 1 && !PG_GETARG_BOOL(1))
+		PG_RETURN_NULL();
+	emsg = __decimal_from_varlena(&kind,
+								  &weight,
+								  &value,
+								  (varlena *)PG_GETARG_NUMERIC(0));
 	if (emsg)
 		elog(ERROR, "%s: %s", __FUNCTION__, emsg);
 
@@ -363,8 +395,11 @@ pgstrom_partial_sum_numeric(PG_FUNCTION_ARGS)
 PUBLIC_FUNCTION(Datum)
 pgstrom_partial_sum_cash(PG_FUNCTION_ARGS)
 {
-	kagg_state__psum_int_packed *r = palloc(sizeof(kagg_state__psum_int_packed));
+	kagg_state__psum_int_packed *r;
 
+	if (PG_NARGS() > 1 && (PG_ARGISNULL(1) && !PG_GETARG_BOOL(1)))
+		PG_RETURN_NULL();
+	r = palloc(sizeof(kagg_state__psum_int_packed));
 	r->nitems = 1;
 	r->sum = PG_GETARG_CASH(0);
 	SET_VARSIZE(r, sizeof(kagg_state__psum_int_packed));
@@ -613,12 +648,13 @@ pgstrom_fsum_final_numeric(PG_FUNCTION_ARGS)
 	}
 	else
 	{
+		uint8_t		kind = XPU_NUMERIC_KIND__VALID;
 		int16_t		weight = (state->attrs & __PAGG_NUMERIC_ATTRS__WEIGHT);
 		int128_t	ival = __fetch_int128_packed(&state->sum);
-		int			bufsz = __xpu_numeric_to_varlena(NULL, weight, ival);
+		int			bufsz = __decimal_to_varlena(NULL, kind, weight, ival);
 		char	   *buf = palloc(bufsz);
 
-		__xpu_numeric_to_varlena(buf, weight, ival);
+		__decimal_to_varlena(buf, kind, weight, ival);
 		datum = PointerGetDatum(buf);
 	}
 	PG_RETURN_DATUM(datum);
@@ -693,13 +729,14 @@ pgstrom_favg_final_numeric(PG_FUNCTION_ARGS)
 	}
 	else
 	{
+		uint8_t		kind = XPU_NUMERIC_KIND__VALID;
 		int16_t		weight = (state->attrs & __PAGG_NUMERIC_ATTRS__WEIGHT);
 		int128_t	ival = __fetch_int128_packed(&state->sum);
-		int			bufsz = __xpu_numeric_to_varlena(NULL, weight, ival);
+		int			bufsz = __decimal_to_varlena(NULL, kind, weight, ival);
 		Numeric		sum = palloc(bufsz);
 		Numeric		div = int64_to_numeric(state->nitems);
 
-		__xpu_numeric_to_varlena((char *)sum, weight, ival);
+		__decimal_to_varlena((char *)sum, kind, weight, ival);
 		datum = DirectFunctionCall2(numeric_div,
 									NumericGetDatum(sum),
 									NumericGetDatum(div));
@@ -713,9 +750,13 @@ pgstrom_favg_final_numeric(PG_FUNCTION_ARGS)
 PUBLIC_FUNCTION(Datum)
 pgstrom_partial_variance(PG_FUNCTION_ARGS)
 {
-	kagg_state__stddev_packed *r = palloc(sizeof(kagg_state__stddev_packed));
-	float8_t	fval = PG_GETARG_FLOAT8(0);
+	kagg_state__stddev_packed *r;
+	float8_t	fval;
 
+	if (PG_NARGS() > 1 && (PG_ARGISNULL(1) || !PG_GETARG_BOOL(1)))
+		PG_RETURN_NULL();
+	fval = PG_GETARG_FLOAT8(0);
+	r = palloc(sizeof(kagg_state__stddev_packed));
 	r->attrs = 0;
 	r->nitems = 1;
 	r->sum_x2 = fval * fval;
@@ -859,10 +900,13 @@ pgstrom_stddev_pop_final(PG_FUNCTION_ARGS)
 PUBLIC_FUNCTION(Datum)
 pgstrom_partial_covar(PG_FUNCTION_ARGS)
 {
-	kagg_state__covar_packed *r = palloc(sizeof(kagg_state__covar_packed));
+	kagg_state__covar_packed *r;
 	float8_t	x = PG_GETARG_FLOAT8(0);
 	float8_t	y = PG_GETARG_FLOAT8(1);
 
+	if (PG_NARGS() > 2 && (PG_ARGISNULL(2) || !PG_GETARG_BOOL(2)))
+		PG_RETURN_NULL();
+	r = palloc(sizeof(kagg_state__covar_packed));
 	r->attrs  = 0;
 	r->nitems = 1;
 	r->sum_x  = x;

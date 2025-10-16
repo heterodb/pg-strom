@@ -1317,3 +1317,107 @@ pgfn_substr_nolen(XPU_PGFUNCTION_ARGS)
 {
 	return pgfn_substring_nolen(kcxt, kexp, __result);
 }
+
+/*
+ * Functions related to vcf2arrow
+ */
+STATIC_FUNCTION(void)
+__fetch_token_by_delim(kern_context *kcxt,
+					   xpu_text_t *result,
+					   const char *str, int strlen,
+					   const char *key, int keylen, char delim)
+{
+	const char *end, *pos, *base;
+
+	/*
+	 * triming whitespaces of the key head/tail
+	 */
+	while (keylen > 0 && __isspace(*key))
+	{
+		key++;
+		keylen--;
+	}
+	if (keylen == 0)
+		goto out;
+	while (keylen > 0 && __isspace(key[keylen-1]))
+		keylen--;
+	if (keylen == 0)
+		goto out;
+	/*
+	 * split a token by the delimiter for each
+	 */
+	if (strlen == 0)
+		goto out;
+	end = str + strlen - 1;
+	pos = base = str;
+	while (pos <= end)
+	{
+		if (*pos == delim || pos == end)
+		{
+			if (pos - base >= keylen && __strncmp(base, key, keylen) == 0)
+			{
+				const char *__k = (base + keylen);
+
+				while (__isspace(*__k) && __k < pos)
+					__k++;
+				if (__k < pos && *__k == '=')
+				{
+					result->expr_ops = &xpu_text_ops;
+					result->value = ++__k;
+					result->length = (pos - __k);
+					return;
+				}
+			}
+			base = pos + 1;
+		}
+		else if (pos == base && __isspace(*pos))
+		{
+			base++;
+		}
+		pos++;
+	}
+out:
+	result->expr_ops = NULL;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_vcf_variant_getattr(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS2(text, text, str, text, key);
+
+	if (XPU_DATUM_ISNULL(&str) || XPU_DATUM_ISNULL(&key))
+		result->expr_ops = NULL;
+	else if (!xpu_text_is_valid(kcxt, &str) ||
+			 !xpu_text_is_valid(kcxt, &key))
+		return false;	/* compressed or external */
+	else
+		__fetch_token_by_delim(kcxt,
+							   result,
+							   str.value,
+							   str.length,
+							   key.value,
+							   key.length,
+							   ':');
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_vcf_info_getattr(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS2(text, text, str, text, key);
+
+	if (XPU_DATUM_ISNULL(&str) || XPU_DATUM_ISNULL(&key))
+		result->expr_ops = NULL;
+	else if (!xpu_text_is_valid(kcxt, &str) ||
+			 !xpu_text_is_valid(kcxt, &key))
+		return false;	/* compressed or external */
+	else
+		__fetch_token_by_delim(kcxt,
+							   result,
+							   str.value,
+							   str.length,
+							   key.value,
+							   key.length,
+							   ';');
+	return true;
+}

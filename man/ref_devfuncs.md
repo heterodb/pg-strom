@@ -683,3 +683,27 @@ This chapter introduces the functions and operators executable on GPU devices.
 @ja:: 立体の左下隅のn次座標の値を返します。
 @en:: 
 
+@ja:##VCF検索関数
+@en:##VCF Support Functions
+
+`text vcf_variant_getattr(text, text)`
+@ja:: 第一引数を':'区切りのトークン列と見なして、第二引数で指定された`KEY=`以降の文字列を返す。
+@en:: It regards the first argument as a string of tokens separated by ':' and returns the string after `KEY=` specified in the second argument.
+```
+=# SELECT vcf_variant_getattr('ABC=123:NM=this is a pen:XYZ=3.1415', 'NM');
+ vcf_variant_getattr
+---------------------
+ this is a pen
+(1 row)
+```
+
+`text vcf_info_getattr(text, text)`
+@ja:: 第一引数を';'区切りのトークン列と見なして、第二引数で指定された`KEY=`以降の文字列を返す。
+@en:: It regards the first argument as a string of tokens separated by ';' and returns the string after `KEY=` specified in the second argument.
+```
+=# SELECT vcf_info_getattr('ABC=123;NM=this is a pen;XYZ=3.1415', 'XYZ');
+ vcf_info_getattr
+------------------
+ 3.141
+(1 row)
+```

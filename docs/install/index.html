@@ -98,6 +98,8 @@
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#postgresql-installation">PostgreSQL Installation</a>
     </li>
+    <li class="toctree-l2"><a class="reference internal" href="#libarrowlibparquet-installation">libarrow/libparquet Installation</a>
+    </li>
     <li class="toctree-l2"><a class="reference internal" href="#pg-strom-installation">PG-Strom Installation</a>
         <ul>
     <li class="toctree-l3"><a class="reference internal" href="#rpm-installation">RPM Installation</a>
@@ -141,6 +143,8 @@
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="../postgis/">PostGIS</a>
                   </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../gpusort/">GPU-Sort</a>
+                  </li>
                   <li class="toctree-l1"><a class="reference internal" href="../troubles/">Trouble Shooting</a>
                   </li>
               </ul>
@@ -151,6 +155,8 @@
                   <li class="toctree-l1"><a class="reference internal" href="../arrow_fdw/">Apache Arrow</a>
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="../gpucache/">GPU Cache</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../pinned_buffer/">Pinned Inner Buffer</a>
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="../fluentd/">connect with Fluentd</a>
                   </li>
@@ -168,6 +174,8 @@
               </ul>
               <p class="caption"><span class="caption-text">Release Note</span></p>
               <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v6.0/">PG-Strom v6.0</a>
+                  </li>
                   <li class="toctree-l1"><a class="reference internal" href="../release_v5.2/">PG-Strom v5.2</a>
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="../release_v5.1/">PG-Strom v5.1</a>
@@ -446,6 +454,18 @@ Mon Jun  3 09:56:41 2024
 |  No running processes found                                                             |
 +-----------------------------------------------------------------------------------------+
 </code></pre>
+<div class="admonition tips">
+<p class="admonition-title">Tips</p>
+<p><strong>Additional configurations for systems with NVSwitch</strong></p>
+<p>For systems with multiple GPUs that use NVSwitch for interconnect them, the <code>nvidia-fabricmanager</code> module must be installed.
+If this package is not installed, <code>cuInit()</code>, which initializes CUDA, will fail with the <code>CUDA_ERROR_SYSTEM_NOT_READY</code> error, and PG-Strom will not start. 
+Run the following commands to install the <code>nvidia-fabricmanager</code> package.
+<a href="https://docs.nvidia.com/gpudirect-storage/troubleshooting-guide/index.html#cuda-error-system-not-ready-after-installation">(source)</a></p>
+</div>
+<pre><code># dnf install nvidia-fabricmanager
+# systemctl enable nvidia-fabricmanager.service
+# systemctl start nvidia-fabricmanager.service
+</code></pre>
 <h3 id="check-gpudirect-storage-status">Check GPUDirect Storage status</h3>
 <p>After the installation of CUDA Toolkit according to the steps above, your system will become ready for the GPUDirect Storage.
 Run <code>gdscheck</code> tool to confirm the configuration for each storage devices, as follows.
@@ -616,6 +636,14 @@ Like the configuration of EPEL, you can install a small package to set up yum re
 <p class="admonition-title">Note</p>
 <p>On the Red Hat Enterprise Linux, the package name <code>postgresql</code> conflicts to the default one at the distribution, thus, unable to install the packages from PGDG. So, disable the <code>postgresql</code> module by the distribution, using <code>dnf -y module disable postgresql</code>.</p>
 </div>
+<h2 id="libarrowlibparquet-installation">libarrow/libparquet Installation</h2>
+<p>PG-Strom v6.1 and later requires <code>libarrow</code> and <code>libparquet</code> for building and installation.</p>
+<p>Since the packages provided by the Linux distribution may be outdated, please follow the <a href="https://arrow.apache.org/install/">developer community guidance</a> and install the <code>arrow-devel</code> and <code>parquet-devel</code> packages.</p>
+<p>The steps required for a minimal installation, excluding any overlaps with the installation steps above, are as follows.</p>
+<pre><code>$ sudo dnf install -y https://packages.apache.org/artifactory/arrow/almalinux/$(cut -d: -f5 /etc/system-release-cpe | cut -d. -f1)/apache-arrow-release-latest.rpm
+$ sudo dnf install -y arrow-devel
+$ sudo dnf install -y parquet-devel
+</code></pre>
 <h2 id="pg-strom-installation">PG-Strom Installation</h2>
 <h3 id="rpm-installation">RPM Installation</h3>
 <p>PG-Strom and related packages are distributed from <a href="https://heterodb.github.io/swdc/">HeteroDB Software Distribution Center</a>.
@@ -781,11 +809,19 @@ $ sudo dpkg -i heterodb-extra_5.4-1_amd64.deb
 </code></pre>
 <p>Checkout the source code of PG-Strom, build and install as follows.
 At this time, do not forget to specify the target PostgreSQL by <code>pg_config</code>.</p>
-<p>Post-installation configuration is the same as for Red Hat Enterprise Linux or Rocky Linux.</p>
+<p>Post-installation configuration is almost same as for Red Hat Enterprise Linux or Rocky Linux.</p>
 <pre><code>$ git clone https://github.com/heterodb/pg-strom.git
 $ cd pg-strom/src
 $ make PG_CONFIG=/path/to/pgsql/bin/pg_config -j 8
 $ sudo make PG_CONFIG=/path/to/pgsql/bin/pg_config install
+</code></pre>
+<p>However, if you use a packaged PostgreSQL and start it by systemctl command, the PATH environment variable will be cleared (probably for security reasons).
+As a result, the script launched to build the GPU binary on the first startup will not work properly.
+To avoid this, if you are using Ubuntu Linux, add the following line to <code>/etc/postgresql/main/PGVERSION/environment</code>.</p>
+<pre><code>/etc/postgresql/PGVERSION/main/environment:
+
+
+PATH='/usr/local/cuda/bin:/usr/bin:/bin'
 </code></pre>
               
             </div>

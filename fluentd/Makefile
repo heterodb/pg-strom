@@ -6,6 +6,10 @@ ifeq ($(TD_AGENT), 1)
 RUBY_GEM=/opt/td-agent/bin/fluent-gem
 RUBY_RAKE=/opt/td-agent/bin/rake
 endif
+ifeq ($(FLUENT), 1)
+RUBY_GEM=/opt/fluent/bin/fluent-gem
+RUBY_RAKE=/opt/fluent/bin/rake
+endif
 GEM_SPEC=fluent-plugin-arrow-file.gemspec
 GEM_VERSION=$(shell cat $(GEM_SPEC) | awk '/spec.version/{print $$3}' | sed 's/\"//g')
 GEM_RELEASE ?= 1

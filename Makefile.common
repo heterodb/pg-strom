@@ -1,6 +1,6 @@
 PG_CONFIG ?= pg_config
-VERSION ?= 5.2
-RELEASE ?= 2
+VERSION ?= 6.1
+RELEASE ?= 0
 GITHASH_IF_NOT_GIVEN := HEAD
 
 #
@@ -33,8 +33,3 @@ PGSTROM_GITHASH := $(GITHASH)::local_changes
 endif
 endif
 endif
-
-#
-# PostgreSQL Commands
-#
-PSQL=$(shell $(PG_CONFIG) --bindir)/psql

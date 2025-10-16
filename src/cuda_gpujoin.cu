@@ -13,7 +13,7 @@
 #include "cuda_common.h"
 
 /*
- * GPU Buffer Reconstruction
+ * GPU Buffer reconstruction (HASH-format)
  */
 KERNEL_FUNCTION(void)
 kern_buffer_reconstruction(kern_data_store *kds_dst,
@@ -24,6 +24,8 @@ kern_buffer_reconstruction(kern_data_store *kds_dst,
 	__shared__ uint32_t base_rowid;
 	__shared__ uint64_t base_usage;
 
+	assert(kds_dst->format == KDS_FORMAT_HASH &&
+		   kds_src->format == KDS_FORMAT_HASH);
 	for (base = get_global_base();
 		 base < kds_src->nitems;
 		 base += get_global_size())
@@ -41,8 +43,7 @@ kern_buffer_reconstruction(kern_data_store *kds_dst,
 			hitem = (kern_hashitem *)((char *)kds_src + kds_src->length
 									  - rowindex[index]
 									  - offsetof(kern_hashitem, t));
-			tupsz = MAXALIGN(offsetof(kern_hashitem,
-									  t.htup) + hitem->t.t_len);
+			tupsz = MAXALIGN(offsetof(kern_hashitem, t) + hitem->t.t_len);
 		}
 		/* allocation of the destination buffer */
 		row_id = pgstrom_stair_sum_binary(tupsz > 0, &count);
@@ -60,18 +61,13 @@ kern_buffer_reconstruction(kern_data_store *kds_dst,
 		{
 			kern_hashitem  *__hitem = (kern_hashitem *)
 				((char *)kds_dst + kds_dst->length - offset);
-			uint64_t	   *__hslots = KDS_GET_HASHSLOT(kds_dst, hitem->hash);
+			uint64_t	   *__hslots = KDS_GET_HASHSLOT(kds_dst, hitem->t.hash);
 
-			__hitem->hash = hitem->hash;
+			memcpy(&__hitem->t, &hitem->t, hitem->t.t_len);
 			__hitem->next = __atomic_exchange_uint64(__hslots, offset);
-			__hitem->t.rowid = row_id;
-			__hitem->t.t_len = hitem->t.t_len;
-			memcpy(&__hitem->t.htup, &hitem->t.htup, hitem->t.t_len);
-			assert(offsetof(kern_hashitem, t.htup) + hitem->t.t_len <= tupsz);
+			KERN_TUPITEM_SET_ROWID(&__hitem->t, row_id);
 			__threadfence();
-			KDS_GET_ROWINDEX(kds_dst)[row_id] = ((char *)kds_dst
-												 + kds_dst->length
-												 - (char *)&__hitem->t);
+			KDS_GET_ROWINDEX(kds_dst)[row_id] = (offset - offsetof(kern_hashitem, t));
 		}
 		__syncthreads();
 	}
@@ -81,85 +77,61 @@ kern_buffer_reconstruction(kern_data_store *kds_dst,
  * GPU Buffer Partitioning
  */
 KERNEL_FUNCTION(void)
-kern_buffer_partitioning(kern_buffer_partitions *kbuf_parts,
-						 const kern_data_store *__restrict__ kds_src)
+kern_buffer_partitioning(kern_data_store *kds_dst,
+						 const kern_data_store *__restrict__ kds_src,
+						 uint32_t hash_remainder,
+						 uint32_t hash_divisor)
 {
-	uint64_t   *rowindex = KDS_GET_ROWINDEX(kds_src);
-	uint32_t	hash_divisor = kbuf_parts->hash_divisor;
-	uint64_t   *kpart_usage = (uint64_t *)SHARED_WORKMEM(0);
-	uint32_t   *kpart_nitems = (uint32_t *)(kpart_usage + hash_divisor);
+	__shared__ uint32_t base_rowid;
+	__shared__ uint64_t base_usage;
 	uint32_t	base;
 
 	assert(hash_divisor >= 2);
+	assert(hash_remainder < hash_divisor);
+	assert(kds_src->format == KDS_FORMAT_HASH &&
+		   kds_dst->format == KDS_FORMAT_HASH &&
+		   kds_dst->hash_nslots > 0);
 	for (base = get_global_base();
 		 base < kds_src->nitems;
 		 base += get_global_size())
 	{
-		const kern_hashitem *hitem = NULL;
-		kern_data_store *kds_in = NULL;
+		const kern_tupitem *titem = NULL;
 		uint32_t	index = base + get_local_id();
 		uint32_t	tupsz = 0;
-		int			part_id;
 		uint32_t	row_id;
+		uint32_t	count;
 		uint64_t	offset;
-
-		/* reset buffer */
-		for (int p=get_local_id(); p < hash_divisor; p += get_local_size())
-		{
-			kpart_usage[p] = 0;
-			kpart_nitems[p] = 0;
-		}
-		__syncthreads();
+		uint64_t	total_sz;
 
 		/* fetch row from kds_src */
 		if (index < kds_src->nitems)
 		{
-			hitem = (kern_hashitem *)((char *)kds_src + kds_src->length
-									  - rowindex[index]
-									  - offsetof(kern_hashitem, t));
-			tupsz   = MAXALIGN(offsetof(kern_hashitem,
-										t.htup) + hitem->t.t_len);
-			part_id = hitem->hash % hash_divisor;
-			row_id = __atomic_add_uint32(&kpart_nitems[part_id], 1);
-			offset = __atomic_add_uint64(&kpart_usage[part_id], tupsz);
+			titem = KDS_GET_TUPITEM(kds_src, index);
+			if ((titem->hash % hash_divisor) == hash_remainder)
+				tupsz = MAXALIGN(offsetof(kern_hashitem, t) + titem->t_len);
 		}
-		__syncthreads();
-
 		/* allocation of the destination buffer */
-		if (get_local_id() < hash_divisor)
+		row_id = pgstrom_stair_sum_binary(tupsz > 0, &count);
+		offset = pgstrom_stair_sum_uint64(tupsz, &total_sz);
+		if (get_local_id() == 0)
 		{
-			int		p = get_local_id();
-
-			kds_in = kbuf_parts->parts[p].kds_in;
-			kpart_nitems[p] = __atomic_add_uint32(&kds_in->nitems, kpart_nitems[p]);
-			kpart_usage[p]  = __atomic_add_uint64(&kds_in->usage,  kpart_usage[p]);
+			base_rowid = __atomic_add_uint32(&kds_dst->nitems, count);
+			base_usage = __atomic_add_uint64(&kds_dst->usage,  total_sz);
 		}
 		__syncthreads();
-
-		/* write out to the position */
-		if (hitem)
+		/* put tuples on the destination */
+		row_id += base_rowid;
+		offset += base_usage;
+		if (tupsz > 0)
 		{
-			kern_hashitem  *__hitem;
-			uint64_t	   *__hslots;
-
-			assert(part_id >= 0 && part_id < hash_divisor);
-			kds_in = kbuf_parts->parts[part_id].kds_in;
-			row_id += kpart_nitems[part_id];
-			offset += kpart_usage[part_id] + tupsz;
-
-			__hslots = KDS_GET_HASHSLOT(kds_in, hitem->hash);
-			__hitem = (kern_hashitem *)
-				((char *)kds_in + kds_in->length - offset);
-			__hitem->hash = hitem->hash;
-			__hitem->next = __atomic_exchange_uint64(__hslots, offset);
-			__hitem->t.rowid = row_id;
-			__hitem->t.t_len = hitem->t.t_len;
-			memcpy(&__hitem->t.htup, &hitem->t.htup, hitem->t.t_len);
-			assert(offsetof(kern_hashitem, t.htup) + hitem->t.t_len <= tupsz);
+			uint64_t	   *hslot = KDS_GET_HASHSLOT(kds_dst, titem->hash);
+			kern_hashitem  *hitem = (kern_hashitem *)
+				((char *)kds_dst + kds_dst->length - offset);
+			hitem->next = __atomic_exchange_uint64(hslot, offset);
+			memcpy(&hitem->t, titem, titem->t_len);
+			KERN_TUPITEM_SET_ROWID(&hitem->t, row_id);
 			__threadfence();
-			KDS_GET_ROWINDEX(kds_in)[row_id] = ((char *)kds_in
-												+ kds_in->length
-												- (char *)&__hitem->t);
+			KDS_GET_ROWINDEX(kds_dst)[row_id] = (offset - offsetof(kern_hashitem, t));
 		}
 		__syncthreads();
 	}
@@ -251,7 +223,7 @@ execGpuJoinNestLoop(kern_context *kcxt,
 									   + kds_heap->length
 									   - offset);
 			kexp = SESSION_KEXP_LOAD_VARS(kcxt->session, depth);
-			ExecLoadVarsHeapTuple(kcxt, kexp, depth, kds_heap, &tupitem->htup);
+			ExecLoadVarsMinimalTuple(kcxt, kexp, depth, kds_heap, tupitem);
 			kexp = SESSION_KEXP_JOIN_QUALS(kcxt->session, depth);
 			if (ExecGpuJoinQuals(kcxt, kexp, &status))
 			{
@@ -259,9 +231,10 @@ execGpuJoinNestLoop(kern_context *kcxt,
 					tuple_is_valid = true;
 				if (status != 0)
 				{
-					assert(tupitem->rowid < kds_heap->nitems);
+					uint32_t	rowid = KERN_TUPITEM_GET_ROWID(tupitem);
+					assert(rowid < kds_heap->nitems);
 					if (oj_map)
-						oj_map[tupitem->rowid] = true;
+						oj_map[rowid] = true;
 					matched = true;
 				}
 			}
@@ -275,7 +248,7 @@ execGpuJoinNestLoop(kern_context *kcxt,
 			bool		status;
 			/* fill up NULL fields, if FULL/LEFT OUTER JOIN */
 			kexp = SESSION_KEXP_LOAD_VARS(kcxt->session, depth);
-			ExecLoadVarsHeapTuple(kcxt, kexp, depth, kds_heap, NULL);
+			ExecLoadVarsMinimalTuple(kcxt, kexp, depth, kds_heap, NULL);
 			kexp = SESSION_KEXP_JOIN_QUALS(kcxt->session, depth);
 			if (ExecGpuJoinOtherQuals(kcxt, kexp, &status))
 			{
@@ -415,7 +388,7 @@ execGpuJoinHashJoin(kern_context *kcxt,
 			{
 				assert(!XPU_DATUM_ISNULL(&hash));
 				for (khitem = KDS_HASH_FIRST_ITEM(kds_hash, hash.value);
-					 khitem != NULL && khitem->hash != hash.value;
+					 khitem != NULL && khitem->t.hash != hash.value;
 					 khitem = KDS_HASH_NEXT_ITEM(kds_hash, khitem->next));
 			}
 			else if (HandleErrorIfCpuFallback(kcxt, depth, 0, false))
@@ -435,9 +408,9 @@ execGpuJoinHashJoin(kern_context *kcxt,
 
 		khitem = (kern_hashitem *)((char *)kds_hash + l_state);
 		assert(__KDS_TUPITEM_CHECK_VALID(kds_hash, &khitem->t));
-		hash_value = khitem->hash;
+		hash_value = khitem->t.hash;
 		for (khitem = KDS_HASH_NEXT_ITEM(kds_hash, khitem->next);
-			 khitem != NULL && khitem->hash != hash_value;
+			 khitem != NULL && khitem->t.hash != hash_value;
 			 khitem = KDS_HASH_NEXT_ITEM(kds_hash, khitem->next));
 	}
 	/* error checks */
@@ -450,7 +423,7 @@ execGpuJoinHashJoin(kern_context *kcxt,
 
 		l_state = ((char *)khitem - (char *)kds_hash);
 		kexp = SESSION_KEXP_LOAD_VARS(kcxt->session, depth);
-		ExecLoadVarsHeapTuple(kcxt, kexp, depth, kds_hash, &khitem->t.htup);
+		ExecLoadVarsMinimalTuple(kcxt, kexp, depth, kds_hash, &khitem->t);
 		kexp = SESSION_KEXP_JOIN_QUALS(kcxt->session, depth);
 		if (ExecGpuJoinQuals(kcxt, kexp, &status))
 		{
@@ -458,9 +431,10 @@ execGpuJoinHashJoin(kern_context *kcxt,
 				tuple_is_valid = true;
 			if (status != 0)
 			{
-				assert(khitem->t.rowid < kds_hash->nitems);
+				uint32_t	rowid = KERN_TUPITEM_GET_ROWID(&khitem->t);
+				assert(rowid < kds_hash->nitems);
 				if (oj_map)
-					oj_map[khitem->t.rowid] = true;
+					oj_map[rowid] = true;
 				matched = true;
 			}
 		}
@@ -477,7 +451,7 @@ execGpuJoinHashJoin(kern_context *kcxt,
 			bool	status;
 			/* load NULL values on the inner portion */
 			kexp = SESSION_KEXP_LOAD_VARS(kcxt->session, depth);
-			ExecLoadVarsHeapTuple(kcxt, kexp, depth, kds_hash, NULL);
+			ExecLoadVarsMinimalTuple(kcxt, kexp, depth, kds_hash, NULL);
 			kexp = SESSION_KEXP_JOIN_QUALS(kcxt->session, depth);
 			if (ExecGpuJoinOtherQuals(kcxt, kexp, &status))
 			{
@@ -527,6 +501,7 @@ gpujoin_prep_gistindex(kern_multirels *kmrels, int depth)
 {
 	kern_data_store *kds_hash = KERN_MULTIRELS_INNER_KDS(kmrels, depth);
 	kern_data_store *kds_gist = KERN_MULTIRELS_GIST_INDEX(kmrels, depth);
+	int				gist_ctid_resno = kmrels->chunks[depth-1].gist_ctid_resno;
 	BlockNumber		block_nr;
 	OffsetNumber	i, maxoff;
 
@@ -559,9 +534,12 @@ gpujoin_prep_gistindex(kern_multirels *kmrels, int depth)
 				 khitem != NULL;
 				 khitem = KDS_HASH_NEXT_ITEM(kds_hash, khitem->next))
 			{
-				if (ItemPointerEquals(&khitem->t.htup.t_ctid, &itup->t_tid))
+				const ItemPointerData *ctid = (const ItemPointerData *)
+					kern_fetch_minimal_tuple_attr(kds_hash, &khitem->t,
+												  gist_ctid_resno);
+				if (ctid && ItemPointerEquals(ctid, &itup->t_tid))
 				{
-					uint32_t	rowid = khitem->t.rowid;
+					uint32_t	rowid = KERN_TUPITEM_GET_ROWID(&khitem->t);
 
 					itup->t_tid.ip_blkid.bi_hi = (rowid >> 16);
 					itup->t_tid.ip_blkid.bi_lo = (rowid & 0xffffU);
@@ -772,7 +750,7 @@ execGpuJoinGiSTJoin(kern_context *kcxt,
 /*
  * GPU Projection
  */
-PUBLIC_FUNCTION(int)
+STATIC_FUNCTION(int)
 execGpuJoinProjection(kern_context *kcxt,
 					  kern_warp_context *wp,
 					  int n_rels,	/* index of read/write-pos */
@@ -804,9 +782,9 @@ execGpuJoinProjection(kern_context *kcxt,
 	kcxt->kvecs_curr_buffer = src_kvecs_buffer;
 	if (rd_pos < wr_pos)
 	{
-		tupsz = kern_estimate_heaptuple(kcxt,
-										kexp_projection,
-										kds_dst);
+		tupsz = kern_estimate_minimal_tuple(kcxt,
+											kexp_projection,
+											kds_dst);
 		if (tupsz < 0)
 		{
 			if (HandleErrorIfCpuFallback(kcxt, n_rels+1, 0, false))
@@ -816,7 +794,7 @@ execGpuJoinProjection(kern_context *kcxt,
 		}
 		else if (kds_dst->format == KDS_FORMAT_ROW)
 		{
-			tupsz = MAXALIGN(offsetof(kern_tupitem, htup) + tupsz);
+			tupsz = MAXALIGN(tupsz + kcxt->session->gpusort_htup_margin);
 		}
 		else
 		{
@@ -837,7 +815,8 @@ execGpuJoinProjection(kern_context *kcxt,
 					STROM_ELOG(kcxt, "unable to compute hash-value");
 				else
 					hash_value = status.value;
-				tupsz = MAXALIGN(offsetof(kern_hashitem, t.htup) + tupsz);
+				tupsz = MAXALIGN(offsetof(kern_hashitem, t) + tupsz
+								 + kcxt->session->gpusort_htup_margin);
 			}
 			else if (HandleErrorIfCpuFallback(kcxt, n_rels+1, 0, false))
 			{
@@ -907,13 +886,12 @@ execGpuJoinProjection(kern_context *kcxt,
 		{
 			kern_tupitem   *tupitem = (kern_tupitem *)
 				((char *)kds_dst + kds_dst->length - offset);
-
-			tupitem->rowid = row_id;
-			tupitem->t_len = kern_form_heaptuple(kcxt,
-												 kexp_projection,
-												 kds_dst,
-												 &tupitem->htup);
-			assert(offsetof(kern_tupitem, htup) + tupitem->t_len <= tupsz);
+			kern_form_minimal_tuple(kcxt,
+									kexp_projection,
+									kds_dst,
+									tupitem,
+									row_id);
+			assert(tupitem->t_len <= tupsz);
 			__threadfence();
 			KDS_GET_ROWINDEX(kds_dst)[row_id] = offset;
 		}
@@ -923,14 +901,14 @@ execGpuJoinProjection(kern_context *kcxt,
 				((char *)kds_dst + kds_dst->length - offset);
 			uint64_t	   *hslots = KDS_GET_HASHSLOT(kds_dst, hash_value);
 
-			khitem->hash = hash_value;
+			kern_form_minimal_tuple(kcxt,
+									kexp_projection,
+									kds_dst,
+									&khitem->t,
+									row_id);
+			khitem->t.hash = hash_value;
 			khitem->next = __atomic_exchange_uint64(hslots, offset);
-			khitem->t.rowid = row_id;
-			khitem->t.t_len = kern_form_heaptuple(kcxt,
-												  kexp_projection,
-												  kds_dst,
-												  &khitem->t.htup);
-			assert(offsetof(kern_hashitem, t.htup) + khitem->t.t_len <= tupsz);
+			assert(offsetof(kern_hashitem, t) + khitem->t.t_len <= tupsz);
 			__threadfence();
 			KDS_GET_ROWINDEX(kds_dst)[row_id] = ((char *)kds_dst
 												 + kds_dst->length
@@ -1017,10 +995,10 @@ loadGpuJoinRightOuter(kern_context *kcxt,
 		for (int __depth=0; __depth < depth; __depth++)
 		{
 			kexp = SESSION_KEXP_LOAD_VARS(kcxt->session, __depth);
-			ExecLoadVarsHeapTuple(kcxt, kexp, __depth, kds_in, NULL);
+			ExecLoadVarsMinimalTuple(kcxt, kexp, __depth, kds_in, NULL);
 		}
 		kexp = SESSION_KEXP_LOAD_VARS(kcxt->session, depth);
-		ExecLoadVarsHeapTuple(kcxt, kexp, depth, kds_in, &tupitem->htup);
+		ExecLoadVarsMinimalTuple(kcxt, kexp, depth, kds_in, tupitem);
 
 		kexp = SESSION_KEXP_MOVE_VARS(kcxt->session, depth);
 		if (!ExecMoveKernelVariables(kcxt,
@@ -1153,22 +1131,22 @@ kern_gpujoin_main(kern_session_info *session,
 		else if (depth > n_rels)
 		{
 			assert(depth == n_rels+1);
-			if (session->xpucode_projection)
-			{
-				/* PROJECTION */
-				depth = execGpuJoinProjection(kcxt, wp,
-											  n_rels,
-											  kds_dst,
-											  SESSION_KEXP_PROJECTION(session),
-											  __KVEC_BUFFER(n_rels));
-			}
-			else
+			if (!session->xpucode_projection)
 			{
 				/* PRE-AGG */
 				depth = execGpuPreAggGroupBy(kcxt, wp,
 											 n_rels,
 											 kds_dst,
 											 __KVEC_BUFFER(n_rels));
+			}
+			else
+			{
+				/* PROJECTION (ROW/HASH) */
+				depth = execGpuJoinProjection(kcxt, wp,
+											  n_rels,
+											  kds_dst,
+											  SESSION_KEXP_PROJECTION(session),
+											  __KVEC_BUFFER(n_rels));
 			}
 		}
 		else if (depth == kgtask->right_outer_depth)
@@ -1238,51 +1216,53 @@ kern_gpujoin_main(kern_session_info *session,
 	mergeGpuPreAggGroupByBuffer(kcxt, kds_dst);
 
 	/* update the statistics */
-	if (get_local_id() == 0)
+	if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) == 0 &&
+		get_local_id() == 0 &&
+		!wp->stats_written)
 	{
-		if (depth < 0 && WARP_READ_POS(wp,n_rels) >= WARP_WRITE_POS(wp,n_rels))
+		int		start = 0;
+
+		// TODO: check whether we count fallback tuples correctly, or not.
+		if (kgtask->right_outer_depth == 0)
 		{
-			int		start = 0;
-
-			if (kgtask->right_outer_depth == 0)
-			{
-				assert(kds_src != NULL);
-				/* number of raw-tuples fetched from the source KDS */
-				if (kds_src->format == KDS_FORMAT_BLOCK)
-					atomicAdd(&kgtask->nitems_raw, wp->lp_wr_pos);
-				else if (get_global_id() == 0)
-					atomicAdd(&kgtask->nitems_raw, kds_src->nitems);
-				atomicAdd(&kgtask->nitems_in, WARP_WRITE_POS(wp, 0));
-			}
-			else
-			{
-				assert(kds_src == NULL);
-				/* number of the generated RIGHT-OUTER-JOIN tuples */
-				start = kgtask->right_outer_depth;
-				atomicAdd(&kgtask->stats[start-1].nitems_roj,
-						  WARP_WRITE_POS(wp,start));
-			}
-			for (int i=start; i < n_rels; i++)
-			{
-				const kern_expression *kexp_gist
-					= SESSION_KEXP_GIST_EVALS(session, i+1);
-				if (kexp_gist)
-				{
-					int		gist_depth = kexp_gist->u.gist.gist_depth;
-
-					assert(gist_depth > n_rels &&
-						   gist_depth < kgtask->kvecs_ndims);
-					atomicAdd(&kgtask->stats[i].nitems_gist,
-							  WARP_WRITE_POS(wp, gist_depth));
-				}
-				atomicAdd(&kgtask->stats[i].nitems_out,
-						  WARP_WRITE_POS(wp,i+1));
-			}
-			atomicAdd(&kgtask->nitems_out, WARP_WRITE_POS(wp, n_rels));
+			assert(kds_src != NULL);
+			/* number of raw-tuples fetched from the source KDS */
+			if (kds_src->format == KDS_FORMAT_BLOCK)
+				atomicAdd(&kgtask->nitems_raw, wp->lp_wr_pos);
+			else if (get_global_id() == 0)
+				atomicAdd(&kgtask->nitems_raw, kds_src->nitems);
+			atomicAdd(&kgtask->nitems_in, WARP_WRITE_POS(wp, 0));
 		}
-		/* suspend the execution context */
-		memcpy(wp_saved, wp, wp_base_sz);
+		else
+		{
+			assert(kds_src == NULL);
+			/* number of the generated RIGHT-OUTER-JOIN tuples */
+			start = kgtask->right_outer_depth;
+			atomicAdd(&kgtask->stats[start-1].nitems_roj,
+					  WARP_WRITE_POS(wp,start));
+		}
+		for (int i=start; i < n_rels; i++)
+		{
+			const kern_expression *kexp_gist
+				= SESSION_KEXP_GIST_EVALS(session, i+1);
+			if (kexp_gist)
+			{
+				int		gist_depth = kexp_gist->u.gist.gist_depth;
+
+				assert(gist_depth > n_rels &&
+					   gist_depth < kgtask->kvecs_ndims);
+				atomicAdd(&kgtask->stats[i].nitems_gist,
+						  WARP_WRITE_POS(wp, gist_depth));
+			}
+			atomicAdd(&kgtask->stats[i].nitems_out,
+					  WARP_WRITE_POS(wp,i+1));
+		}
+		atomicAdd(&kgtask->nitems_out, WARP_WRITE_POS(wp, n_rels));
+		wp->stats_written = true;
 	}
+	/* suspend the execution context */
+	if (get_local_id() == 0)
+		memcpy(wp_saved, wp, wp_base_sz);
 	STROM_WRITEBACK_ERROR_STATUS(&kgtask->kerror, kcxt);
 }
 

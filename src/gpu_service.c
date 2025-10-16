@@ -34,6 +34,7 @@ struct gpuContext
 	int				cuda_dindex;
 	gpumask_t		cuda_dmask;		/* = (1UL<<cuda_dindex) */
 	CUdevice		cuda_device;
+	CUmemLocation	cuda_mlocation;
 	CUcontext		cuda_context;
 	CUmodule		cuda_module;
 	HTAB		   *cuda_type_htab;
@@ -42,10 +43,21 @@ struct gpuContext
 	CUfunction		cufn_prep_gistindex;
 	CUfunction		cufn_merge_outer_join_map;
 	CUfunction		cufn_merge_gpupreagg_buffer;
+	CUfunction		cufn_gpusort_consolidate_buffer;
+	CUfunction		cufn_gpusort_partition_buffer;
+	CUfunction		cufn_gpusort_prep_buffer;
+	CUfunction		cufn_gpusort_exec_bitonic;
+	CUfunction		cufn_kbuf_simple_limit;
 	CUfunction		cufn_kbuf_partitioning;
 	CUfunction		cufn_kbuf_reconstruction;
 	CUfunction		cufn_gpucache_apply_redo;
 	CUfunction		cufn_gpucache_compaction;
+	CUfunction		cufn_windowrank_prep_hash;
+	CUfunction		cufn_windowrank_exec_row_number;
+	CUfunction		cufn_windowrank_exec_rank;
+	CUfunction		cufn_windowrank_exec_dense_rank;
+	CUfunction		cufn_windowrank_finalize;
+	CUfunction		cufn_global_stair_sum_u32;
 	int				gpumain_shmem_sz_limit;
 	xpu_encode_info *cuda_encode_catalog;
 	gpuMemoryPool	pool_raw;
@@ -73,6 +85,7 @@ struct gpuClient
 	uint32_t		xpu_task_flags; /* copy from session->xpu_task_flags */
 	kern_session_info *h_session; /* session info in host memory */
 	struct gpuQueryBuffer *gq_buf; /* per query join/preagg device buffer */
+	pg_atomic_uint32 select_into_count; /* SELECT INTO direct counter */
 	pg_atomic_uint32 refcnt;	/* odd number, if error status */
 	pthread_mutex_t	mutex;		/* mutex to write the socket */
 	int				sockfd;		/* connection to PG backend */
@@ -118,7 +131,10 @@ static __thread gpuContext		*GpuWorkerCurrentContext = NULL;
 #define MY_DINDEX_PER_THREAD	(GpuWorkerCurrentContext->cuda_dindex)
 #define MY_DEVICE_PER_THREAD	(GpuWorkerCurrentContext->cuda_device)
 #define MY_CONTEXT_PER_THREAD	(GpuWorkerCurrentContext->cuda_context)
-#define MY_STREAM_PER_THREAD	CU_STREAM_PER_THREAD 
+#define MY_STREAM_PER_THREAD	CU_STREAM_PER_THREAD
+#define MY_MEMLOCATION_PER_THREAD (GpuWorkerCurrentContext->cuda_mlocation)
+static CUmemLocation		host_mlocation = {CU_DEVICE_CPU, CU_MEM_LOCATION_TYPE_HOST};
+static CUmemLocation		invalid_mlocation = {-1,CU_MEM_LOCATION_TYPE_INVALID};
 static volatile int			gpuserv_bgworker_got_signal = 0;
 static gpuContext		   *gpuserv_gpucontext_array;
 static dlist_head			gpuserv_gpucontext_list;
@@ -135,29 +151,19 @@ static gpuServSharedState *gpuserv_shared_state = NULL;
 static int			__pgstrom_max_async_tasks_dummy;
 static int			__pgstrom_cuda_stack_limit_kb;
 static char		   *pgstrom_cuda_toolkit_basedir = CUDA_TOOLKIT_BASEDIR; /* GUC */
-static char		   *pgstrom_host_compiler_binpath = HOST_COMPILER_BINPATH; /* GUC */
 static const char  *pgstrom_fatbin_image_filename = "/dev/null";
 
-static void
-gpuservLoggerReport(const char *fmt, ...)	pg_attribute_printf(1, 2);
-
-#define __gsLogCxt(gpu_label,fmt,...)					\
-	gpuservLoggerReport("%s|LOG|%s|%d|%s|" fmt "\n",	\
-						gpu_label,						\
-						__basename(__FILE__),			\
-						__LINE__,						\
-						__FUNCTION__,					\
-						##__VA_ARGS__)
-#define __gsLogNoCxt(fmt,...)						\
-	__gsLogCxt("GPU-Serv",fmt,##__VA_ARGS__)
-#define __gsLog(fmt,...)							\
-	__gsLogCxt(GpuWorkerCurrentContext->gpu_label,fmt,##__VA_ARGS__)
-
-#define __gsError(fmt, ...)								\
+#define __gsLogCxt(gcontext,fmt,...)					\
+	__gsLogLabel(((gcontext) ? (gcontext)->gpu_label : "GPU-Serv"), fmt, ##__VA_ARGS__)
+#define __gsLog(fmt,...)								\
+	__gsLogCxt(GpuWorkerCurrentContext, fmt, ##__VA_ARGS__)
+#define __gsLogNoCxt(fmt,...)					\
+	__gsLogLabel("GPU-Serv",fmt,##__VA_ARGS__)
+#define __gsError(fmt, ...)						\
 	__gsLog("[error] " fmt, ##__VA_ARGS__);
 #define __gsErrorCxt(gcontext,fmt, ...)					\
-	__gsLogCxt((gcontext)->gpu_label,					\
-			   "[error] " fmt, ##__VA_ARGS__);
+	__gsLogCxt((gcontext),								\
+			   "[error] " fmt, ##__VA_ARGS__)
 #define __gsInfo(fmt, ...)								\
 	do {												\
 		if (heterodbExtraEreportLevel() >= 1)			\
@@ -166,7 +172,7 @@ gpuservLoggerReport(const char *fmt, ...)	pg_attribute_printf(1, 2);
 #define __gsInfoCxt(gcontext,fmt,...)					\
 	do {												\
 		if (heterodbExtraEreportLevel() >= 1)			\
-			__gsLogCxt((gcontext)->gpu_label,			\
+			__gsLogCxt((gcontext),						\
 					   "[info] " fmt, ##__VA_ARGS__);	\
 	} while(0)
 #define __gsDebug(fmt, ...)								\
@@ -177,10 +183,22 @@ gpuservLoggerReport(const char *fmt, ...)	pg_attribute_printf(1, 2);
 #define __gsDebugCxt(gcontext,fmt, ...)					\
 	do {												\
 		if (heterodbExtraEreportLevel() >= 2)			\
-			__gsLogCxt((gcontext)->gpu_label,			\
+			__gsLogCxt((gcontext),						\
 					   "[debug] " fmt, ##__VA_ARGS__);	\
 	} while(0)
 
+/*
+ * isGpuServWorkerThread
+ */
+bool
+isGpuServWorkerThread(void)
+{
+	return (GpuWorkerCurrentContext != NULL);
+}
+
+/*
+ * pg_strom.max_async_tasks and related
+ */
 static void
 pgstrom_max_async_tasks_assign(int newval, void *extra)
 {
@@ -232,6 +250,24 @@ gpuserv_ready_accept(void)
 {
 	return (gpuserv_shared_state &&
 			gpuserv_shared_state->gpuserv_ready_accept);
+}
+
+/*
+ * gpuClientGetTaskFlags
+ */
+uint32_t
+gpuClientGetTaskFlags(const gpuClient *gclient)
+{
+	return gclient->xpu_task_flags;
+}
+
+/*
+ * gpuClientGetSessionInfo
+ */
+const kern_session_info *
+gpuClientGetSessionInfo(const gpuClient *gclient)
+{
+	return gclient->h_session;
 }
 
 /*
@@ -360,7 +396,7 @@ gpuservLoggerDispatch(void)
 /*
  * gpuservLoggerReport
  */
-static void
+void
 gpuservLoggerReport(const char *fmt, ...)
 {
 	va_list		ap;
@@ -546,6 +582,10 @@ __gpu_archtecture_label(int major_cc, int minor_cc)
 			return "sm_89";
 		case 900:	/* NVIDIA H100 */
 			return "sm_90";
+		case 1000:	/* NVIDIA B100? */
+			return "sm_100";
+		case 1200:	/* NVIDIA B40? */
+			return "sm_120";
 		default:
 			elog(ERROR, "unsupported compute capability (%d.%d)",
 				 major_cc, minor_cc);
@@ -815,7 +855,6 @@ __rebuild_gpu_fatbin_file(const char *fatbin_dir,
 						 " /bin/sh -x -c '%s/bin/nvcc"
 						 " --maxrregcount=%d"
 						 " --source-in-ptx -lineinfo"
-						 " --compiler-bindir '%s'"
 						 " -I. -I%s "
 						 " -DHAVE_FLOAT2 "
 						 " -DCUDA_MAXTHREADS_PER_BLOCK=%u "
@@ -825,7 +864,6 @@ __rebuild_gpu_fatbin_file(const char *fatbin_dir,
 						 " %s/pg_strom/%s.cu' > %s.log 2>&1",
 						 pgstrom_cuda_toolkit_basedir,
 						 CUDA_MAXREGCOUNT,
-						 pgstrom_host_compiler_binpath,
 						 PGINCLUDEDIR,
 						 CUDA_MAXTHREADS_PER_BLOCK,
 						 tok,
@@ -834,13 +872,11 @@ __rebuild_gpu_fatbin_file(const char *fatbin_dir,
 	appendStringInfo(&cmd,
 					 ") && wait;"
 					 " /bin/sh -x -c '%s/bin/nvcc"
-					 " --compiler-bindir '%s'"
 					 " -Xnvlink --suppress-stack-size-warning"
 					 " -arch=native --threads 4"
 					 " --device-link --fatbin"
 					 " -o '%s'",
 					 pgstrom_cuda_toolkit_basedir,
-					 pgstrom_host_compiler_binpath,
 					 fatbin_file);
 	strcpy(namebuf, CUDA_CORE_FILES);
 	for (tok = strtok_r(namebuf, " ", &pos);
@@ -1150,16 +1186,28 @@ out_unlock:
 	return (chunk ? chunk : NULL);
 }
 
-static gpuMemChunk *
-gpuMemAlloc(size_t bytesize)
+static inline gpuMemChunk *
+__gpuMemAlloc(gpuContext *gcontext, size_t bytesize)
 {
-	return __gpuMemAllocCommon(&GpuWorkerCurrentContext->pool_raw, bytesize);
+	return __gpuMemAllocCommon(&gcontext->pool_raw, bytesize);
 }
 
-static gpuMemChunk *
+static inline gpuMemChunk *
+gpuMemAlloc(size_t bytesize)
+{
+	return __gpuMemAlloc(GpuWorkerCurrentContext, bytesize);
+}
+
+static inline gpuMemChunk *
+__gpuMemAllocManaged(gpuContext *gcontext, size_t bytesize)
+{
+	return __gpuMemAllocCommon(&gcontext->pool_managed, bytesize);
+}
+
+static inline gpuMemChunk *
 gpuMemAllocManaged(size_t bytesize)
 {
-	return __gpuMemAllocCommon(&GpuWorkerCurrentContext->pool_managed, bytesize);
+	return __gpuMemAllocManaged(GpuWorkerCurrentContext, bytesize);
 }
 
 static void
@@ -1312,8 +1360,7 @@ gpuMemoryPoolInit(gpuContext *gcontext,
  * gpuMemoryPrefetchKDS
  */
 static CUresult
-gpuMemoryPrefetchKDS(kern_data_store *kds,
-					 CUdevice dst_device)
+gpuMemoryPrefetchKDS(kern_data_store *kds, CUmemLocation mloc)
 {
 	CUresult	rc;
 
@@ -1324,7 +1371,7 @@ gpuMemoryPrefetchKDS(kern_data_store *kds,
 								(KDS_HEAD_LENGTH(kds) +
 								 sizeof(uint64_t) * kds->hash_nslots +
 								 sizeof(uint64_t) * kds->nitems),
-								dst_device,
+								mloc, 0,
 								MY_STREAM_PER_THREAD);
 		if (rc != CUDA_SUCCESS)
 			return rc;
@@ -1333,7 +1380,7 @@ gpuMemoryPrefetchKDS(kern_data_store *kds,
 								+ kds->length
 								- kds->usage,
 								kds->usage,
-								dst_device,
+								mloc, 0,
 								MY_STREAM_PER_THREAD);
 		if (rc != CUDA_SUCCESS)
 			return rc;
@@ -1342,7 +1389,7 @@ gpuMemoryPrefetchKDS(kern_data_store *kds,
 	{
 		rc = cuMemPrefetchAsync((CUdeviceptr)kds,
 								kds->length,
-								dst_device,
+								mloc, 0,
 								MY_STREAM_PER_THREAD);
 	}
 	return rc;
@@ -1357,21 +1404,6 @@ gpuMemoryPrefetchKDS(kern_data_store *kds,
 static void
 __gpuClientWriteBack(gpuClient *gclient,
 					 struct iovec *iov, int iovcnt);
-static void
-__gpuClientELog(gpuClient *gclient,
-				int errcode,
-				const char *filename, int lineno,
-				const char *funcname,
-				const char *fmt, ...)	pg_attribute_printf(6,7);
-
-#define gpuClientELog(gclient,fmt,...)						\
-	__gpuClientELog((gclient), ERRCODE_DEVICE_ERROR,		\
-					__FILE__, __LINE__, __FUNCTION__,		\
-					(fmt), ##__VA_ARGS__)
-#define gpuClientFatal(gclient,fmt,...)						\
-	__gpuClientELog((gclient), ERRCODE_DEVICE_FATAL,		\
-					__FILE__, __LINE__, __FUNCTION__,		\
-					(fmt), ##__VA_ARGS__)
 
 static void
 __gpuClientELogRaw(gpuClient *gclient, kern_errorbuf *errorbuf)
@@ -1390,7 +1422,7 @@ __gpuClientELogRaw(gpuClient *gclient, kern_errorbuf *errorbuf)
 	__gpuClientWriteBack(gclient, &iov, 1);
 }
 
-static void
+void
 __gpuClientELog(gpuClient *gclient,
 				int errcode,
 				const char *filename, int lineno,
@@ -1455,9 +1487,13 @@ struct gpuQueryBuffer
 	void		   *h_kmrels;		/* GpuJoin inner buffer (host) */
 	size_t			kmrels_sz;		/* GpuJoin inner buffer size */
 	pthread_rwlock_t m_kds_rwlock;	/* RWLock for the final/fallback buffer */
+	int32_t			curr_repeat_id;	/* current scan repeat-id */
+	selectIntoState	si_state;		/* SELECT INTO Direct related */
 	int				gpumem_nitems;
 	int				gpumem_nrooms;
 	CUdeviceptr	   *gpumem_devptrs;
+	size_t		   *gpumem_lengths;
+	char		   *gpumem_kinds;
 	struct {
 		CUdeviceptr	m_kds_final;		/* final buffer (device) */
 		size_t		m_kds_final_length;	/* length of final buffer */
@@ -1475,27 +1511,43 @@ typedef struct gpuQueryBuffer		gpuQueryBuffer;
 	((kern_data_store *)(gq_buf)->gpus[MY_DINDEX_PER_THREAD].m_kds_fallback)
 #define GQBUF_KDS_FALLBACK_REVISION(gq_buf)		\
 	((gq_buf)->gpus[MY_DINDEX_PER_THREAD].m_kds_fallback_revision)
+#define GQBUF_KIND__GPUJOIN_INNER_BUFFER		'j'
+#define GQBUF_KIND__FINAL_PROJECTION_BUFFER		'p'
+#define GQBUF_KIND__FINAL_AGGREGATION_BUFFER	'a'
+#define GQBUF_KIND__FINAL_HEAP_BLOCK_BUFFER		'b'
+#define GQBUF_KIND__FALLBACK_BUFFER				'f'
 
 #define GPU_QUERY_BUFFER_NSLOTS		320
 static dlist_head		gpu_query_buffer_hslot[GPU_QUERY_BUFFER_NSLOTS];
 static pthread_mutex_t	gpu_query_buffer_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t	gpu_query_buffer_cond = PTHREAD_COND_INITIALIZER;
 
-static gpuQueryBuffer *__getGpuQueryBuffer(uint64_t buffer_id, bool may_create);
+static gpuQueryBuffer *__getGpuQueryBuffer(gpuClient *gclient,
+										   uint64_t buffer_id,
+										   bool may_create);
 
 static bool
 __enlargeGpuQueryBuffer(gpuQueryBuffer *gq_buf)
 {
 	if (gq_buf->gpumem_nitems >= gq_buf->gpumem_nrooms)
 	{
-		CUdeviceptr *__devptrs;
+		void   *__temp;
 		int		__nrooms = (2 * gq_buf->gpumem_nrooms + 20);
 
-		__devptrs = realloc(gq_buf->gpumem_devptrs,
-							sizeof(CUdeviceptr) * __nrooms);
-		if (!__devptrs)
+		__temp = realloc(gq_buf->gpumem_devptrs, sizeof(CUdeviceptr) * __nrooms);
+		if (!__temp)
 			return false;
-		gq_buf->gpumem_devptrs = __devptrs;
+		gq_buf->gpumem_devptrs = __temp;
+
+		__temp = realloc(gq_buf->gpumem_lengths, sizeof(size_t) * __nrooms);
+		if (!__temp)
+			return false;
+		gq_buf->gpumem_lengths = __temp;
+
+		__temp = realloc(gq_buf->gpumem_kinds, sizeof(char) * __nrooms);
+		if (!__temp)
+			return false;
+		gq_buf->gpumem_kinds = __temp;
 		gq_buf->gpumem_nrooms  = __nrooms;
     }
 	return true;
@@ -1503,7 +1555,9 @@ __enlargeGpuQueryBuffer(gpuQueryBuffer *gq_buf)
 
 static CUresult
 allocGpuQueryBuffer(gpuQueryBuffer *gq_buf,
-					CUdeviceptr *p_devptr, size_t bytesize)
+					CUdeviceptr *p_devptr,
+					size_t bytesize,
+					char gqbuf_kind)
 {
 	CUdeviceptr	m_devptr;
 	CUresult	rc;
@@ -1515,56 +1569,60 @@ allocGpuQueryBuffer(gpuQueryBuffer *gq_buf,
 						   CU_MEM_ATTACH_GLOBAL);
 	if (rc != CUDA_SUCCESS)
 		return rc;
-	gq_buf->gpumem_devptrs[gq_buf->gpumem_nitems++] = m_devptr;
+	gq_buf->gpumem_devptrs[gq_buf->gpumem_nitems] = m_devptr;
+	gq_buf->gpumem_lengths[gq_buf->gpumem_nitems] = bytesize;
+	gq_buf->gpumem_kinds[gq_buf->gpumem_nitems] = gqbuf_kind;
+	gq_buf->gpumem_nitems++;
 	*p_devptr = m_devptr;
 
-	__gsInfo("Query buffer allocation at %p (sz=%s)",
-			 (void *)m_devptr, format_bytesz(bytesize));
+	__gsInfo("Query buffer allocation at %p (kind=%c, sz=%s)",
+			 (void *)m_devptr, gqbuf_kind, format_bytesz(bytesize));
 
 	return CUDA_SUCCESS;
 }
 
-static bool
+static void
+__releaseGpuQueryBufferOne(gpuQueryBuffer *gq_buf, int index)
+{
+	CUdeviceptr	m_devptr;
+	CUresult	rc;
+
+	Assert(index < gq_buf->gpumem_nitems);
+	m_devptr = gq_buf->gpumem_devptrs[index];
+	rc = cuMemFree(m_devptr);
+	if (rc != CUDA_SUCCESS)
+		__FATAL("failed on cuMemFree(%p): %s", (void *)m_devptr, cuStrError(rc));
+	__gsInfo("Query buffer release one at %p (kind=%c, sz=%s)",
+			 (void *)m_devptr,
+			 gq_buf->gpumem_kinds[index],
+			 format_bytesz(gq_buf->gpumem_lengths[index]));
+	gq_buf->gpumem_devptrs[index] = 0UL;
+	gq_buf->gpumem_lengths[index] = 0UL;
+	gq_buf->gpumem_kinds[index] = 0;
+}
+
+static void
 releaseGpuQueryBufferOne(gpuQueryBuffer *gq_buf,
 						 CUdeviceptr m_devptr)
 {
 	for (int i=0; i < gq_buf->gpumem_nitems; i++)
 	{
-		CUresult	rc;
-
 		if (gq_buf->gpumem_devptrs[i] == m_devptr)
 		{
-			gq_buf->gpumem_devptrs[i] = 0;
-			rc = cuMemFree(m_devptr);
-			if (rc != CUDA_SUCCESS)
-				__FATAL("failed on cuMemFree(%p): %s",
-						(void *)m_devptr, cuStrError(rc));
-			__gsInfo("Query buffer release one at %p",
-					 (void *)m_devptr);
-			return true;
+			__releaseGpuQueryBufferOne(gq_buf, i);
+			return;
 		}
 	}
-	return false;
+	__FATAL("Query buffer does not have device memory at %p", (void *)m_devptr);
 }
-
 
 static void
 releaseGpuQueryBufferAll(gpuQueryBuffer *gq_buf)
 {
 	for (int i=0; i < gq_buf->gpumem_nitems; i++)
 	{
-		CUdeviceptr	m_devptr = gq_buf->gpumem_devptrs[i];
-		CUresult	rc;
-
-		if (m_devptr != 0UL)
-		{
-			rc = cuMemFree(m_devptr);
-			if (rc != CUDA_SUCCESS)
-				__FATAL("failed on cuMemFree(%p): %s",
-						(void *)m_devptr, cuStrError(rc));
-			__gsInfo("Query buffer release all at %p",
-					 (void *)m_devptr);
-		}
+		if (gq_buf->gpumem_devptrs[i] != 0UL)
+			__releaseGpuQueryBufferOne(gq_buf, i);
 	}
 	gq_buf->gpumem_nitems = 0;
 }
@@ -1677,6 +1735,47 @@ __lookupOneRandomGpuContext(gpumask_t candidate_gpus)
 	return gcontexts[index];
 }
 
+/*
+ * TODO: Run this function in a separated CPU thread
+ */
+static bool
+__setupGpuJoinPinnedInnerBufferPartitionedByCPU(gpuClient *gclient,
+												CUdeviceptr m_kds_src,
+												kern_buffer_partitions *kbuf_parts)
+{
+	const kern_data_store *kds_src = (const kern_data_store *)m_kds_src;
+	uint32_t	hash_divisor = kbuf_parts->hash_divisor;
+
+	for (uint32_t i=0; i < kds_src->nitems; i++)
+	{
+		const kern_tupitem *titem = KDS_GET_TUPITEM(kds_src, i);
+		uint32_t	rem = (titem->hash % hash_divisor);
+		uint32_t	tupsz;
+		uint32_t	row_id;
+		uint64_t	offset;
+		uint64_t   *hslot;
+		kern_hashitem *hitem;
+		kern_data_store *kds_in;
+
+		if (rem < numGpuDevAttrs)
+			continue;	/* already partitioned on GPUs */
+		/* allocation of the result buffer */
+		tupsz = MAXALIGN(offsetof(kern_hashitem, t) + titem->t_len);
+		kds_in = kbuf_parts->parts[rem].kds_in;
+		row_id = __atomic_add_uint32(&kds_in->nitems, 1);
+		offset = __atomic_add_uint64(&kds_in->usage, tupsz);
+		/* copy one tuple */
+		hslot = KDS_GET_HASHSLOT(kds_in, titem->hash);
+		hitem = (kern_hashitem *)
+			((char *)kds_in + kds_in->length - (offset + tupsz));
+		hitem->next = __atomic_exchange_uint64(hslot, offset);
+		memcpy(&hitem->t, titem, titem->t_len);
+		KERN_TUPITEM_SET_ROWID(&hitem->t, row_id);
+		KDS_GET_ROWINDEX(kds_in)[row_id] = (offset - offsetof(kern_hashitem, t));
+	}
+	return true;
+}
+
 static bool
 __setupGpuJoinPinnedInnerBufferPartitioned(gpuClient *gclient,
 										   gpuQueryBuffer *gq_buf,
@@ -1685,16 +1784,22 @@ __setupGpuJoinPinnedInnerBufferPartitioned(gpuClient *gclient,
 										   kern_buffer_partitions *kbuf_parts)
 {
 	gpuContext *gcontext_saved = GpuWorkerCurrentContext;
+	gpuContext **gcontext_per_chunk;
 	uint32_t	hash_divisor = kbuf_parts->hash_divisor;
+	gpumask_t	assigned_gpus = 0;
 	CUresult	rc;
-	struct timeval	tv1, tv2, tv3, tv4;
+	struct timeval	tv1, tv2, tv3;
 
 	/* allocation of kds_in for each partition */
+	gettimeofday(&tv1, NULL);
+	gcontext_per_chunk = palloc(sizeof(gpuContext *) * hash_divisor);
 	for (int i=0; i < hash_divisor; i++)
 	{
 		CUdeviceptr	m_kds_in;
+		gpuContext *__gcontext = NULL;
 
-		rc = allocGpuQueryBuffer(gq_buf, &m_kds_in, kds_head->length);
+		rc = allocGpuQueryBuffer(gq_buf, &m_kds_in, kds_head->length,
+								 GQBUF_KIND__GPUJOIN_INNER_BUFFER);
 		if (rc != CUDA_SUCCESS)
 		{
 			gpuClientELog(gclient, "failed on allocGpuQueryBuffer(sz=%lu): %s",
@@ -1703,180 +1808,132 @@ __setupGpuJoinPinnedInnerBufferPartitioned(gpuClient *gclient,
 		}
 		memcpy((void *)m_kds_in, kds_head, KDS_HEAD_LENGTH(kds_head));
 		kbuf_parts->parts[i].kds_in = (kern_data_store *)m_kds_in;
+		/* assign the partition on a particular GPU, if available */
+		if (i < numGpuDevAttrs)
+		{
+			for (int k=0; k < numGpuDevAttrs; k++)
+			{
+				gpumask_t	curr_gpu = (1UL<<k);
+
+				if ((curr_gpu & kbuf_parts->parts[i].available_gpus) != 0 &&
+					(curr_gpu & assigned_gpus) == 0)
+				{
+					__gcontext = &gpuserv_gpucontext_array[i];
+					assigned_gpus |= curr_gpu;
+					break;
+				}
+			}
+			if (!__gcontext)
+			{
+				gpuClientELog(gclient, "Bug? no available GPUs for the pinned-inner-buffer partition-%d (GPUs: %08lx)",
+							  i, kbuf_parts->parts[i].available_gpus);
+				return false;
+			}
+		}
+		gcontext_per_chunk[i] = __gcontext;
 	}
 	/* partitioning for each GPU device */
-	gettimeofday(&tv1, NULL);
-	for (int i=0; i < numGpuDevAttrs; i++)
+	gettimeofday(&tv2, NULL);
+	for (int i=0; i < gq_src->gpumem_nitems; i++)
 	{
-		CUdeviceptr	m_kds_src = gq_src->gpus[i].m_kds_final;
-		gpuContext *gcontext = &gpuserv_gpucontext_array[i];
-		gpuContext *gcontext_prev;
-		int			grid_sz;
-		int			block_sz;
-		void	   *kern_args[5];
+		CUdeviceptr m_kds_src = gq_src->gpumem_devptrs[i];
+		uint32_t	kds_nitems;
+		uint64_t	kds_usage;
 
 		if (m_kds_src == 0UL)
 			continue;
-		gcontext_prev = gpuContextSwitchTo(gcontext);
-
-		/* launch buffer reconstruction kernel function for each source */
-		rc = gpuOptimalBlockSize(&grid_sz,
-								 &block_sz,
-								 gcontext->cufn_kbuf_partitioning,
-								 sizeof(uint64_t) * hash_divisor);
-		if (rc != CUDA_SUCCESS)
-		{
-			gpuClientELog(gclient, "failed on gpuOptimalBlockSize: %s",
-						  cuStrError(rc));
-			goto error;
-		}
-		kern_args[0] = &kbuf_parts;
-		kern_args[1] = &m_kds_src;
-		rc = cuLaunchKernel(gcontext->cufn_kbuf_partitioning,
-							grid_sz, 1, 1,
-							block_sz, 1, 1,
-							sizeof(uint64_t) * hash_divisor,
-							MY_STREAM_PER_THREAD,
-							kern_args,
-							0);
-		if (rc != CUDA_SUCCESS)
-		{
-			gpuClientELog(gclient, "failed on cuLaunchKernel: %s",
-						  cuStrError(rc));
-			goto error;
-		}
-		rc = cuStreamSynchronize(MY_STREAM_PER_THREAD);
-		if (rc != CUDA_SUCCESS)
-		{
-			gpuClientELog(gclient, "failed on cuStreamSynchronize: %s",
-						  cuStrError(rc));
-			goto error;
-		}
-		gpuContextSwitchTo(gcontext_prev);
-
-		if (!releaseGpuQueryBufferOne(gq_src, m_kds_src))
-		{
-			gpuClientELog(gclient, "unable to release source of pinned-inner buffer");
-			goto error;
-		}
-		gq_src->gpus[i].m_kds_final = 0UL;
-		gq_src->gpus[i].m_kds_final_length = 0UL;
-	}
-	/* setup memory attribute for each partition */
-	gettimeofday(&tv2, NULL);
-	for (int i=hash_divisor-1; i >= 0; i--)
-	{
-		kern_data_store *kds_in = kbuf_parts->parts[i].kds_in;
-		gpumask_t	available_gpus = kbuf_parts->parts[i].available_gpus;
-
-		/*
-		 * migrate the inner-buffer partitions to be used in the 2nd
-		 * or later repeats into the host-memory
-		 */
-		if (i > numGpuDevAttrs)
-		{
-			rc = gpuMemoryPrefetchKDS(kds_in, CU_DEVICE_CPU);
-			if (rc != CUDA_SUCCESS)
-			{
-				gpuClientELog(gclient, "failed on gpuMemoryPrefetchKDS: %s",
-							  cuStrError(rc));
-				return false;
-			}
+		if (gq_src->gpumem_kinds[i] != GQBUF_KIND__FINAL_PROJECTION_BUFFER)
 			continue;
-		}
-		/*
-		 * migrate the inner-buffer partitions to the primary GPU device.
-		 */
-		for (int k=0; k < numGpuDevAttrs; k++)
+		kds_nitems = ((kern_data_store *)m_kds_src)->nitems;
+		kds_usage  = ((kern_data_store *)m_kds_src)->usage;
+		for (uint32_t r=0; r < hash_divisor; r++)
 		{
-			gpuContext *gcontext = &gpuserv_gpucontext_array[k];
-			gpuContext *gcontext_prev;
+			kern_data_store *kds_in = kbuf_parts->parts[r].kds_in;
+			gpuContext	   *gcontext_curr = gcontext_per_chunk[r];
 
-			if ((available_gpus & (1UL << k)) != 0)
+			if (gcontext_curr)
 			{
-				gcontext_prev = gpuContextSwitchTo(gcontext);
-				/* Prefetch the inner-buffer */
-				rc = gpuMemoryPrefetchKDS(kds_in, gcontext->cuda_device);
+				gpuContext *gcontext_prev = gpuContextSwitchTo(gcontext_curr);
+				void   *kern_args[4];
+				int		grid_sz;
+				int		block_sz;
+
+				rc = gpuMemoryPrefetchKDS((kern_data_store *)m_kds_src,
+										  gcontext_curr->cuda_mlocation);
 				if (rc != CUDA_SUCCESS)
 				{
 					gpuClientELog(gclient, "failed on gpuMemoryPrefetchKDS: %s",
 								  cuStrError(rc));
+					goto error;
+				}
+				rc = gpuOptimalBlockSize(&grid_sz,
+										 &block_sz,
+										 gcontext_curr->cufn_kbuf_partitioning, 0);
+				if (rc != CUDA_SUCCESS)
+				{
+					gpuClientELog(gclient, "failed on gpuOptimalBlockSize: %s",
+								  cuStrError(rc));
+					goto error;
+				}
+				kern_args[0] = &kds_in;
+				kern_args[1] = &m_kds_src;
+				kern_args[2] = &r;
+				kern_args[3] = &hash_divisor;
+				rc = cuLaunchKernel(gcontext_curr->cufn_kbuf_partitioning,
+									grid_sz, 1, 1,
+									block_sz, 1, 1,
+									0,
+									MY_STREAM_PER_THREAD,
+									kern_args,
+									0);
+				if (rc != CUDA_SUCCESS)
+				{
+					gpuClientELog(gclient, "failed on cuLaunchKernel: %s",
+								  cuStrError(rc));
+					goto error;
+				}
+				rc = cuStreamSynchronize(MY_STREAM_PER_THREAD);
+				if (rc != CUDA_SUCCESS)
+				{
+					gpuClientELog(gclient, "failed on cuStreamSynchronize: %s",
+								  cuStrError(rc));
+					goto error;
 				}
 				gpuContextSwitchTo(gcontext_prev);
-				break;
-			}
-		}
-	}
-	gettimeofday(&tv3, NULL);
-
-	/*
-	 * Change the memory policy, and distribute inner-buffers to the
-	 * secondary devices.
-	 */
-	for (int i=0; i < hash_divisor; i++)
-	{
-		kern_data_store *kds_in = kbuf_parts->parts[i].kds_in;
-		gpumask_t	available_gpus = kbuf_parts->parts[i].available_gpus;
-		bool		meet_first = false;
-
-		/* inner-buffer partition is not distributed to multiple GPUs */
-		if (get_bitcount(available_gpus) <= 1)
-			continue;
-
-		for (int k=0; k < numGpuDevAttrs; k++)
-		{
-			gpuContext *gcontext = &gpuserv_gpucontext_array[k];
-			gpuContext *gcontext_prev;
-
-			if ((available_gpus & gcontext->cuda_dmask) == 0)
-				continue;
-
-			gcontext_prev = gpuContextSwitchTo(gcontext);
-			if (!meet_first)
-			{
-				rc = cuMemAdvise((CUdeviceptr)kds_in,
-								 (KDS_HEAD_LENGTH(kds_in) +
-								  sizeof(uint64_t) * kds_in->hash_nslots +
-								  sizeof(uint64_t) * kds_in->nitems),
-								 CU_MEM_ADVISE_SET_READ_MOSTLY, -1);
-				if (rc != CUDA_SUCCESS)
-				{
-					gpuContextSwitchTo(gcontext_prev);
-					gpuClientELog(gclient, "failed on cuMemAdvise(SET_READ_MOSTLY): %s",
-								  cuStrError(rc));
-					return false;
-				}
-				rc = cuMemAdvise((CUdeviceptr)kds_in
-								 + kds_in->length
-								 - kds_in->usage,
-								 kds_in->usage,
-								 CU_MEM_ADVISE_SET_READ_MOSTLY, -1);
-				if (rc != CUDA_SUCCESS)
-				{
-					gpuContextSwitchTo(gcontext_prev);
-					gpuClientELog(gclient, "failed on cuMemAdvise(SET_READ_MOSTLY): %s",
-								  cuStrError(rc));
-					return false;
-				}
-				meet_first = true;
 			}
 			else
 			{
-				/* Prefetch the inner-buffer */
-				rc = gpuMemoryPrefetchKDS(kds_in, gcontext->cuda_device);
+				rc = gpuMemoryPrefetchKDS((kern_data_store *)m_kds_src,
+										  host_mlocation);
 				if (rc != CUDA_SUCCESS)
 				{
-					gpuContextSwitchTo(gcontext_prev);
 					gpuClientELog(gclient, "failed on gpuMemoryPrefetchKDS: %s",
 								  cuStrError(rc));
-					return false;
+					goto error;
 				}
+				if (__setupGpuJoinPinnedInnerBufferPartitionedByCPU(gclient,
+																	m_kds_src,
+																	kbuf_parts))
+					break;
+				else
+					goto error;
 			}
-			gpuContextSwitchTo(gcontext_prev);
 		}
+		__releaseGpuQueryBufferOne(gq_buf, i);
+		gettimeofday(&tv3, NULL);
+		__gsInfo("inner-buffer partitioning %u of %u, nitems=%u, usage=%s, elapsed: %s",
+				 i+1, gq_src->gpumem_nitems,
+				 kds_nitems,
+				 format_bytesz(kds_usage),
+				 format_millisec((double)((tv3.tv_sec  - tv2.tv_sec)  * 1000 +
+										  (tv3.tv_usec - tv2.tv_usec) / 1000)));
 	}
-	gettimeofday(&tv4, NULL);
-
+	for (int i=0; i < numGpuDevAttrs; i++)
+	{
+		gq_src->gpus[i].m_kds_final = 0UL;
+		gq_src->gpus[i].m_kds_final_length = 0UL;
+	}
+	gettimeofday(&tv3, NULL);
 	/* print partition information */
 	for (int i=0; i < hash_divisor; i++)
 	{
@@ -1893,15 +1950,12 @@ __setupGpuJoinPinnedInnerBufferPartitioned(gpuClient *gclient,
 				 format_bytesz(kds_in->usage),
 				 format_bytesz(consumed));
 	}
-	__gsInfo("inner-buffer partitioning (rebuild: %s, prefetch: %s, set-policy: %s)",
+	__gsInfo("inner-buffer partitioning (alloc: %s, rebuild: %s)",
 			 format_millisec((double)((tv2.tv_sec  - tv1.tv_sec)  * 1000 +
 									  (tv2.tv_usec - tv1.tv_usec) / 1000)),
 			 format_millisec((double)((tv3.tv_sec  - tv2.tv_sec)  * 1000 +
-									  (tv3.tv_usec - tv2.tv_usec) / 1000)),
-			 format_millisec((double)((tv4.tv_sec  - tv3.tv_sec)  * 1000 +
-									  (tv4.tv_usec - tv3.tv_usec) / 1000)));
+									  (tv3.tv_usec - tv2.tv_usec) / 1000)));
 	return true;
-
 error:
 	gpuContextSwitchTo(gcontext_saved);
 	return false;
@@ -1915,13 +1969,15 @@ __setupGpuJoinPinnedInnerBufferReconstruct(gpuClient *gclient,
 										   kern_multirels *m_kmrels,
 										   int depth)
 {
+	gpuContext *gcontext = __lookupOneRandomGpuContext(gclient->optimal_gpus);
+	gpuContext *gcontext_saved = NULL;
 	CUdeviceptr	m_kds_in;
 	CUresult	rc;
-	int			gpu_count = 0;
 	struct timeval tv1, tv2;
 
 	gettimeofday(&tv1, NULL);
-	rc = allocGpuQueryBuffer(gq_buf, &m_kds_in, kds_head->length);
+	rc = allocGpuQueryBuffer(gq_buf, &m_kds_in, kds_head->length,
+							 GQBUF_KIND__GPUJOIN_INNER_BUFFER);
 	if (rc != CUDA_SUCCESS)
 	{
 		gpuClientELog(gclient, "failed on allocGpuQueryBuffer(sz=%lu): %s",
@@ -1933,30 +1989,36 @@ __setupGpuJoinPinnedInnerBufferReconstruct(gpuClient *gclient,
 	/*
 	 * Move kds_final to kds_in for each GPU devices
 	 */
-	for (int i=0; i < numGpuDevAttrs; i++)
+	gcontext_saved = gpuContextSwitchTo(gcontext);
+	for (int i=0; i < gq_src->gpumem_nitems; i++)
 	{
-		CUdeviceptr	m_kds_src = gq_src->gpus[i].m_kds_final;
-		gpuContext *gcontext = &gpuserv_gpucontext_array[i];
-		gpuContext *gcontext_prev;
+		CUdeviceptr m_kds_src = gq_src->gpumem_devptrs[i];
 		int			grid_sz;
 		int			block_sz;
 		void	   *kern_args[4];
 
 		if (m_kds_src == 0UL)
 			continue;
-
-		gcontext_prev = gpuContextSwitchTo(gcontext);
-
+		if (gq_src->gpumem_kinds[i] != GQBUF_KIND__FINAL_PROJECTION_BUFFER)
+			continue;
+		/* prefetch the source buffer */
+		rc = gpuMemoryPrefetchKDS((kern_data_store *)m_kds_src,
+								  gcontext->cuda_mlocation);
+		if (rc != CUDA_SUCCESS)
+		{
+			gpuClientELog(gclient, "failed on gpuMemoryPrefetchKDS: %s",
+						  cuStrError(rc));
+			goto error;
+		}
 		/* launch buffer reconstruction kernel function */
 		rc = gpuOptimalBlockSize(&grid_sz,
 								 &block_sz,
 								 gcontext->cufn_kbuf_reconstruction, 0);
 		if (rc != CUDA_SUCCESS)
 		{
-			gpuContextSwitchTo(gcontext_prev);
 			gpuClientELog(gclient, "failed on gpuOptimalBlockSize: %s",
 						  cuStrError(rc));
-			return false;
+			goto error;
 		}
 		/* runs-reconstruction kernel */
 		kern_args[0] = &m_kds_in;
@@ -1970,46 +2032,50 @@ __setupGpuJoinPinnedInnerBufferReconstruct(gpuClient *gclient,
 							0);
 		if (rc != CUDA_SUCCESS)
 		{
-			gpuContextSwitchTo(gcontext_prev);
 			gpuClientELog(gclient, "failed on cuLaunchKernel: %s",
 						  cuStrError(rc));
-			return false;
+			goto error;
 		}
 		/* wait for completion */
 		rc = cuStreamSynchronize(MY_STREAM_PER_THREAD);
 		if (rc != CUDA_SUCCESS)
 		{
-			gpuContextSwitchTo(gcontext_prev);
 			gpuClientELog(gclient, "failed on cuStreamSynchronize: %s",
 						  cuStrError(rc));
-			return false;
+			goto error;
 		}
-		gpuContextSwitchTo(gcontext_prev);
-
 		/* release m_kds_src */
-		if (!releaseGpuQueryBufferOne(gq_src, m_kds_src))
+		rc = cuMemFree(m_kds_src);
+		if (rc != CUDA_SUCCESS)
 		{
-			gpuClientELog(gclient, "unable to release source of pinned-inner buffer");
-			return false;
+			gpuClientELog(gclient, "failed on cuMemFree: %s",
+						  cuStrError(rc));
+			goto error;
 		}
+		gq_src->gpumem_devptrs[i] = 0UL;
+	}
+	for (int i=0; i < numGpuDevAttrs; i++)
+	{
 		gq_src->gpus[i].m_kds_final = 0UL;
 		gq_src->gpus[i].m_kds_final_length = 0UL;
-		gpu_count++;
 	}
-	/* assign read-only attribute */
+	/* assign read-only attribute; note that CU_MEM_ADVISE_SET_READ_MOSTLY ignores
+	 * CUmemLocation argument. */
 	rc = cuMemAdvise(m_kds_in, kds_head->length,
-					 CU_MEM_ADVISE_SET_READ_MOSTLY, -1);
+					 CU_MEM_ADVISE_SET_READ_MOSTLY,
+					 invalid_mlocation);
 	if (rc != CUDA_SUCCESS)
 	{
 		gpuClientELog(gclient, "failed on cuMemAdvise(SET_READ_MOSTLY): %s",
 					  cuStrError(rc));
 		return false;
 	}
+	gpuContextSwitchTo(gcontext_saved);
 	gettimeofday(&tv2, NULL);
 	m_kmrels->chunks[depth-1].kds_in = (kern_data_store *)m_kds_in;
 
-	__gsInfo("inner-buffer reconstruction (%u GPUs, nitems=%u, nslots=%u, usage=%s, consumption=%s): %s",
-			 gpu_count,
+	__gsInfo("inner-buffer reconstruction (GPU%d, nitems=%u, nslots=%u, usage=%s, consumption=%s): %s",
+			 gcontext->cuda_dindex,
 			 ((kern_data_store *)m_kds_in)->nitems,
 			 ((kern_data_store *)m_kds_in)->hash_nslots,
 			 format_bytesz(((kern_data_store *)m_kds_in)->usage),
@@ -2017,6 +2083,9 @@ __setupGpuJoinPinnedInnerBufferReconstruct(gpuClient *gclient,
 			 format_millisec((double)((tv2.tv_sec  - tv1.tv_sec)  * 1000 +
 									  (tv2.tv_usec - tv1.tv_usec) / 1000)));
 	return true;
+error:
+	gpuContextSwitchTo(gcontext_saved);
+	return false;
 }
 
 static bool
@@ -2032,12 +2101,19 @@ __setupGpuJoinPinnedInnerBufferZeroCopy(gpuClient *gclient,
 	/* move the ownership of kds_src to gq_buf */
 	for (int i=0; i < gq_src->gpumem_nitems; i++)
 	{
-		if (gq_src->gpumem_devptrs[i] == (CUdeviceptr)kds_src)
+		if (gq_src->gpumem_devptrs[i] == (CUdeviceptr)kds_src &&
+			gq_src->gpumem_kinds[i] == GQBUF_KIND__FINAL_PROJECTION_BUFFER)
 		{
 			size_t	consumed;
 
+			gq_buf->gpumem_devptrs[gq_buf->gpumem_nitems] = gq_src->gpumem_devptrs[i];
 			gq_src->gpumem_devptrs[i] = 0UL;
-			gq_buf->gpumem_devptrs[gq_buf->gpumem_nitems++] = (CUdeviceptr)kds_src;
+			gq_buf->gpumem_lengths[gq_buf->gpumem_nitems] = gq_src->gpumem_lengths[i];
+			gq_src->gpumem_lengths[i] = 0UL;
+			gq_buf->gpumem_kinds[gq_buf->gpumem_nitems] = GQBUF_KIND__GPUJOIN_INNER_BUFFER;
+			gq_src->gpumem_kinds[i] = 0;
+			gq_buf->gpumem_nitems++;
+
 			m_kmrels->chunks[depth-1].kds_in = kds_src;
 			consumed = (KDS_HEAD_LENGTH(kds_src) +
 						sizeof(uint64_t) * kds_src->nitems +
@@ -2065,16 +2141,15 @@ __setupGpuJoinPinnedInnerBufferCommon(gpuClient *gclient,
 		= KERN_MULTIRELS_PARTITION_DESC(m_kmrels, depth);
 	gpuQueryBuffer	   *gq_src;
 	kern_data_store	   *kds_src = NULL;
-	kern_data_store	   *kds_head;
+	kern_data_store	   *kds_head = NULL;
 	int					kds_nchunks = 0;
 	uint64_t			kds_nitems = 0;
 	uint64_t			kds_usage = 0;
 	uint64_t			kds_nslots = 0;
-	uint64_t			kds_length;
 	bool				retval = false;
 
 	/* lookup the result buffer in the previous level */
-	gq_src = __getGpuQueryBuffer(buffer_id, false);
+	gq_src = __getGpuQueryBuffer(gclient, buffer_id, false);
 	if (!gq_src)
 	{
 		gpuClientELog(gclient, "pinned inner buffer[%d] was not found", depth);
@@ -2085,35 +2160,33 @@ __setupGpuJoinPinnedInnerBufferCommon(gpuClient *gclient,
 	/*
 	 * Setup kds_head of the new inner-buffer, if necessary
 	 */
-	for (int i=0; i < numGpuDevAttrs; i++)
+	for (int i=0; i < gq_src->gpumem_nitems; i++)
 	{
-		kern_data_store *__kds = (kern_data_store *)gq_src->gpus[i].m_kds_final;
+		kern_data_store *__kds = (kern_data_store *)gq_src->gpumem_devptrs[i];
 
-		if (__kds)
-		{
-			if (kds_src == NULL)
-				kds_src = __kds;
-			kds_nchunks++;
-			kds_nitems += __kds->nitems;
-			kds_usage  += __kds->usage;
-		}
+		if (!__kds)
+			continue;
+		if (!kds_src)
+			kds_src = __kds;
+		kds_nchunks++;
+		kds_nitems += __kds->nitems;
+		kds_usage  += __kds->usage;
 	}
-
 	if (!kds_src)
 	{
 		gpuClientELog(gclient, "No pinned inner buffer[%d] was found", depth);
 		pthreadRWLockUnlock(&gq_src->m_kds_rwlock);
 		return false;
 	}
-	kds_head = alloca(KDS_HEAD_LENGTH(kds_src));
 	kds_nslots = KDS_GET_HASHSLOT_WIDTH(kds_nitems);
-
+	if (kbuf_parts)
+		kds_nslots /= kbuf_parts->hash_divisor;
+	kds_head = alloca(KDS_HEAD_LENGTH(kds_src));
 	memcpy(kds_head, kds_src, KDS_HEAD_LENGTH(kds_src));
-	kds_length = KDS_HEAD_LENGTH(kds_head)
+	kds_head->length = KDS_HEAD_LENGTH(kds_head)
 		+ sizeof(uint64_t) * kds_nslots		/* hash-nslots */
 		+ sizeof(uint64_t) * kds_nitems		/* row-index */
-		+ (1UL<<30) + kds_usage;			/* tuples (with 1GB margin) */
-	kds_head->length = kds_length;
+		+ kds_usage + (32UL<<20);			/* tuples (with 32MB margin) */
 	kds_head->usage  = 0;
 	kds_head->nitems = 0;
 	kds_head->hash_nslots = kds_nslots;
@@ -2160,8 +2233,9 @@ error:
 static bool
 __setupGpuQueryJoinInnerBuffer(gpuClient *gclient,
 							   gpuQueryBuffer *gq_buf,
-							   uint32_t kmrels_handle)
+							   uint32_t *p_join_reconstruction_msec)
 {
+	kern_session_info *session = gclient->h_session;
 	kern_multirels *h_kmrels = NULL;
 	kern_multirels *m_kmrels = NULL;
 	CUresult	rc;
@@ -2169,13 +2243,16 @@ __setupGpuQueryJoinInnerBuffer(gpuClient *gclient,
 	struct stat	stat_buf;
 	char		namebuf[100];
 	size_t		mmap_sz = 0;
+	struct timeval tv1, tv2;
 
-	if (kmrels_handle == 0)
-		return true;
+	if (session->join_inner_handle == 0)
+		return true;	/* nothing to do */
 
+	gettimeofday(&tv1, NULL);
 	snprintf(namebuf, sizeof(namebuf),
 			 ".pgstrom_shmbuf_%u_%d",
-			 PostPortNumber, kmrels_handle);
+			 PostPortNumber,
+			 session->join_inner_handle);
 	fdesc = shm_open(namebuf, O_RDWR, 0600);
 	if (fdesc < 0)
 	{
@@ -2210,7 +2287,8 @@ __setupGpuQueryJoinInnerBuffer(gpuClient *gclient,
 	rc = allocGpuQueryBuffer(gq_buf,
 							 (CUdeviceptr *)&m_kmrels,
 							 mmap_sz +
-							 h_kmrels->ojmap_sz * (numGpuDevAttrs-1));
+							 h_kmrels->ojmap_sz * (numGpuDevAttrs-1),
+							 GQBUF_KIND__GPUJOIN_INNER_BUFFER);
 	if (rc != CUDA_SUCCESS)
 	{
 		gpuClientELog(gclient, "failed on cuMemAllocManaged: %s",
@@ -2250,12 +2328,13 @@ __setupGpuQueryJoinInnerBuffer(gpuClient *gclient,
 	 * So, we expect the CUDA unified memory system distributes the read-only
 	 * portion for each devices on the demand.
 	 * cuMemAdvise() allows to give driver a hint for this purpose.
+	 * Note that CU_MEM_ADVISE_SET_READ_MOSTLY ignores the CUmemLocation.
 	 */
 	assert(h_kmrels->ojmap_sz < h_kmrels->length);
 	rc = cuMemAdvise((CUdeviceptr)m_kmrels,
 					 h_kmrels->length - h_kmrels->ojmap_sz,
 					 CU_MEM_ADVISE_SET_READ_MOSTLY,
-					 -1);	/* 4th argument should be ignored */
+					 invalid_mlocation);
 	if (rc != CUDA_SUCCESS)
 		__gsInfo("failed on cuMemAdvise (%p-%p; CU_MEM_ADVISE_SET_READ_MOSTLY): %s",
 				 (char *)m_kmrels,
@@ -2263,6 +2342,9 @@ __setupGpuQueryJoinInnerBuffer(gpuClient *gclient,
 				 cuStrError(rc));
 	/* OK */
 	close(fdesc);
+	gettimeofday(&tv2, NULL);
+	*p_join_reconstruction_msec = ((tv2.tv_sec  - tv1.tv_sec)  * 1000L +
+								   (tv2.tv_usec - tv1.tv_usec) / 1000L);
 	return true;
 
 error:
@@ -2276,16 +2358,23 @@ error:
 }
 
 static bool
-__setupGpuQueryGroupByBuffer(gpuClient *gclient,
-							 gpuQueryBuffer *gq_buf,
-							 kern_data_store *kds_final_head)
+__setupGpuQueryFinalResultsBuffer(gpuClient *gclient,
+								  gpuQueryBuffer *gq_buf)
 {
+	kern_session_info *session = gclient->h_session;
+	kern_data_store *kds_final_head = NULL;
 	dlist_iter	iter;
+	char		kind;
 
-	if (!kds_final_head)
+	/* setup per-client final GPU buffer, if any */
+	if (session->groupby_kds_final == 0)
 		return true;	/* nothing to do */
-
+	kds_final_head = (kern_data_store *)
+		((char *)session + session->groupby_kds_final);
 	Assert(KDS_HEAD_LENGTH(kds_final_head) <= kds_final_head->length);
+	kind = ((gclient->xpu_task_flags & DEVTASK__PREAGG) != 0
+			? GQBUF_KIND__FINAL_AGGREGATION_BUFFER
+			: GQBUF_KIND__FINAL_PROJECTION_BUFFER);
 	dlist_foreach (iter, &gpuserv_gpucontext_list)
 	{
 		gpuContext *__gcontext = dlist_container(gpuContext, chain, iter.cur);
@@ -2300,7 +2389,8 @@ __setupGpuQueryGroupByBuffer(gpuClient *gclient,
 		__gcontext_prev = gpuContextSwitchTo(__gcontext);
 		rc = allocGpuQueryBuffer(gq_buf,
 								 &m_kds_final,
-								 kds_final_head->length);
+								 kds_final_head->length,
+								 kind);
 		if (rc != CUDA_SUCCESS)
 		{
 			gpuContextSwitchTo(__gcontext_prev);
@@ -2315,7 +2405,8 @@ __setupGpuQueryGroupByBuffer(gpuClient *gclient,
 		/* prefetch to the device */
 		(void)cuMemPrefetchAsync(m_kds_final,
 								 KDS_HEAD_LENGTH(kds_final_head),
-								 __gcontext->cuda_device,
+								 __gcontext->cuda_mlocation,
+								 0,
 								 MY_STREAM_PER_THREAD);
 		gq_buf->gpus[__dindex].m_kds_final = m_kds_final;
 		gq_buf->gpus[__dindex].m_kds_final_length = kds_final_head->length;
@@ -2408,6 +2499,59 @@ __expandGpuQueryGroupByBuffer(gpuClient *gclient,
 }
 
 /*
+ * __expandGpuQueryScanJoinBuffer
+ */
+static bool
+__expandGpuQueryScanJoinBuffer(gpuClient *gclient,
+							   gpuQueryBuffer *gq_buf,
+							   kern_data_store *kds_dst_old)
+{
+	bool	retval = false;
+
+	pthreadRWLockWriteLock(&gq_buf->m_kds_rwlock);
+	if (GQBUF_KDS_FINAL(gq_buf) == kds_dst_old)
+	{
+		kern_data_store *kds_dst_new;
+		CUdeviceptr	m_devptr;
+		CUresult	rc;
+
+		rc = cuMemPrefetchAsync((CUdeviceptr)kds_dst_old,
+								kds_dst_old->length,
+								host_mlocation,
+								0,
+								MY_STREAM_PER_THREAD);
+		if (rc != CUDA_SUCCESS)
+		{
+			gpuClientELog(gclient, "failed on cuMemPrefetchAsync: %s",
+						  cuStrError(rc));
+			goto out;
+		}
+		rc = allocGpuQueryBuffer(gq_buf, &m_devptr,
+								 kds_dst_old->length,
+								 GQBUF_KIND__FINAL_PROJECTION_BUFFER);
+		if (rc != CUDA_SUCCESS)
+		{
+			gpuClientELog(gclient, "failed on allocGpuQueryBuffer: %s",
+						  cuStrError(rc));
+			goto out;
+		}
+		/* assign a new empty KDS */
+		kds_dst_new = (kern_data_store *)m_devptr;
+		memcpy(kds_dst_new, kds_dst_old,
+			   KDS_HEAD_LENGTH(kds_dst_old));
+		kds_dst_new->nitems = 0;
+		kds_dst_new->usage = 0;
+		gq_buf->gpus[MY_DINDEX_PER_THREAD].m_kds_final = m_devptr;
+		__gsInfo("switched to the new destination buffer (sz=%s)",
+				 format_bytesz(kds_dst_new->length));
+	}
+	retval = true;
+out:
+	pthreadRWLockUnlock(&gq_buf->m_kds_rwlock);
+	return retval;
+}
+
+/*
  * __allocateGpuFallbackBuffer
  */
 static bool
@@ -2425,7 +2569,8 @@ __allocateGpuFallbackBuffer(gpuQueryBuffer *gq_buf,
 		assert(session->fallback_kds_head != 0);
 		kds_head = (kern_data_store *)
 			((char *)session + session->fallback_kds_head);
-		rc = allocGpuQueryBuffer(gq_buf, &m_devptr, kds_head->length);
+		rc = allocGpuQueryBuffer(gq_buf, &m_devptr, kds_head->length,
+								 GQBUF_KIND__FALLBACK_BUFFER);
 		if (rc != CUDA_SUCCESS)
 		{
 			pthreadRWLockUnlock(&gq_buf->m_kds_rwlock);
@@ -2441,7 +2586,7 @@ __allocateGpuFallbackBuffer(gpuQueryBuffer *gq_buf,
 }
 
 static gpuQueryBuffer *
-__getGpuQueryBuffer(uint64_t buffer_id, bool may_create)
+__getGpuQueryBuffer(gpuClient *gclient, uint64_t buffer_id, bool may_create)
 {
 	gpuQueryBuffer *gq_buf;
 	dlist_iter		iter;
@@ -2484,6 +2629,12 @@ __getGpuQueryBuffer(uint64_t buffer_id, bool may_create)
 		gq_buf->phase  = 0;	/* not initialized yet */
 		gq_buf->buffer_id = buffer_id;
 		pthreadRWLockInit(&gq_buf->m_kds_rwlock);
+		if (!__initSelectIntoState(&gq_buf->si_state, gclient->h_session))
+		{
+			free(gq_buf);
+			gq_buf = NULL;
+			goto found;
+		}
 		dlist_push_tail(&gpu_query_buffer_hslot[hindex], &gq_buf->chain);
 	}
 	else
@@ -2498,16 +2649,16 @@ found:
 static gpuQueryBuffer *
 getGpuQueryBuffer(gpuClient *gclient,
 				  uint64_t buffer_id,
-				  uint32_t kmrels_handle,
-				  kern_data_store *kds_final_head)
+				  uint32_t *p_join_reconstruction_msec)
 {
-	gpuQueryBuffer *gq_buf = __getGpuQueryBuffer(buffer_id, true);
+	gpuQueryBuffer	   *gq_buf = __getGpuQueryBuffer(gclient, buffer_id, true);
 
 	if (gq_buf && gq_buf->phase == 0)
 	{
 		/* needs buffer initialization */
-		if (__setupGpuQueryJoinInnerBuffer(gclient, gq_buf, kmrels_handle) &&
-			__setupGpuQueryGroupByBuffer(gclient, gq_buf, kds_final_head))
+		if (__setupGpuQueryJoinInnerBuffer(gclient, gq_buf,
+										   p_join_reconstruction_msec) &&
+			__setupGpuQueryFinalResultsBuffer(gclient, gq_buf))
 		{
 			/* ok, buffer is now ready */
 			pthreadMutexLock(&gpu_query_buffer_mutex);
@@ -2715,6 +2866,7 @@ gpuClientWriteBackPartial(gpuClient  *gclient,
 	memset(&resp, 0, sizeof(resp));
 	resp.magic  = XpuCommandMagicNumber;
 	resp.tag    = XpuCommandTag__SuccessHalfWay;
+	resp.repeat_id = -1;		/* shall not be checked */
 	resp.u.results.chunks_nitems = 1;
 	resp.u.results.chunks_offset = resp_sz;
 
@@ -2740,7 +2892,8 @@ gpuClientWriteBackPartial(gpuClient  *gclient,
 static void
 gpuClientWriteBackNormal(gpuClient  *gclient,
 						 kern_exec_results *kern_stats,
-						 kern_data_store *kds)
+						 kern_data_store *kds,
+						 int32_t orig_repeat_id)
 {
 	struct iovec	iov_array[10];
 	struct iovec   *iov;
@@ -2754,6 +2907,7 @@ gpuClientWriteBackNormal(gpuClient  *gclient,
 	memset(resp, 0, resp_sz);
 	resp->magic  = XpuCommandMagicNumber;
 	resp->tag    = XpuCommandTag__Success;
+	resp->repeat_id = orig_repeat_id;
 	memcpy(&resp->u.results, kern_stats,
 		   offsetof(kern_exec_results, stats[kern_stats->num_rels]));
 	/* sanity checks */
@@ -3060,6 +3214,19 @@ __resolveDevicePointersWalker(gpuClient *gclient,
 			}
 			break;
 
+		case FuncOpCode__SortKeys:
+			for (i=0; i < kexp->u.sort.nkeys; i++)
+			{
+				kern_sortkey_desc *sdesc = &kexp->u.sort.desc[i];
+
+				if (!__lookupDeviceTypeOper(gclient,
+											gcontext,
+											&sdesc->key_ops,
+											sdesc->key_type_code))
+					return false;
+			}
+			break;
+			
 		default:
 			break;
 	}
@@ -3102,6 +3269,7 @@ __resolveDevicePointers(gpuClient *gclient,
 	__kexp[nitems++] = SESSION_KEXP_GROUPBY_KEYLOAD(session);
 	__kexp[nitems++] = SESSION_KEXP_GROUPBY_KEYCOMP(session);
 	__kexp[nitems++] = SESSION_KEXP_GROUPBY_ACTIONS(session);
+	__kexp[nitems++] = SESSION_KEXP_GPUSORT_KEYDESC(session);
 
 	for (int i=0; i < nitems; i++)
 	{
@@ -3153,7 +3321,7 @@ gpuservHandleOpenSession(gpuClient *gclient, XpuCommand *xcmd)
 	gpuContext	   *gcontext_home;
 	gpuContext	   *gcontext_prev;
 	dlist_iter		iter;
-	kern_data_store *kds_final_head = NULL;
+	uint32_t		join_reconstruction_msec = 0;
 	XpuCommand		resp;
 	struct iovec	iov;
 
@@ -3209,24 +3377,20 @@ gpuservHandleOpenSession(gpuClient *gclient, XpuCommand *xcmd)
 									 __session))
 			goto error;
 	}
-	/* setup per-cliend GPU buffer */
-	if (session->groupby_kds_final != 0)
-	{
-		kds_final_head = (kern_data_store *)
-			((char *)session + session->groupby_kds_final);
-	}
 	gclient->gq_buf = getGpuQueryBuffer(gclient,
 										session->query_plan_id,
-										session->join_inner_handle,
-										kds_final_head);
+										&join_reconstruction_msec);
 	if (!gclient->gq_buf)
+	{
+		gpuClientELog(gclient, "out of memory");
 		goto error;
-
+	}
 	/* success status */
 	memset(&resp, 0, sizeof(resp));
 	resp.magic = XpuCommandMagicNumber;
 	resp.tag = XpuCommandTag__Success;
 	resp.length = offsetof(XpuCommand, u.results.stats);
+	resp.u.results.join_reconstruction_msec = join_reconstruction_msec;
 
 	iov.iov_base = &resp;
 	iov.iov_len  = resp.length;
@@ -3260,6 +3424,7 @@ __gpuservLoadKdsCommon(gpuClient *gclient,
 	CUresult	rc;
 	off_t		off = PAGE_ALIGN(base_offset);
 	size_t		gap = off - base_offset;
+	bool		try_gpudirect_mode = ((gclient->xpu_task_flags & DEVTASK__USED_GPUDIRECT) != 0);
 
 	chunk = gpuMemAlloc(gap + kds->length);
 	if (!chunk)
@@ -3285,6 +3450,7 @@ __gpuservLoadKdsCommon(gpuClient *gclient,
 							  chunk->__offset + off,
 							  chunk->mseg->iomap_handle,
 							  kds_iovec,
+							  try_gpudirect_mode,
 							  p_npages_direct_read,
 							  p_npages_vfs_read))
 	{
@@ -3351,6 +3517,121 @@ gpuservLoadKdsArrow(gpuClient *gclient,
 								  p_npages_vfs_read);
 }
 
+/*
+ * gpuservLoadKdsParquet
+ *
+ * fill up KDS_FORMAT_PARQUET using libarrow/libparquet
+ */
+static void *
+__loadKdsParquetMallocCallback(void *data, size_t bytesize)
+{
+	gpuMemChunk	  **p_chunk = (gpuMemChunk **)data;
+	gpuMemChunk	   *m_chunk = gpuMemAllocManaged(bytesize);
+
+	if (!m_chunk)
+		return NULL;
+	*p_chunk = m_chunk;
+
+	return (void *)m_chunk->m_devptr;
+}
+
+static gpuMemChunk *
+gpuservLoadKdsParquet(gpuClient *gclient,
+					  kern_data_store *kds_head,
+					  const char *pathname,
+					  uint32_t *p_npages_vfs_read)
+{
+	gpuMemChunk *m_chunk;
+	kern_data_store *kds;
+	const char	*error_message;
+
+	kds = parquetReadOneRowGroup(pathname,
+								 kds_head,
+								 __loadKdsParquetMallocCallback,
+								 &m_chunk,
+								 &error_message);
+	if (!kds)
+	{
+		__gsLog("%s", error_message);
+		return NULL;
+	}
+	Assert(m_chunk->m_devptr == (CUdeviceptr)kds);
+	return m_chunk;
+}
+
+/*
+ * gpuservMigrationKdsBuffer
+ *
+ * Migrate a KDS buffer to other GPU
+ */
+static bool
+gpuservMigrationKdsBuffer(gpuClient *gclient,
+						  gpuContext *gcontext_dst,
+						  gpuMemChunk **p_chunk)
+{
+	gpuMemChunk	   *s_chunk = *p_chunk;
+	gpuMemChunk	   *n_chunk;
+	CUresult		rc;
+	CUdeviceptr		m_endptr = (s_chunk->__base + s_chunk->__offset + s_chunk->__length);
+	size_t			chunk_sz = (m_endptr - s_chunk->m_devptr);
+
+	if (!s_chunk->mseg->pool->is_managed)
+	{
+		/* try raw-device memory to raw-device memory (fastest) */
+		n_chunk = __gpuMemAlloc(gcontext_dst, chunk_sz);
+		if (!n_chunk)
+		{
+			/* if unavailable, try managed memory as a second best */
+			n_chunk = __gpuMemAllocManaged(gcontext_dst, chunk_sz);
+			if (!n_chunk)
+			{
+				gpuClientELog(gclient, "Out of GPU%d raw/managed memory (sz=%s)",
+							  gcontext_dst->cuda_dindex,
+							  format_bytesz(chunk_sz));
+				return false;
+			}
+		}
+		rc = cuMemcpyPeer(n_chunk->m_devptr,
+						  n_chunk->mseg->pool->gcontext->cuda_context,
+						  s_chunk->m_devptr,
+						  s_chunk->mseg->pool->gcontext->cuda_context,
+						  chunk_sz);
+		if (rc != CUDA_SUCCESS)
+		{
+			gpuClientELog(gclient, "failed on cuMemcpyPeer: %s",
+						  cuStrError(rc));
+			gpuMemFree(n_chunk);
+			return false;
+		}
+		/* swap GPU memory chunk */
+		gpuMemFree(s_chunk);
+		*p_chunk = n_chunk;
+	}
+	else
+	{
+		/* kds_src is already on the managed memory */
+		rc = cuMemPrefetchAsync(s_chunk->m_devptr,
+								chunk_sz,
+								gcontext_dst->cuda_mlocation,
+								0,
+								MY_STREAM_PER_THREAD);
+		if (rc != CUDA_SUCCESS)
+		{
+			gpuClientELog(gclient, "failed on cuMemPrefetchAsync: %s",
+						  cuStrError(rc));
+			return false;
+		}
+		rc = cuStreamSynchronize(MY_STREAM_PER_THREAD);
+		if (rc != CUDA_SUCCESS)
+		{
+			gpuClientELog(gclient, "failed on cuStreamSynchronize: %s",
+						  cuStrError(rc));
+			return false;
+		}
+	}
+	return true;
+}
+
 /* ----------------------------------------------------------------
  *
  * gpuservHandleGpuTaskExec
@@ -3362,10 +3643,9 @@ __expand_gpupreagg_prepfunc_buffer(kern_session_info *session,
 								   int grid_sz, int block_sz,
 								   unsigned int __shmem_dynamic_sz,
 								   unsigned int shmem_dynamic_limit,
-								   unsigned int *p_groupby_prepfn_bufsz,
 								   unsigned int *p_groupby_prepfn_nbufs)
 {
-	unsigned int	shmem_dynamic_sz = TYPEALIGN(1024, __shmem_dynamic_sz);
+	size_t		shmem_dynamic_sz = TYPEALIGN(1024, __shmem_dynamic_sz);
 
 	if (session->groupby_prepfn_bufsz == 0 || shmem_dynamic_sz >= shmem_dynamic_limit)
 		goto no_prepfunc_buffer;
@@ -3375,8 +3655,9 @@ __expand_gpupreagg_prepfunc_buffer(kern_session_info *session,
 		session->xpucode_groupby_keycomp)
 	{
 		/* GROUP-BY */
-		int		num_buffers = 2 * session->groupby_ngroups_estimation + 100;
-		int		prepfn_usage = session->groupby_prepfn_bufsz * num_buffers;
+		size_t	num_buffers = Min(2 * (size_t)session->groupby_ngroups_estimation + 100,
+								  (size_t)INT_MAX);
+		size_t	prepfn_usage = (size_t)session->groupby_prepfn_bufsz * num_buffers;
 
 		if (shmem_dynamic_sz + prepfn_usage > shmem_dynamic_limit)
 		{
@@ -3386,27 +3667,162 @@ __expand_gpupreagg_prepfunc_buffer(kern_session_info *session,
 			prepfn_usage = session->groupby_prepfn_bufsz * num_buffers;
 		}
 		Assert(shmem_dynamic_sz + prepfn_usage <= shmem_dynamic_limit);
-		if (num_buffers >= 32)
-		{
-			*p_groupby_prepfn_bufsz = session->groupby_prepfn_bufsz;
-			*p_groupby_prepfn_nbufs = num_buffers;
-			return shmem_dynamic_sz + prepfn_usage;
-		}
+		*p_groupby_prepfn_nbufs = num_buffers;
+		return shmem_dynamic_sz + prepfn_usage;
 	}
 	else if (session->xpucode_groupby_actions)
 	{
 		/* NO-GROUPS */
 		if (shmem_dynamic_sz + session->groupby_prepfn_bufsz <= shmem_dynamic_limit)
 		{
-			*p_groupby_prepfn_bufsz = session->groupby_prepfn_bufsz;
 			*p_groupby_prepfn_nbufs = 1;
 			return shmem_dynamic_sz + session->groupby_prepfn_bufsz;
 		}
 	}
 no_prepfunc_buffer:
-	*p_groupby_prepfn_bufsz = 0;
 	*p_groupby_prepfn_nbufs = 0;
 	return __shmem_dynamic_sz;		/* unaligned original size */
+}
+
+/*
+ * setup_gpujoin_inner_partitioned_buffer
+ */
+static int
+__setup_gpujoin_inner_partitioned_buffer(gpuContext *gcontext,
+										 gpuClient *gclient,
+										 gpuQueryBuffer *gq_buf,
+										 kern_buffer_partitions *kbuf_parts,
+										 int32_t scan_repeat_id,
+										 gpuContext **part_gcontexts,
+										 uint32_t *part_reminders)
+{
+	int32_t		start = scan_repeat_id * numGpuDevAttrs;
+	int32_t		end = Min(start + numGpuDevAttrs, kbuf_parts->hash_divisor);
+	int32_t		curr_reminder = -1;
+	int32_t		part_nitems = 0;
+	bool		has_exclusive_lock = false;
+	CUresult	rc;
+
+	/* assign GPUs to execute this GpuTask */
+	for (int k=start; k < end; k++)
+	{
+		gpumask_t	part_mask = kbuf_parts->parts[k].available_gpus;
+
+		if ((part_mask & gcontext->cuda_dmask) != 0)
+		{
+			curr_reminder = k;
+		}
+		else
+		{
+			gpuContext *__gcontext = __lookupOneRandomGpuContext(part_mask);
+
+			Assert(__gcontext != NULL);
+			part_gcontexts[part_nitems] = __gcontext;
+			part_reminders[part_nitems] = k;
+			part_nitems++;
+		}
+	}
+	assert(curr_reminder >= 0);
+
+	/*
+	 * switch partitioned inner-buffer if repeat-id was changed.
+	 */
+	pthreadRWLockReadLock(&gq_buf->m_kds_rwlock);
+again:
+	if (scan_repeat_id != gq_buf->curr_repeat_id)
+	{
+		assert(scan_repeat_id > gq_buf->curr_repeat_id);
+		if (!has_exclusive_lock)
+		{
+			pthreadRWLockUnlock(&gq_buf->m_kds_rwlock);
+			pthreadRWLockWriteLock(&gq_buf->m_kds_rwlock);
+			has_exclusive_lock = true;
+			goto again;
+		}
+		/* TODO: Run RIGHT-OUTER-JOIN Here */
+
+		/* release buffers */
+		for (int k=0; k < start; k++)
+		{
+			kern_data_store *kds_in;
+
+			if (k >= kbuf_parts->hash_divisor)
+				break;
+			kds_in = kbuf_parts->parts[k].kds_in;
+			if (kds_in)
+			{
+				releaseGpuQueryBufferOne(gq_buf, (CUdeviceptr)kds_in);
+				kbuf_parts->parts[k].kds_in = NULL;
+			}
+		}
+		/* prefetch buffers & set policy */
+		for (int k=start; k < end; k++)
+		{
+			kern_data_store *kds_in = kbuf_parts->parts[k].kds_in;
+			gpumask_t	part_mask = kbuf_parts->parts[k].available_gpus;
+			gpuContext *__gcontext = NULL;
+
+			for (int d=0; d < numGpuDevAttrs; d++)
+			{
+				if ((part_mask & (1UL<<d)) != 0)
+				{
+					__gcontext = &gpuserv_gpucontext_array[d];
+					break;
+				}
+			}
+			Assert(__gcontext != NULL);
+
+			rc = cuMemPrefetchAsync((CUdeviceptr)kds_in,
+									(KDS_HEAD_LENGTH(kds_in) +
+									 sizeof(uint64_t) * kds_in->hash_nslots +
+									 sizeof(uint64_t) * kds_in->nitems),
+									__gcontext->cuda_mlocation,
+									0,
+									MY_STREAM_PER_THREAD);
+			if (rc != CUDA_SUCCESS)
+			{
+				pthreadRWLockUnlock(&gq_buf->m_kds_rwlock);
+				gpuClientELog(gclient, "failed on cuMemPrefetchAsync(%d): %s",
+							  (int)__gcontext->cuda_device,
+							  cuStrError(rc));
+				return -1;
+			}
+			rc = cuMemPrefetchAsync((CUdeviceptr)kds_in
+									+ kds_in->length
+									- kds_in->usage,
+									kds_in->usage,
+									__gcontext->cuda_mlocation,
+									0,
+									MY_STREAM_PER_THREAD);
+			if (rc != CUDA_SUCCESS)
+			{
+				pthreadRWLockUnlock(&gq_buf->m_kds_rwlock);
+				gpuClientELog(gclient, "failed on cuMemPrefetchAsync: %s",
+							  cuStrError(rc));
+				return -1;
+			}
+			if (get_bitcount(part_mask) > 1)
+			{
+				rc = cuMemAdvise((CUdeviceptr)kds_in,
+								 kds_in->length,
+								 CU_MEM_ADVISE_SET_READ_MOSTLY,
+								 invalid_mlocation);
+				if (rc != CUDA_SUCCESS)
+				{
+					pthreadRWLockUnlock(&gq_buf->m_kds_rwlock);
+					gpuClientELog(gclient, "failed on cuMemAdvise(SET_READ_MOSTLY): %s",
+								  cuStrError(rc));
+					return -1;
+				}
+			}
+		}
+		__gsInfo("GPU-Service: repeat-id changed %u -> %u\n",
+				 gq_buf->curr_repeat_id, scan_repeat_id);
+		gq_buf->curr_repeat_id = scan_repeat_id;
+	}
+	pthreadRWLockUnlock(&gq_buf->m_kds_rwlock);
+
+	return curr_reminder;
 }
 
 /*
@@ -3436,7 +3852,6 @@ __gpuservLaunchGpuTaskExecKernel(gpuContext *gcontext,
 	int				grid_sz;
 	int				block_sz;
 	unsigned int	shmem_dynamic_sz;
-	unsigned int	groupby_prepfn_bufsz = 0;
 	unsigned int	groupby_prepfn_nbufs = 0;
 	size_t			kds_final_length = 0;
 	uint32_t		kds_fallback_revision = 0;
@@ -3472,7 +3887,6 @@ __gpuservLaunchGpuTaskExecKernel(gpuContext *gcontext,
 										   grid_sz, block_sz,
 										   shmem_dynamic_sz,
 										   gcontext->gpumain_shmem_sz_limit,
-										   &groupby_prepfn_bufsz,
 										   &groupby_prepfn_nbufs);
 	/*
 	 * Allocation of the control structure
@@ -3494,7 +3908,6 @@ __gpuservLaunchGpuTaskExecKernel(gpuContext *gcontext,
 	kgtask->kvecs_bufsz  = session->kcxt_kvecs_bufsz;
 	kgtask->kvecs_ndims  = session->kcxt_kvecs_ndims;
 	kgtask->n_rels       = num_inner_rels;
-	kgtask->groupby_prepfn_bufsz = groupby_prepfn_bufsz;
 	kgtask->groupby_prepfn_nbufs = groupby_prepfn_nbufs;
 	kgtask->cuda_dindex        = MY_DINDEX_PER_THREAD;
 	kgtask->cuda_stack_limit   = GpuWorkerCurrentContext->cuda_stack_limit;
@@ -3530,8 +3943,18 @@ resume_kernel:
 		/* needs to expand the final buffer? */
 		if (last_kernel_errcode == ERRCODE_SUSPEND_NO_SPACE)
 		{
-			if (!__expandGpuQueryGroupByBuffer(gclient, gq_buf, kds_final_length))
-				goto bailout;
+			if ((session->xpu_task_flags & DEVTASK__PREAGG) != 0)
+			{
+				if (!__expandGpuQueryGroupByBuffer(gclient, gq_buf,
+												   kds_final_length))
+					goto bailout;
+			}
+			else
+			{
+				assert((session->xpu_task_flags & DEVTASK__SELECT_INTO_DIRECT) == 0);
+				if (!__expandGpuQueryScanJoinBuffer(gclient, gq_buf, kds_dst))
+					goto bailout;
+			}
 		}
 		pthreadRWLockReadLock(&gq_buf->m_kds_rwlock);
 		kds_dst = GQBUF_KDS_FINAL(gq_buf);
@@ -3545,7 +3968,15 @@ resume_kernel:
 
 		if (last_kernel_errcode == ERRCODE_SUSPEND_NO_SPACE)
 		{
-			gpuClientWriteBackPartial(gclient, kds_dst);
+			if ((gclient->xpu_task_flags & DEVTASK__SELECT_INTO_DIRECT) == 0)
+				gpuClientWriteBackPartial(gclient, kds_dst);
+			else
+			{
+				(void)gpuMemoryPrefetchKDS(kds_dst, host_mlocation);
+				selectIntoWriteOutHeapNormal(gclient,
+											 &gq_buf->si_state,
+											 kds_dst);
+			}
 			assert(kds_dst->nitems == 0 && kds_dst->usage == 0);
 		}
 		else if (last_kernel_errcode != ERRCODE_STROM_SUCCESS)
@@ -3704,7 +4135,7 @@ gpuservHandleGpuTaskExec(gpuContext *gcontext,
 	}
 	else if (kds_src->format == KDS_FORMAT_ROW)
 	{
-		rc = gpuMemoryPrefetchKDS(kds_src, MY_DEVICE_PER_THREAD);
+		rc = gpuMemoryPrefetchKDS(kds_src, MY_MEMLOCATION_PER_THREAD);
 		if (rc != CUDA_SUCCESS)
 		{
 			gpuClientELog(gclient, "failed on gpuMemoryPrefetchKDS: %s",
@@ -3730,7 +4161,7 @@ gpuservHandleGpuTaskExec(gpuContext *gcontext,
 		else
 		{
 			Assert(kds_src->block_nloaded == kds_src->nitems);
-			rc = gpuMemoryPrefetchKDS(kds_src, MY_DEVICE_PER_THREAD);
+			rc = gpuMemoryPrefetchKDS(kds_src, MY_MEMLOCATION_PER_THREAD);
 			if (rc != CUDA_SUCCESS)
 			{
 				gpuClientELog(gclient, "failed on gpuMemoryPrefetchKDS: %s",
@@ -3744,7 +4175,7 @@ gpuservHandleGpuTaskExec(gpuContext *gcontext,
 	{
 		if (kds_src_iovec->nr_chunks == 0)
 		{
-			rc = gpuMemoryPrefetchKDS(kds_src, MY_DEVICE_PER_THREAD);
+			rc = gpuMemoryPrefetchKDS(kds_src, MY_MEMLOCATION_PER_THREAD);
 			if (rc != CUDA_SUCCESS)
 			{
 				gpuClientELog(gclient, "failed on gpuMemoryPrefetchKDS: %s",
@@ -3770,6 +4201,16 @@ gpuservHandleGpuTaskExec(gpuContext *gcontext,
 				return;
 			m_kds_src = s_chunk->m_devptr;
 		}
+	}
+	else if (kds_src->format == KDS_FORMAT_PARQUET)
+	{
+		s_chunk = gpuservLoadKdsParquet(gclient,
+										kds_src,
+										kds_src_pathname,
+										&npages_vfs_read);
+		if (!s_chunk)
+			return;
+		m_kds_src = s_chunk->m_devptr;
 	}
 	else
 	{
@@ -3804,43 +4245,29 @@ gpuservHandleGpuTaskExec(gpuContext *gcontext,
 	 */
 	if (gq_buf && gq_buf->h_kmrels)
 	{
-		kern_multirels *h_kmrels = (kern_multirels *)gq_buf->h_kmrels;
-		kern_buffer_partitions *kbuf_parts
-			= KERN_MULTIRELS_PARTITION_DESC(h_kmrels, -1);
+		kern_multirels *h_kmrels = gq_buf->h_kmrels;
+		kern_buffer_partitions *kbuf_parts;
 
-		if (kbuf_parts)
-		{
-			int32_t		repeat_id = xcmd->u.task.scan_repeat_id;
-			int32_t		start = repeat_id * numGpuDevAttrs;
-			int32_t		end = Min(start + numGpuDevAttrs,
-								  kbuf_parts->hash_divisor);
-			part_divisor = kbuf_parts->hash_divisor;
-			part_gcontexts = alloca(sizeof(gpuContext *) * part_divisor);
-			part_reminders = alloca(sizeof(uint32_t) * part_divisor);
-
-			assert(start < end);
-			for (int k=start; k < end; k++)
-			{
-				gpumask_t	part_mask = kbuf_parts->parts[k].available_gpus;
-
-				if ((part_mask & gcontext->cuda_dmask) != 0)
-				{
-					curr_reminder = k;
-				}
-				else
-				{
-					gpuContext *__gcontext = __lookupOneRandomGpuContext(part_mask);
-
-					Assert(__gcontext != NULL);
-					part_gcontexts[part_nitems] = __gcontext;
-					part_reminders[part_nitems] = k;
-					part_nitems++;
-				}
-			}
-			assert(curr_reminder >= 0);
-		}
 		m_kmrels = gq_buf->m_kmrels;
 		num_inner_rels = h_kmrels->num_rels;
+
+		kbuf_parts = KERN_MULTIRELS_PARTITION_DESC((kern_multirels *)m_kmrels, -1);
+		if (kbuf_parts)
+		{
+			int32_t		repeat_id = xcmd->repeat_id;
+
+			part_gcontexts = alloca(sizeof(gpuContext *) * kbuf_parts->hash_divisor);
+			part_reminders = alloca(sizeof(uint32_t) * kbuf_parts->hash_divisor);
+			curr_reminder = __setup_gpujoin_inner_partitioned_buffer(gcontext,
+																	 gclient,
+																	 gq_buf,
+																	 kbuf_parts,
+																	 repeat_id,
+																	 part_gcontexts,
+																	 part_reminders);
+			if (curr_reminder < 0)
+				goto bailout;
+		}
 	}
 	/* statistics buffer */
 	sz = offsetof(kern_exec_results, stats[num_inner_rels]);
@@ -3862,51 +4289,29 @@ gpuservHandleGpuTaskExec(gpuContext *gcontext,
 										 0,
 										 kern_stats))
 	{
+		gpuContext *__gcontext_saved = GpuWorkerCurrentContext;
+
 		/* for each inner-buffer partitions if any */
-		gpuContext *__gcontext_prev = GpuWorkerCurrentContext;
-		int		k;
-
-		for (k=0; k < part_nitems; k++)
+		for (int k=0; k < part_nitems; k++)
 		{
-			uint32_t	__reminder = part_reminders[k];
-			gpuContext *__gcontext = part_gcontexts[k];
-			gpuMemChunk *n_chunk = NULL;
-			CUdeviceptr	m_kds_src_dup = m_kds_src;
+			uint32_t		__reminder = part_reminders[k];
+			gpuContext	   *__gcontext = part_gcontexts[k];
 
-			/* switch gpuContext */
-			gpuContextSwitchTo(__gcontext);
-
-			/* copy kds_src if raw device memory */
-			if (s_chunk != NULL)
+			/* migrate KDS to the next GPU device */
+			if (s_chunk)
 			{
-				assert(s_chunk->mseg->pool->gcontext == __gcontext_prev);
-				assert(m_kds_extra == 0UL);
-				n_chunk = gpuMemAlloc(s_chunk->__length);
-				if (!n_chunk)
+				if (!gpuservMigrationKdsBuffer(gclient, __gcontext, &s_chunk))
 				{
-					gpuClientFatal(gclient, "failed on gpuMemAlloc: %s",
-								   cuStrError(rc));
-					break;
+					gpuContextSwitchTo(__gcontext_saved);
+					goto bailout;
 				}
-				rc = cuMemcpyPeerAsync(n_chunk->m_devptr,
-									   __gcontext->cuda_context,
-									   m_kds_src,
-									   __gcontext_prev->cuda_context,
-									   kds_src->length,
-									   MY_STREAM_PER_THREAD);
-				if (rc != CUDA_SUCCESS)
-				{
-					gpuMemFree(n_chunk);
-					gpuClientFatal(gclient, "failed on cuMemcpyPeerAsync: %s",
-								   cuStrError(rc));
-					break;
-				}
-				m_kds_src_dup = n_chunk->m_devptr;
+				m_kds_src = s_chunk->m_devptr;
 			}
 			/* launch GPU Kernel for other inner buffer partitions */
+			gpuContextSwitchTo(__gcontext);
 			if (!__gpuservLaunchGpuTaskExecKernel(__gcontext,
 												  gclient,
-												  m_kds_src_dup,
+												  m_kds_src,
 												  m_kds_extra,
 												  m_kmrels,
 												  kds_dst,
@@ -3915,17 +4320,24 @@ gpuservHandleGpuTaskExec(gpuContext *gcontext,
 												  0,
 												  kern_stats))
 			{
-				if (n_chunk != NULL)
-					gpuMemFree(n_chunk);
-				break;
+				gpuContextSwitchTo(__gcontext_saved);
+				goto bailout;
 			}
-			if (n_chunk != NULL)
-				gpuMemFree(n_chunk);
 		}
-		gpuContextSwitchTo(__gcontext_prev);
-		/* returns the success status, if OK */
-		if (k == part_nitems)
-			gpuClientWriteBackNormal(gclient, kern_stats, kds_dst);
+		gpuContextSwitchTo(__gcontext_saved);
+		if (d_chunk && (gclient->xpu_task_flags & DEVTASK__SELECT_INTO_DIRECT) != 0)
+		{
+			(void)gpuMemoryPrefetchKDS(kds_dst, host_mlocation);
+			if (!selectIntoWriteOutHeapNormal(gclient,
+											  &gq_buf->si_state,
+											  kds_dst))
+				goto bailout;
+			kds_dst = NULL;		/* gpuClientWriteBackNormal() returns only stats.
+								 * d_chunk should be released regardless of kds_dst,
+								 * so no memory leak problems.
+								 */
+		}
+		gpuClientWriteBackNormal(gclient, kern_stats, kds_dst, xcmd->repeat_id);
 	}
 bailout:
 	THREAD_GPU_CONTEXT_VALIDATION_CHECK(gcontext);
@@ -3999,6 +4411,9 @@ __execMergeRightOuterJoinMap(gpuClient *gclient,
 	void	   *kern_args[4];
 	CUresult	rc;
 	bool		retval = false;
+
+	if (nitems_in == 0)
+		return true;		/* nothing to do */
 
 	if (dst_gcontext != GpuWorkerCurrentContext)
 		old_gcontext = gpuContextSwitchTo(dst_gcontext);
@@ -4213,45 +4628,680 @@ bailout:
 
 /* ----------------------------------------------------------------
  *
- * gpuservMergeFinalGroupBy
+ * gpuservMergeGpuJoinFinalBufferOne
  *
  * ----------------------------------------------------------------
  */
+static kern_data_store *
+gpuservMergeGpuJoinFinalBufferOne(gpuClient *gclient,
+								  gpuContext *gcontext,
+								  const kern_data_store *kds_final_head,
+								  uint64_t kds_final_nitems,
+								  uint64_t kds_final_usage)
+{
+	gpuQueryBuffer *gq_buf = gclient->gq_buf;
+	kern_data_store *kds_final;
+	CUdeviceptr		m_devptr;
+	CUresult		rc;
+	size_t			length;
+	int				nchunks = gq_buf->gpumem_nitems;
+	int				grid_sz, block_sz;
+
+	length = (KDS_HEAD_LENGTH(kds_final_head)
+			  + sizeof(uint64_t) * kds_final_nitems
+			  + kds_final_usage);
+	rc = allocGpuQueryBuffer(gq_buf, &m_devptr, length,
+							 GQBUF_KIND__FINAL_PROJECTION_BUFFER);
+	if (rc != CUDA_SUCCESS)
+	{
+		gpuClientELog(gclient, "failed on allocGpuQueryBuffer(%s): %s",
+					  format_bytesz(length), cuStrError(rc));
+		return NULL;
+	}
+	kds_final = (kern_data_store *)m_devptr;
+	memcpy(kds_final, kds_final_head, KDS_HEAD_LENGTH(kds_final_head));
+	kds_final->length = length;
+	kds_final->nitems = 0;
+	kds_final->usage  = 0;
+	kds_final->format = KDS_FORMAT_ROW;
+	kds_final->hash_nslots = 0;
+
+	rc = gpuOptimalBlockSize(&grid_sz,
+							 &block_sz,
+							 gcontext->cufn_gpusort_consolidate_buffer, 0);
+	if (rc != CUDA_SUCCESS)
+	{
+		gpuClientELog(gclient, "failed on gpuOptimalBlockSize: %s",
+					  cuStrError(rc));
+		return NULL;
+	}
+
+	for (int i=0; i < nchunks; i++)
+	{
+		kern_data_store *__kds = (kern_data_store *)gq_buf->gpumem_devptrs[i];
+
+		if (!__kds)
+			continue;
+		if (gq_buf->gpumem_kinds[i] != GQBUF_KIND__FINAL_PROJECTION_BUFFER)
+			continue;
+		if (__kds->nitems > 0)
+		{
+			int		__grid_sz = Min(grid_sz, (__kds->nitems + block_sz - 1) / block_sz);
+			void   *kern_args[4];
+
+			(void)gpuMemoryPrefetchKDS(__kds, gcontext->cuda_mlocation);
+			kern_args[0] = &kds_final;
+			kern_args[1] = &__kds;
+			rc = cuLaunchKernel(gcontext->cufn_gpusort_consolidate_buffer,
+								__grid_sz, 1, 1,
+								block_sz, 1, 1,
+								0,
+								MY_STREAM_PER_THREAD,
+								kern_args,
+								NULL);
+			if (rc != CUDA_SUCCESS)
+			{
+				gpuClientELog(gclient, "failed on cuLaunchKernel: %s",
+							  cuStrError(rc));
+				return NULL;
+			}
+			rc = cuStreamSynchronize(MY_STREAM_PER_THREAD);
+			if (rc != CUDA_SUCCESS)
+			{
+				gpuClientELog(gclient, "failed on cuStreamSynchronize: %s",
+							  cuStrError(rc));
+				return NULL;
+			}
+		}
+		__releaseGpuQueryBufferOne(gq_buf, i);
+	}
+	return kds_final;
+}
+
+/* ----------------------------------------------------------------
+ *
+ * gpuservMergeGpuJoinFinalBufferOne
+ *
+ * ----------------------------------------------------------------
+ */
+typedef struct
+{
+	pthread_t	thread;
+	int			thread_id;
+	int			n_threads;
+	gpuClient  *gclient;
+	int			kds_source_nchunks;
+	int			kds_final_nchunks;
+	kern_data_store **kds_final_array;	/* destination buffer */
+	CUresult	status;
+} __mergeGpuJoinFinalBufferMTContext;
+
+static void *
+__mergeGpuJoinFinalBufferMTWorker(void *data)
+{
+	__mergeGpuJoinFinalBufferMTContext *con = data;
+	gpuClient	   *gclient = con->gclient;
+	gpuQueryBuffer *gq_buf = gclient->gq_buf;
+	CUresult		rc;
+
+	/* partitioned reconstruction for each source buffer */
+	for (int i=con->thread_id; i < con->kds_source_nchunks; i+=con->n_threads)
+	{
+		kern_data_store *kds_src = (kern_data_store *)gq_buf->gpumem_devptrs[i];
+
+		if (!kds_src || kds_src->nitems == 0)
+			continue;
+		if (gq_buf->gpumem_kinds[i] != GQBUF_KIND__FINAL_PROJECTION_BUFFER)
+			continue;
+		for (uint32_t k=0; k < con->kds_final_nchunks; k++)
+		{
+			if (k < numGpuDevAttrs)
+			{
+				/* reconstruction on the target GPUs */
+				gpuContext	   *gcontext = &gpuserv_gpucontext_array[k];
+				gpuContext	   *gcontext_saved = gpuContextSwitchTo(gcontext);
+				gpuMemChunk	   *tchunk;
+				kern_gputask   *kgtask;
+				kern_data_store *kds_dst = con->kds_final_array[k];
+				int				grid_sz, block_sz;
+				void		   *kern_args[4];
+
+				rc = gpuOptimalBlockSize(&grid_sz,
+										 &block_sz,
+										 gcontext->cufn_gpusort_partition_buffer, 0);
+				if (rc != CUDA_SUCCESS)
+				{
+					gpuContextSwitchTo(gcontext_saved);
+					gpuClientELog(gclient, "failed on gpuOptimalBlockSize: %s",
+								  cuStrError(rc));
+					goto bailout;
+				}
+				grid_sz = Min(grid_sz, (kds_src->nitems + block_sz - 1) / block_sz);
+
+				tchunk = gpuMemAllocManaged(sizeof(kern_gputask));
+				if (!tchunk)
+				{
+					gpuContextSwitchTo(gcontext_saved);
+					rc = CUDA_ERROR_OUT_OF_MEMORY;
+					gpuClientELog(gclient, "failed on gpuMemAllocManaged: %s",
+								  cuStrError(rc));
+					goto bailout;
+				}
+				kgtask = (kern_gputask *)tchunk->m_devptr;
+				memset(kgtask, 0, sizeof(kern_gputask));
+				kgtask->grid_sz      = grid_sz;
+				kgtask->block_sz     = block_sz;
+				kgtask->cuda_dindex  = MY_DINDEX_PER_THREAD;
+				kgtask->cuda_stack_limit = GpuWorkerCurrentContext->cuda_stack_limit;
+				kgtask->partition_divisor = con->kds_final_nchunks;
+				kgtask->partition_reminder = k;
+
+				(void)gpuMemoryPrefetchKDS(kds_src, gcontext->cuda_mlocation);
+				kern_args[0] = &gclient->__session[MY_DINDEX_PER_THREAD]->m_devptr;
+				kern_args[1] = &kgtask;
+				kern_args[2] = &kds_dst;
+				kern_args[3] = &kds_src;
+				rc = cuLaunchKernel(gcontext->cufn_gpusort_partition_buffer,
+									grid_sz, 1, 1,
+									block_sz, 1, 1,
+									0,
+									MY_STREAM_PER_THREAD,
+									kern_args,
+									NULL);
+				if (rc != CUDA_SUCCESS)
+				{
+					gpuContextSwitchTo(gcontext_saved);
+					gpuClientELog(gclient, "failed on cuLaunchKernel: %s",
+								  cuStrError(rc));
+					goto bailout;
+				}
+				rc = cuStreamSynchronize(MY_STREAM_PER_THREAD);
+				if (rc != CUDA_SUCCESS)
+				{
+					gpuContextSwitchTo(gcontext_saved);
+					gpuClientELog(gclient, "failed on cuStreamSynchronize: %s",
+								  cuStrError(rc));
+					goto bailout;
+				}
+				gpuContextSwitchTo(gcontext_saved);
+			}
+			else
+			{
+				/* reconstruction on CPU memory */
+				(void)gpuMemoryPrefetchKDS(kds_src, host_mlocation);
+				for (uint32_t index=0; index < kds_src->nitems; index++)
+				{
+					const kern_tupitem *titem_src = KDS_GET_TUPITEM(kds_src, index);
+					uint32_t	rem = (titem_src->hash % con->kds_final_nchunks);
+
+					if (rem >= numGpuDevAttrs)
+					{
+						kern_data_store *kds_dst = con->kds_final_array[rem];
+						uint32_t	tupsz = MAXALIGN(titem_src->t_len);
+						uint32_t	row_id = __atomic_add_uint32(&kds_dst->nitems, 1);
+						uint64_t	offset = __atomic_add_uint64(&kds_dst->usage, tupsz);
+						kern_tupitem *titem_dst = (kern_tupitem *)
+							((char *)kds_dst + kds_dst->length - (offset + tupsz));
+						memcpy(titem_dst, titem_src, titem_src->t_len);
+						KERN_TUPITEM_SET_ROWID(titem_dst, row_id);
+						KDS_GET_ROWINDEX(kds_dst)[row_id] = offset;
+					}
+				}
+				break;
+			}
+		}
+		/* release buffer */
+		__releaseGpuQueryBufferOne(gq_buf, i);
+	}
+	/* exit successfully */
+	rc = CUDA_SUCCESS;
+bailout:
+	con->status = rc;
+	return NULL;
+}
+
 static bool
-gpuservMergeGpuPreAggFinalBuffer(gpuClient *gclient,
-								 gpuContext *gcontext,
-								 kern_multirels *h_kmrels,
-								 kern_data_store *kds_final_dst,
-								 kern_data_store *kds_final_src)
+gpuservMergeGpuJoinFinalBufferMulti(gpuClient *gclient,
+									uint32_t kds_source_nchunks,
+									uint32_t kds_final_nchunks,
+									kern_data_store **kds_final_array,
+									const kern_data_store *kds_final_head,
+									size_t kds_final_length)
+{
+	__mergeGpuJoinFinalBufferMTContext *con_array;
+	gpuQueryBuffer *gq_buf = gclient->gq_buf;
+	int			n_threads;
+
+	/* allocation of the final buffers */
+	for (int k=0; k < kds_final_nchunks; k++)
+	{
+		kern_data_store *__kds;
+		CUdeviceptr		m_devptr;
+		CUresult		rc;
+
+		rc = allocGpuQueryBuffer(gq_buf, &m_devptr, kds_final_length,
+								 GQBUF_KIND__FINAL_PROJECTION_BUFFER);
+		if (rc != CUDA_SUCCESS)
+		{
+			gpuClientELog(gclient, "failed on allocGpuQueryBuffer(%s): %s",
+						  format_bytesz(kds_final_length), cuStrError(rc));
+			return false;
+		}
+		__kds = (kern_data_store *)m_devptr;
+		memcpy(__kds, kds_final_head, KDS_HEAD_LENGTH(kds_final_head));
+		__kds->length = kds_final_length;
+		__kds->nitems = 0;
+		__kds->usage  = 0;
+		__kds->format = KDS_FORMAT_ROW;
+		__kds->hash_nslots = 0;
+		kds_final_array[k] = __kds;
+	}
+	/* start asynchronous reconstruction */
+	n_threads = 2 * numGpuDevAttrs + 2;
+	con_array = alloca(sizeof(__mergeGpuJoinFinalBufferMTContext) * n_threads);
+	for (int thread_id=0; thread_id < n_threads; thread_id++)
+	{
+		__mergeGpuJoinFinalBufferMTContext *con = &con_array[thread_id];
+
+		memset(con, 0, sizeof(__mergeGpuJoinFinalBufferMTContext));
+		con->thread_id = thread_id;
+		con->n_threads = n_threads;
+		con->gclient = gclient;
+		con->kds_source_nchunks = kds_source_nchunks;
+		con->kds_final_nchunks = kds_final_nchunks;
+		con->kds_final_array = kds_final_array;
+		if ((errno = pthread_create(&con->thread, NULL,
+									__mergeGpuJoinFinalBufferMTWorker,
+									con)) != 0)
+			__FATAL("failed on pthread_create: %m");
+	}
+	/* wait for completion */
+	for (int thread_id=0; thread_id < n_threads; thread_id++)
+	{
+		__mergeGpuJoinFinalBufferMTContext *con = &con_array[thread_id];
+
+		if ((errno = pthread_join(con->thread, NULL)) != 0)
+			__FATAL("failed on pthread_join: %m");
+	}
+	/* error checks */
+	for (int thread_id=0; thread_id < n_threads; thread_id++)
+	{
+		__mergeGpuJoinFinalBufferMTContext *con = &con_array[thread_id];
+
+		if (con->status != CUDA_SUCCESS)
+			return false;
+	}
+	return true;
+}
+
+/* ----------------------------------------------------------------
+ *
+ * gpuservSortingFinalBuffer
+ *
+ * ----------------------------------------------------------------
+ */
+
+/*
+ * GPU-Sort + WINDOW-Rank() function
+ */
+static bool
+__gpuservSortingWithWindowRank(gpuClient *gclient,
+							   gpuContext *gcontext,
+							   kern_session_info *session,
+							   kern_data_store *kds_final,
+							   kern_gputask *kgtask)
+{
+	kern_expression *kexp_gpusort = SESSION_KEXP_GPUSORT_KEYDESC(session);
+	CUdeviceptr	m_session = gclient->__session[MY_DINDEX_PER_THREAD]->m_devptr;
+	CUdeviceptr	m_rowindex;
+	CUdeviceptr	m_partition_hash;
+	CUdeviceptr	m_results_array;
+	gpuMemChunk *w_chunk = NULL;
+	uint64_t	__results_nrooms = GPUSORT_WINDOWRANK_RESULTS_NROOMS(kds_final->nitems);
+	uint64_t	bufsz;
+	uint64_t	old_length;
+	uint32_t	old_nitems;
+	int			grid_sz;
+	int			block_sz;
+	int			max_steps;
+	int			phase;
+	void	   *kern_args[10];
+	CUresult	rc;
+	bool		retval = false;
+
+	/* allocation of window-rank buffer */
+	bufsz = (sizeof(uint64_t) * kds_final->nitems +		/* row-index */
+			 sizeof(uint32_t) * (kds_final->nitems +	/* P-Hash */
+								 kds_final->nitems +	/* O-Hash */
+								 __results_nrooms));
+	w_chunk = gpuMemAllocManaged(bufsz);
+	if (!w_chunk)
+	{
+		gpuClientFatal(gclient, "failed on gpuMemAllocManaged: %lu", bufsz);
+		goto bailout;
+	}
+	m_rowindex = w_chunk->m_devptr;
+	m_partition_hash = m_rowindex + sizeof(uint64_t) * kds_final->nitems;
+	m_results_array = m_partition_hash + 2 * sizeof(uint32_t) * kds_final->nitems;
+
+	/* block size must be 512 [FIXME] */
+	block_sz = 512;
+	grid_sz = Min(gpuDevAttrs[MY_DINDEX_PER_THREAD].MULTIPROCESSOR_COUNT,
+				  (kds_final->nitems + block_sz - 1) / block_sz);
+
+	/* calculation of P-Hash and O-Hash */
+	kern_args[0] = &m_session;
+	kern_args[1] = &kgtask;
+	kern_args[2] = &kds_final;
+	kern_args[3] = &m_partition_hash;
+	rc = cuLaunchKernel(gcontext->cufn_windowrank_prep_hash,
+						grid_sz, 1, 1,
+						block_sz, 1, 1,
+						0,
+						MY_STREAM_PER_THREAD,
+						kern_args,
+						NULL);
+	if (rc != CUDA_SUCCESS)
+	{
+		gpuClientELog(gclient, "failed on cuLaunchKernel: %s",
+					  cuStrError(rc));
+		goto bailout;
+	}
+	/* execution of main logic of WINDOW-RANK functions */
+	switch (kexp_gpusort->u.sort.window_rank_func)
+	{
+		case KSORT_WINDOW_FUNC__ROW_NUMBER:
+			kern_args[0] = &m_session;
+			kern_args[1] = &kds_final;
+			kern_args[2] = &m_partition_hash;
+			kern_args[3] = &m_rowindex;
+			rc = cuLaunchKernel(gcontext->cufn_windowrank_exec_row_number,
+								grid_sz, 1, 1,
+								block_sz, 1, 1,
+								0,
+								MY_STREAM_PER_THREAD,
+								kern_args,
+								NULL);
+			if (rc != CUDA_SUCCESS)
+			{
+				gpuClientELog(gclient, "failed on cuLaunchKernel: %s",
+							  cuStrError(rc));
+				goto bailout;
+			}
+			break;
+		case KSORT_WINDOW_FUNC__RANK:
+			kern_args[0] = &m_session;
+			kern_args[1] = &kds_final;
+			kern_args[2] = &m_partition_hash;
+			kern_args[3] = &m_rowindex;
+			rc = cuLaunchKernel(gcontext->cufn_windowrank_exec_rank,
+								grid_sz, 1, 1,
+								block_sz, 1, 1,
+								0,
+								MY_STREAM_PER_THREAD,
+								kern_args,
+								NULL);
+			if (rc != CUDA_SUCCESS)
+			{
+				gpuClientELog(gclient, "failed on cuLaunchKernel: %s",
+							  cuStrError(rc));
+				goto bailout;
+			}
+			break;
+		case KSORT_WINDOW_FUNC__DENSE_RANK:
+			phase = 0;
+			kern_args[0] = &m_session;
+			kern_args[1] = &kds_final;
+			kern_args[2] = &m_partition_hash;
+			kern_args[3] = &m_rowindex;
+			kern_args[4] = &phase;
+			rc = cuLaunchKernel(gcontext->cufn_windowrank_exec_dense_rank,
+								grid_sz, 1, 1,
+								block_sz, 1, 1,
+								0,
+								MY_STREAM_PER_THREAD,
+								kern_args,
+								NULL);
+			if (rc != CUDA_SUCCESS)
+			{
+				gpuClientELog(gclient, "failed on cuLaunchKernel: %s",
+							  cuStrError(rc));
+				goto bailout;
+			}
+			/* calculation of dense_rank() */
+			max_steps = GPUSORT_WINDOWRANK_RESULTS_NSTEPS(kds_final->nitems);
+			for (int step=0; step < max_steps; step++)
+			{
+				kern_args[0] = &m_results_array;
+				kern_args[1] = &kds_final->nitems;
+				kern_args[2] = &step;
+				rc = cuLaunchKernel(gcontext->cufn_global_stair_sum_u32,
+									grid_sz, 1, 1,
+									block_sz, 1, 1,
+									0,
+									MY_STREAM_PER_THREAD,
+									kern_args,
+									NULL);
+				if (rc != CUDA_SUCCESS)
+				{
+					gpuClientELog(gclient, "failed on cuLaunchKernel: %s",
+								  cuStrError(rc));
+					goto bailout;
+				}
+			}
+			/* filter out by dense_rank() */
+			phase++;
+			kern_args[0] = &m_session;
+			kern_args[1] = &kds_final;
+			kern_args[2] = &m_partition_hash;
+			kern_args[3] = &m_rowindex;
+			kern_args[4] = &phase;
+			rc = cuLaunchKernel(gcontext->cufn_windowrank_exec_dense_rank,
+								grid_sz, 1, 1,
+								block_sz, 1, 1,
+								0,
+								MY_STREAM_PER_THREAD,
+								kern_args,
+								NULL);
+			if (rc != CUDA_SUCCESS)
+			{
+				gpuClientELog(gclient, "failed on cuLaunchKernel: %s",
+							  cuStrError(rc));
+				goto bailout;
+			}
+			phase++;
+			rc = cuLaunchKernel(gcontext->cufn_windowrank_exec_dense_rank,
+								grid_sz, 1, 1,
+								block_sz, 1, 1,
+								0,
+								MY_STREAM_PER_THREAD,
+								kern_args,
+								NULL);
+			if (rc != CUDA_SUCCESS)
+			{
+				gpuClientELog(gclient, "failed on cuLaunchKernel: %s",
+							  cuStrError(rc));
+				goto bailout;
+			}
+			break;
+		default:
+			gpuClientELog(gclient, "unknown WINDOW-RANK function (%d)",
+						  kexp_gpusort->u.sort.window_rank_func);
+			goto bailout;
+	}
+	/* final buffer re-construction */
+	max_steps = GPUSORT_WINDOWRANK_RESULTS_NSTEPS(kds_final->nitems);
+	for (int step=0; step < max_steps; step++)
+	{
+		kern_args[0] = &m_results_array;
+		kern_args[1] = &kds_final->nitems;
+		kern_args[2] = &step;
+		rc = cuLaunchKernel(gcontext->cufn_global_stair_sum_u32,
+							grid_sz, 1, 1,
+							block_sz, 1, 1,
+							0,
+							MY_STREAM_PER_THREAD,
+							kern_args,
+							NULL);
+		if (rc != CUDA_SUCCESS)
+		{
+			gpuClientELog(gclient, "failed on cuLaunchKernel: %s",
+						  cuStrError(rc));
+			goto bailout;
+		}
+	}
+	rc = cuStreamSynchronize(MY_STREAM_PER_THREAD);
+	if (rc != CUDA_SUCCESS)
+	{
+		gpuClientELog(gclient, "failed on cuStreamSynchronize: %s",
+					  cuStrError(rc));
+		goto bailout;
+	}
+	/*
+	 * Reset kds_final, then re-arrange tuples
+	 */
+	old_length = kds_final->length;
+	old_nitems = kds_final->nitems;
+	kds_final->length = kds_final->length - kds_final->usage;
+	kds_final->nitems = 0;	/* to be set by GPU kernel */
+	kds_final->usage  = 0;
+	kern_args[0] = &kds_final;
+	kern_args[1] = &old_length;
+	kern_args[2] = &old_nitems;
+	kern_args[3] = &m_results_array;
+	kern_args[4] = &m_rowindex;
+	rc = cuLaunchKernel(gcontext->cufn_windowrank_finalize,
+						grid_sz, 1, 1,
+						block_sz, 1, 1,
+						0,
+						MY_STREAM_PER_THREAD,
+						kern_args,
+						NULL);
+	if (rc != CUDA_SUCCESS)
+	{
+		gpuClientELog(gclient, "failed on cuLaunchKernel: %s",
+					  cuStrError(rc));
+		goto bailout;
+	}
+	rc = cuStreamSynchronize(MY_STREAM_PER_THREAD);
+	if (rc != CUDA_SUCCESS)
+	{
+		gpuClientELog(gclient, "failed on cuStreamSynchronize: %s",
+					  cuStrError(rc));
+		goto bailout;
+	}
+	retval = true;
+bailout:
+	if (w_chunk)
+		gpuMemFree(w_chunk);
+	return retval;
+}
+
+/*
+ * GPU-Sort + Simple LIMIT clause
+ */
+static bool
+__gpuservSortingWithSimpleLimit(gpuClient *gclient,
+								gpuContext *gcontext,
+								kern_session_info *session,
+								kern_data_store *kds_final)
+{
+	uint64_t	old_length = kds_final->length;
+	int			grid_sz;
+	int			block_sz;
+	void	   *kern_args[4];
+	CUresult	rc;
+
+	rc = gpuOptimalBlockSize(&grid_sz,
+							 &block_sz,
+							 gcontext->cufn_kbuf_simple_limit, 0);
+	if (rc != CUDA_SUCCESS)
+	{
+		gpuClientELog(gclient, "failed on gpuOptimalBlockSize: %s",
+					  cuStrError(rc));
+		return false;
+	}
+	/* reset kds_final buffer */
+	kds_final->length = kds_final->length - kds_final->usage;
+	kds_final->nitems = Min(kds_final->nitems, session->gpusort_limit_count);
+	kds_final->usage  = 0;
+	/* launch kernel */
+	grid_sz = Min(grid_sz, (kds_final->nitems + block_sz - 1) / block_sz);
+	kern_args[0] = &kds_final;
+	kern_args[1] = &old_length;
+	rc = cuLaunchKernel(gcontext->cufn_kbuf_simple_limit,
+						grid_sz, 1, 1,
+						block_sz, 1, 1,
+						0,
+						MY_STREAM_PER_THREAD,
+						kern_args,
+						NULL);
+	if (rc != CUDA_SUCCESS)
+	{
+		gpuClientELog(gclient, "failed on cuLaunchKernel: %s",
+					  cuStrError(rc));
+		return false;
+	}
+	rc = cuStreamSynchronize(MY_STREAM_PER_THREAD);
+	if (rc != CUDA_SUCCESS)
+	{
+		gpuClientELog(gclient, "failed on cuStreamSynchronize: %s",
+					  cuStrError(rc));
+		return false;
+	}
+	return true;
+}
+
+static bool
+gpuservSortingFinalBuffer(gpuClient *gclient,
+						  gpuContext *gcontext,
+						  kern_data_store *kds_final)
 {
 	kern_session_info *session = gclient->h_session;
+	kern_expression *kexp_gpusort = SESSION_KEXP_GPUSORT_KEYDESC(session);
 	gpuContext	   *old_gcontext = NULL;
+	uint32_t		nr_threads;
+	int				max_scale;
+	int				scale, step;
 	int				grid_sz, block_sz;
+	size_t			required;
 	gpuMemChunk	   *t_chunk = NULL;
 	kern_gputask   *kgtask;
 	CUdeviceptr		m_session;
-	void		   *kern_args[4];
+	CUdeviceptr		m_rowindex = 0UL;
+	void		   *kern_args[10];
 	CUresult		rc;
 	bool			retval = false;
+
+	if (!kexp_gpusort || kds_final->nitems <= 1)
+		return true;	/* nothing to do */
 
 	if (gcontext != GpuWorkerCurrentContext)
 		old_gcontext = gpuContextSwitchTo(gcontext);
 
 	rc = gpuOptimalBlockSize(&grid_sz,
 							 &block_sz,
-							 gcontext->cufn_merge_gpupreagg_buffer, 0);
+							 gcontext->cufn_gpusort_prep_buffer, 0);
 	if (rc != CUDA_SUCCESS)
 	{
 		gpuClientELog(gclient, "failed on gpuOptimalBlockSize: %s",
 					  cuStrError(rc));
 		goto bailout;
 	}
-	grid_sz = Min(grid_sz, (kds_final_src->nitems + block_sz - 1) / block_sz);
+	max_scale = get_next_log2(kds_final->nitems) - 1;
+	nr_threads = (1UL << max_scale);
+	grid_sz = Min(grid_sz, (nr_threads + block_sz - 1) / block_sz);
 
 	/*
 	 * Setup the control structure
 	 */
-	t_chunk = gpuMemAllocManaged(sizeof(kern_gputask));
+	required = MAXALIGN(sizeof(kern_gputask));
+	if (!__KDS_CHECK_OVERFLOW(kds_final, 2 * nr_threads, kds_final->usage))
+	{
+		required += sizeof(uint64_t) * 2 * nr_threads;
+		m_rowindex = -1L;
+	}
+	t_chunk = gpuMemAllocManaged(required);
 	if (!t_chunk)
 	{
 		gpuClientFatal(gclient, "failed on gpuMemAllocManaged: %lu",
@@ -4262,17 +5312,21 @@ gpuservMergeGpuPreAggFinalBuffer(gpuClient *gclient,
 	memset(kgtask, 0, sizeof(kern_gputask));
 	kgtask->grid_sz      = grid_sz;
 	kgtask->block_sz     = block_sz;
-	kgtask->kvars_nslots = session->kcxt_kvars_nslots;
-	kgtask->n_rels       = (h_kmrels ? h_kmrels->num_rels : 0);
 	kgtask->cuda_dindex  = MY_DINDEX_PER_THREAD;
 	kgtask->cuda_stack_limit = GpuWorkerCurrentContext->cuda_stack_limit;
+	if (m_rowindex != 0UL)
+		m_rowindex = t_chunk->m_devptr + MAXALIGN(sizeof(kern_gputask));
 
 	m_session = gclient->__session[MY_DINDEX_PER_THREAD]->m_devptr;
 	kern_args[0] = &m_session;
 	kern_args[1] = &kgtask;
-	kern_args[2] = &kds_final_src;
-	kern_args[3] = &kds_final_dst;
-	rc = cuLaunchKernel(gcontext->cufn_merge_gpupreagg_buffer,
+	kern_args[2] = &kds_final;
+	kern_args[3] = &nr_threads;
+	kern_args[4] = &m_rowindex;
+	kern_args[5] = &scale;
+	kern_args[6] = &step;
+
+	rc = cuLaunchKernel(gcontext->cufn_gpusort_prep_buffer,
 						grid_sz, 1, 1,
 						block_sz, 1, 1,
 						0,
@@ -4285,6 +5339,27 @@ gpuservMergeGpuPreAggFinalBuffer(gpuClient *gclient,
 					  grid_sz, block_sz, cuStrError(rc));
 		goto bailout;
 	}
+	/* runs bitonic sorting */
+	for (scale=0; scale <= max_scale; scale++)
+	{
+		for (step=scale; step >= 0; step--)
+		{
+			rc = cuLaunchKernel(gcontext->cufn_gpusort_exec_bitonic,
+								grid_sz, 1, 1,
+								block_sz, 1, 1,
+								0,
+								MY_STREAM_PER_THREAD,
+								kern_args,
+								NULL);
+			if (rc != CUDA_SUCCESS)
+			{
+				gpuClientELog(gclient, "failed on cuLaunchKernel(grid_sz=%d, block_sz=%d): %s",
+							  grid_sz, block_sz, cuStrError(rc));
+				goto bailout;
+			}
+		}
+	}
+	/* wait for completion */
 	rc = cuStreamSynchronize(MY_STREAM_PER_THREAD);
 	if (rc != CUDA_SUCCESS)
 	{
@@ -4292,12 +5367,114 @@ gpuservMergeGpuPreAggFinalBuffer(gpuClient *gclient,
 					  cuStrError(rc));
 		goto bailout;
 	}
-	//TODO: Expand kds_final_dst if overflow
+	/* write back the row-index if separated */
+	if (m_rowindex != 0UL)
+	{
+		memcpy(KDS_GET_ROWINDEX(kds_final),
+			   (void *)m_rowindex,
+			   sizeof(uint64_t) * kds_final->nitems);
+	}
+
+	if (kexp_gpusort->u.sort.window_rank_func)
+	{
+		if (!__gpuservSortingWithWindowRank(gclient,
+											gcontext,
+											session,
+											kds_final,
+											kgtask))
+			goto bailout;
+	}
+	else if (session->gpusort_limit_count > 0)
+	{
+		if (!__gpuservSortingWithSimpleLimit(gclient,
+											 gcontext,
+											 session,
+											 kds_final))
+			goto bailout;
+	}
 	retval = true;
 bailout:
+	if (t_chunk)
+		gpuMemFree(t_chunk);
 	if (old_gcontext)
 		gpuContextSwitchTo(old_gcontext);
 	return retval;
+}
+
+/*
+ * __sortingFinalBufferMTWorker
+ */
+typedef struct
+{
+	pthread_t	thread;
+	int			thread_id;
+	int			n_threads;
+	gpuClient  *gclient;
+	gpuContext *gcontext;
+	kern_data_store *kds_final;
+	CUresult	status;
+} __sortingFinalBufferMTContext;
+
+static void *
+__sortingFinalBufferMTWorker(void *data)
+{
+	__sortingFinalBufferMTContext *con = data;
+
+	(void)gpuMemoryPrefetchKDS(con->kds_final,
+							   con->gcontext->cuda_mlocation);
+	if (gpuservSortingFinalBuffer(con->gclient,
+								  con->gcontext,
+								  con->kds_final))
+		Assert(con->status == CUDA_SUCCESS);
+	else
+		Assert(con->status != CUDA_SUCCESS);
+	return NULL;
+}
+
+
+static bool
+gpuservSortingFinalBufferMulti(gpuClient *gclient,
+							   int kds_final_nchunks,
+							   kern_data_store **kds_final_array)
+{
+	__sortingFinalBufferMTContext *con_array
+		= alloca(sizeof(__sortingFinalBufferMTContext) * kds_final_nchunks);
+
+	for (int k=0; k < kds_final_nchunks; k++)
+	{
+		__sortingFinalBufferMTContext *con = &con_array[k];
+
+		memset(con, 0, sizeof(__sortingFinalBufferMTContext));
+		con->thread_id = k;
+		con->n_threads = kds_final_nchunks;
+		con->gclient   = gclient;
+		con->gcontext  = &gpuserv_gpucontext_array[k];
+		con->kds_final = kds_final_array[k];
+
+		__gsInfo("GPU-Sort buffer-%u (nitems=%u, usage=%s) was kicked",
+				 k, con->kds_final->nitems,
+				 format_bytesz(con->kds_final->usage));
+		if ((errno = pthread_create(&con->thread, NULL,
+									__sortingFinalBufferMTWorker, con)) != 0)
+			__FATAL("failed on pthread_create: %m");
+	}
+	/* wait for completion */
+	for (int k=0; k < kds_final_nchunks; k++)
+	{
+		__sortingFinalBufferMTContext *con = &con_array[k];
+
+		if ((errno = pthread_join(con->thread, NULL)) != 0)
+			__FATAL("failed on pthread_join: %m");
+	}
+	/* error checks */
+	for (int k=0; k < kds_final_nchunks; k++)
+	{
+		__sortingFinalBufferMTContext *con = &con_array[k];
+
+		if (con->status != CUDA_SUCCESS)
+			return false;
+	}
+	return true;
 }
 
 /* ----------------------------------------------------------------
@@ -4306,6 +5483,263 @@ bailout:
  *
  * ----------------------------------------------------------------
  */
+static bool
+__gpuservHandleGpuPreAggFinal(gpuClient *gclient,
+							  gpuContext *gcontext,
+							  XpuCommand *resp)
+{
+	kern_session_info *session = gclient->h_session;
+	gpuQueryBuffer	*gq_buf = gclient->gq_buf;
+	gpuContext		*gcontext_saved = NULL;
+	kern_data_store *kds_prime = NULL;
+	gpuMemChunk		*t_chunk = NULL;
+	bool			retval = false;
+	struct timeval	tv1, tv2, tv3;
+
+	gettimeofday(&tv1, NULL);
+	for (int __dindex=0; __dindex < numGpuDevAttrs; __dindex++)
+	{
+		kern_data_store *__kds = (kern_data_store *)
+			gq_buf->gpus[__dindex].m_kds_final;
+		if (!__kds || __kds->nitems == 0)
+			continue;
+		if (!kds_prime)
+		{
+			kds_prime = __kds;
+			gcontext_saved = gpuContextSwitchTo(&gpuserv_gpucontext_array[__dindex]);
+		}
+		else
+		{
+			/*
+			 * merge the secondary final buffer using reduction operations,
+			 * then release the secondary buffer soon.
+			 */
+			kern_gputask   *kgtask;
+			void		   *kern_args[4];
+			int				grid_sz, block_sz;
+			CUdeviceptr		m_session;
+			CUresult		rc;
+
+			rc = gpuOptimalBlockSize(&grid_sz,
+									 &block_sz,
+									 gcontext->cufn_merge_gpupreagg_buffer, 0);
+			if (rc != CUDA_SUCCESS)
+			{
+				gpuClientELog(gclient, "failed on gpuOptimalBlockSize: %s",
+							  cuStrError(rc));
+				goto bailout;
+			}
+			grid_sz = Min(grid_sz, (__kds->nitems + block_sz - 1) / block_sz);
+
+			if (!t_chunk)
+			{
+				t_chunk = gpuMemAllocManaged(sizeof(kern_gputask));
+				if (!t_chunk)
+				{
+					gpuClientELog(gclient, "failed on gpuMemAllocManaged(%s)",
+								  format_bytesz(sizeof(kern_gputask)));
+					goto bailout;
+				}
+			}
+			kgtask = (kern_gputask *)t_chunk->m_devptr;
+			memset(kgtask, 0, sizeof(kern_gputask));
+			kgtask->grid_sz      = grid_sz;
+			kgtask->block_sz     = block_sz;
+			kgtask->kvars_nslots = session->kcxt_kvars_nslots;
+			kgtask->n_rels       = resp->u.results.num_rels;
+			kgtask->cuda_dindex  = MY_DINDEX_PER_THREAD;
+			kgtask->cuda_stack_limit = GpuWorkerCurrentContext->cuda_stack_limit;
+
+			m_session = gclient->__session[MY_DINDEX_PER_THREAD]->m_devptr;
+			kern_args[0] = &m_session;
+			kern_args[1] = &kgtask;
+			kern_args[2] = &__kds;
+			kern_args[3] = &kds_prime;
+			rc = cuLaunchKernel(gcontext->cufn_merge_gpupreagg_buffer,
+								grid_sz, 1, 1,
+								block_sz, 1, 1,
+								0,
+								MY_STREAM_PER_THREAD,
+								kern_args,
+								NULL);
+			if (rc != CUDA_SUCCESS)
+			{
+				gpuClientELog(gclient, "failed on cuLaunchKernel(grid_sz=%d, block_sz=%d): %s",
+							  grid_sz, block_sz, cuStrError(rc));
+				goto bailout;
+			}
+			rc = cuStreamSynchronize(MY_STREAM_PER_THREAD);
+			if (rc != CUDA_SUCCESS)
+			{
+				gpuClientELog(gclient, "failed on cuStreamSynchronize: %s",
+							  cuStrError(rc));
+				goto bailout;
+			}
+			releaseGpuQueryBufferOne(gq_buf, (CUdeviceptr)__kds);
+			gq_buf->gpus[__dindex].m_kds_final = 0UL;
+			gq_buf->gpus[__dindex].m_kds_final_length = 0UL;
+			//TODO: Expand kds_prime if overflow
+		}
+	}
+	gettimeofday(&tv2, NULL);
+	resp->u.results.final_reconstruction_msec = ((tv2.tv_sec  - tv1.tv_sec)  * 1000 +
+												 (tv2.tv_usec - tv1.tv_usec) / 1000);
+	/* send back the response message */
+	if (kds_prime)
+	{
+		/* final sorting if any */
+		if (!gpuservSortingFinalBuffer(gclient,
+									   gcontext,
+									   kds_prime))
+			goto bailout;
+		gettimeofday(&tv3, NULL);
+		resp->u.results.final_sorting_msec = ((tv3.tv_sec  - tv2.tv_sec)  * 1000 +
+											  (tv3.tv_usec - tv2.tv_usec) / 1000);
+		if ((gclient->xpu_task_flags & DEVTASK__SELECT_INTO_DIRECT) != 0)
+		{
+			long	nblocks = selectIntoWriteOutHeapFinal(gclient,
+														  session,
+														  &gq_buf->si_state,
+														  kds_prime);
+			if (nblocks < 0)
+				goto bailout;
+			resp->u.results.final_nitems = kds_prime->nitems;
+			resp->u.results.final_usage  = kds_prime->usage;
+			resp->u.results.final_total  = KDS_HEAD_LENGTH(kds_prime)
+				+ sizeof(uint64_t) * kds_prime->hash_nslots
+				+ sizeof(uint64_t) * kds_prime->nitems
+				+ kds_prime->usage;
+			resp->u.results.select_into_nblocks = nblocks;
+		}
+		else
+		{
+			/* send back to the PostgreSQL backend process */
+			(void)gpuMemoryPrefetchKDS(kds_prime, host_mlocation);
+			gpuClientWriteBackPartial(gclient, kds_prime);
+		}
+	}
+	retval = true;
+bailout:
+	if (t_chunk)
+		gpuMemFree(t_chunk);
+	if (gcontext_saved)
+		gpuContextSwitchTo(gcontext_saved);
+	return retval;
+}
+
+static bool
+__gpuservHandleGpuScanJoinFinal(gpuClient *gclient,
+								gpuContext *gcontext,
+								XpuCommand *resp)
+{
+	kern_session_info *session = gclient->h_session;
+	kern_expression *kexp_gpusort = SESSION_KEXP_GPUSORT_KEYDESC(session);
+	gpuQueryBuffer	*gq_buf = gclient->gq_buf;
+	kern_data_store *kds_prime = NULL;
+	int				kds_source_count = 0;
+	uint64_t		kds_final_nitems = 0;
+	uint64_t		kds_final_usage = 0;
+	int				kds_final_nchunks = 0;
+	kern_data_store **kds_final_array = NULL;
+	struct timeval	tv1, tv2, tv3;
+
+	Assert(kexp_gpusort != NULL);
+	gettimeofday(&tv1, NULL);
+	for (int i=0; i < gq_buf->gpumem_nitems; i++)
+	{
+		kern_data_store *__kds = (kern_data_store *)gq_buf->gpumem_devptrs[i];
+
+		if (__kds && __kds->nitems > 0)
+		{
+			if (!kds_prime)
+				kds_prime = __kds;
+			kds_final_nitems += __kds->nitems;
+			kds_final_usage  += __kds->usage;
+			kds_source_count++;
+		}
+	}
+	if (!kds_prime)
+		return true;	/* empty results */
+	if (kds_source_count == 1)
+	{
+		/* no need to reconstruct the KDS buffer */
+		kds_final_array = &kds_prime;
+		kds_final_nchunks = 1;
+	}
+	else if (kexp_gpusort->u.sort.window_rank_func)
+	{
+		/*
+		 * When executing a window function in the finalize process, GPU-Sort
+		 * does not need to sort the entire dataset. This is because the sorting
+		 * in window functions is done to cluster rows with the same value in the
+		 * PARTITION BY clause and determine the ranking within that cluster.
+		 * Therefore, as long as you can guarantee that rows with the same remainder
+		 * are executed on the same GPU after hashing the value in the PARTITION BY
+		 * clause,
+		 * there will be no inconsistencies in the results even if you split the
+		 * result set into multiple chunks and sort each of them.
+		 */
+		size_t		part_sz = session->pinned_inner_buffer_partition_size;
+		size_t		length = (KDS_HEAD_LENGTH(kds_prime)
+							  + sizeof(uint64_t) * kds_final_nitems
+							  + kds_final_usage);
+		if (length > part_sz)
+		{
+			kds_final_nchunks = (length + part_sz - 1) / part_sz;
+			kds_final_array = alloca(sizeof(kern_data_store *) * kds_final_nchunks);
+			if (!gpuservMergeGpuJoinFinalBufferMulti(gclient,
+													 gq_buf->gpumem_nitems,
+													 kds_final_nchunks,
+													 kds_final_array,
+													 kds_prime, length))
+				return false;
+		}
+	}
+
+	if (!kds_final_array)
+	{
+		/* simple reconstruction */
+		kds_prime = gpuservMergeGpuJoinFinalBufferOne(gclient,
+													  gcontext,
+													  kds_prime,
+													  kds_final_nitems,
+													  kds_final_usage);
+		if (!kds_prime)
+			return false;
+		kds_final_array = &kds_prime;
+		kds_final_nchunks = 1;
+	}
+	gettimeofday(&tv2, NULL);
+	resp->u.results.final_reconstruction_msec = ((tv2.tv_sec  - tv1.tv_sec)  * 1000 +
+												 (tv2.tv_usec - tv1.tv_usec) / 1000);
+	/*
+	 * Runs final sorting and so on
+	 */
+	for (int k=0; k < kds_final_nchunks; k += numGpuDevAttrs)
+	{
+		int		nchunks = Min(kds_final_nchunks - k, numGpuDevAttrs);
+
+		if (!gpuservSortingFinalBufferMulti(gclient,
+											nchunks,
+											kds_final_array + k))
+			return false;
+		for (int j=0; j < nchunks; j++)
+		{
+			kern_data_store *kds_final = kds_final_array[k+j];
+
+			/* send back to the PostgreSQL backend process */
+			(void)gpuMemoryPrefetchKDS(kds_final, host_mlocation);
+			gpuClientWriteBackPartial(gclient, kds_final);
+
+			releaseGpuQueryBufferOne(gq_buf, (CUdeviceptr)kds_final);
+		}
+	}
+	gettimeofday(&tv3, NULL);
+	resp->u.results.final_sorting_msec = ((tv3.tv_sec  - tv2.tv_sec)  * 1000 +
+										  (tv3.tv_usec - tv2.tv_usec) / 1000);
+	return true;
+}
+
 static void
 gpuservHandleGpuTaskFinal(gpuContext *gcontext,
 						  gpuClient *gclient,
@@ -4319,13 +5753,15 @@ gpuservHandleGpuTaskFinal(gpuContext *gcontext,
 	int				iovmax = (6 * numGpuDevAttrs + 10);
 	int				num_rels = (h_kmrels ? h_kmrels->num_rels : 0);
 	XpuCommand	   *resp;
-	size_t			resp_sz = MAXALIGN(offsetof(XpuCommand,
-												u.results.stats[num_rels]));
+	size_t			resp_sz;
+
 	/* setup final response message */
+	resp_sz = MAXALIGN(offsetof(XpuCommand, u.results.stats[num_rels]));
 	resp = alloca(resp_sz);
 	memset(resp, 0, resp_sz);
 	resp->magic = XpuCommandMagicNumber;
 	resp->tag   = XpuCommandTag__Success;
+	resp->repeat_id = xcmd->repeat_id;	/* repeat-id of the final command */
 	resp->u.results.chunks_nitems = 0;
 	resp->u.results.chunks_offset = resp_sz;
 	resp->u.results.num_rels = num_rels;
@@ -4412,6 +5848,7 @@ gpuservHandleGpuTaskFinal(gpuContext *gcontext,
 
 			if (kds_final && kds_final->nitems > 0)
 			{
+				//TO BE CHECKED: Only happen if GpuPreAgg
 				if ((gclient->xpu_task_flags & DEVTASK__PREAGG) != 0)
 				{
 					iovcnt += __gpuClientWriteBackOneChunk(gclient,
@@ -4428,51 +5865,59 @@ gpuservHandleGpuTaskFinal(gpuContext *gcontext,
 			}
 		}
 	}
-	else if ((gclient->xpu_task_flags & DEVTASK__PREAGG) != 0)
+	else if ((gclient->xpu_task_flags & DEVTASK__MERGE_FINAL_BUFFER) != 0)
 	{
-		/*
-		 * If we have no CPU fallback events during execution,
-		 * the final-buffer contains complete set of GROUP-BY
-		 * results set on the GPU device memory.
-		 * It makes no sense to run normal aggregation on the
-		 * CPU side, and we can merge the complete set of them
-		 * on the GPU device without no CPU interactions.
-		 */
-		kern_data_store *kds_prime = NULL;
-		gpuContext *gcontext_prime = NULL;
+		Assert((gclient->xpu_task_flags & (DEVTASK__PINNED_ROW_RESULTS |
+										   DEVTASK__PINNED_HASH_RESULTS)) != 0);
+		if ((gclient->xpu_task_flags & DEVTASK__PREAGG) != 0)
+		{
+			if (!__gpuservHandleGpuPreAggFinal(gclient, gcontext, resp))
+				return;
+		}
+		else
+		{
+			if (!__gpuservHandleGpuScanJoinFinal(gclient, gcontext, resp))
+				return;
+		}
+	}
+	else if ((gclient->xpu_task_flags & (DEVTASK__PINNED_ROW_RESULTS |
+										 DEVTASK__PINNED_HASH_RESULTS)) != 0)
+	{
+		/* just write back statistics (no payload) */
+		uint64_t	kds_final_nitems = 0;
+		uint64_t	kds_final_usage = 0;
+		uint64_t	kds_head_length = 0;
 
-		for (int __dindex=0; __dindex < numGpuDevAttrs; __dindex++)
+		for (int i=0; i < gq_buf->gpumem_nitems; i++)
 		{
-			kern_data_store *__kds = (kern_data_store *)
-				gq_buf->gpus[__dindex].m_kds_final;
-			if (__kds && __kds->nitems > 0)
-			{
-				if (kds_prime == NULL)
-				{
-					kds_prime = __kds;
-					gcontext_prime = &gpuserv_gpucontext_array[__dindex];
-				}
-				else if (!gpuservMergeGpuPreAggFinalBuffer(gclient,
-														   gcontext_prime,
-														   h_kmrels,
-														   kds_prime,
-														   __kds))
-					return;
-			}
+			kern_data_store *__kds = (kern_data_store *)gq_buf->gpumem_devptrs[i];
+
+			if (!__kds)
+				continue;
+			if (gq_buf->gpumem_kinds[i] != GQBUF_KIND__FINAL_PROJECTION_BUFFER)
+				continue;
+			kds_final_nitems += __kds->nitems;
+			kds_final_usage  += __kds->usage;
+			if (kds_head_length == 0)
+				kds_head_length = KDS_HEAD_LENGTH(__kds);
+			else
+				Assert(kds_head_length == KDS_HEAD_LENGTH(__kds));
 		}
-		if (kds_prime)
-		{
-			iovcnt += __gpuClientWriteBackOneChunk(gclient,
-												   iov_array+iovcnt,
-												   kds_prime);
-			resp->u.results.chunks_nitems++;
-			resp->u.results.final_nitems += kds_prime->nitems;
-			resp->u.results.final_usage  += kds_prime->usage;
-			resp->u.results.final_total  += KDS_HEAD_LENGTH(kds_prime)
-				+ sizeof(uint64_t) * (kds_prime->hash_nslots +
-									  kds_prime->nitems)
-				+ kds_prime->usage;
-		}
+		resp->u.results.final_nitems = kds_final_nitems;
+		resp->u.results.final_usage  = kds_final_usage;
+		resp->u.results.final_total  = kds_head_length +
+			sizeof(uint64_t) * KDS_GET_HASHSLOT_WIDTH(kds_final_nitems) +
+			sizeof(uint64_t) * kds_final_nitems +
+			kds_final_usage + (32UL<<20);
+		/* should not be used with SELECT INTO Direct */
+		assert((gclient->xpu_task_flags & DEVTASK__SELECT_INTO_DIRECT) == 0);
+	}
+	else if ((gclient->xpu_task_flags & DEVTASK__SELECT_INTO_DIRECT) != 0)
+	{
+		/* flush results of SELECT INTO Direct buffer */
+		long	nblocks = selectIntoFinalFlushBuffer(gclient,
+													 &gq_buf->si_state);
+		resp->u.results.select_into_nblocks = nblocks;
 	}
 	resp->u.results.final_plan_task = true;
 
@@ -4801,105 +6246,18 @@ __setupDevEncodeLinkageCatalog(CUmodule cuda_module)
 }
 
 /*
- * __setupGpuKernelFunctionsAndParams
- */
-static void
-__setupGpuKernelFunctionsAndParams(gpuContext *gcontext)
-{
-	GpuDevAttributes *dattrs = &gpuDevAttrs[gcontext->cuda_dindex];
-	CUmodule	cuda_module = gcontext->cuda_module;
-	CUfunction	cuda_function;
-	CUresult	rc;
-	int			shmem_sz_static;
-	int			shmem_sz_dynamic;
-	const char *func_name;
-
-	Assert(gcontext->cuda_dindex < numGpuDevAttrs);
-	/* ------ kern_gpujoin_main ------ */
-	func_name = "kern_gpujoin_main";
-	rc = cuModuleGetFunction(&cuda_function, cuda_module, func_name);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuModuleGetFunction('%s'): %s",
-			 func_name, cuStrError(rc));
-	gcontext->cufn_kern_gpumain = cuda_function;
-
-	rc = cuFuncGetAttribute(&shmem_sz_static,
-							CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES,
-							cuda_function);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuFuncGetAttribute(SHARED_SIZE_BYTES): %s",
-			 cuStrError(rc));
-	shmem_sz_dynamic = (dattrs->MAX_SHARED_MEMORY_PER_BLOCK_OPTIN
-						- TYPEALIGN(1024, shmem_sz_static)
-						- 8192);	/* margin for L1-cache */
-	rc = cuFuncSetAttribute(cuda_function,
-							CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
-							shmem_sz_dynamic);
-	if (rc != CUDA_SUCCESS)
-        elog(ERROR, "failed on cuFuncSetAttribute(MAX_DYNAMIC_SHARED_SIZE_BYTES, %d): %s",
-			 shmem_sz_dynamic, cuStrError(rc));
-	gcontext->gpumain_shmem_sz_limit = shmem_sz_dynamic;
-
-	/* ------ gpujoin_prep_gistindex ------ */
-	func_name = "gpujoin_prep_gistindex";
-    rc = cuModuleGetFunction(&cuda_function, cuda_module, func_name);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuModuleGetFunction('%s'): %s",
-			 func_name, cuStrError(rc));
-	gcontext->cufn_prep_gistindex = cuda_function;
-	/* ------ gpujoin_merge_outer_join_map ------ */
-	func_name = "gpujoin_merge_outer_join_map";
-	rc = cuModuleGetFunction(&cuda_function, cuda_module, func_name);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuModuleGetFunction('%s'): %s",
-			 func_name, cuStrError(rc));
-	gcontext->cufn_merge_outer_join_map = cuda_function;
-	/* ------ kern_gpupreagg_final_merge ------ */
-	func_name = "kern_gpupreagg_final_merge";
-	rc = cuModuleGetFunction(&cuda_function, cuda_module, func_name);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuModuleGetFunction('%s'): %s",
-			 func_name, cuStrError(rc));
-	gcontext->cufn_merge_gpupreagg_buffer = cuda_function;
-	/* ------ kern_buffer_partitioning ------ */
-	func_name = "kern_buffer_partitioning";
-	rc = cuModuleGetFunction(&cuda_function, cuda_module, func_name);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuModuleGetFunction('%s'): %s",
-			 func_name, cuStrError(rc));
-	gcontext->cufn_kbuf_partitioning = cuda_function;
-	/* ------ kern_buffer_reconstruction ------ */
-	func_name = "kern_buffer_reconstruction";
-	rc = cuModuleGetFunction(&cuda_function, cuda_module, func_name);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuModuleGetFunction('%s'): %s",
-			 func_name, cuStrError(rc));
-	gcontext->cufn_kbuf_reconstruction = cuda_function;
-	/* ------ kern_gpucache_apply_redo ------ */
-	func_name = "kern_gpucache_apply_redo";
-	rc = cuModuleGetFunction(&cuda_function, cuda_module, func_name);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuModuleGetFunction('%s'): %s",
-			 func_name, cuStrError(rc));
-	gcontext->cufn_gpucache_apply_redo = cuda_function;
-	/* ------ kern_gpucache_compaction ------ */
-	func_name = "kern_gpucache_compaction";
-	rc = cuModuleGetFunction(&cuda_function, cuda_module, func_name);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuModuleGetFunction('%s'): %s",
-			 func_name, cuStrError(rc));
-	gcontext->cufn_gpucache_compaction = cuda_function;
-}
-
-/*
  * gpuservSetupGpuModule
  */
 static void
 gpuservSetupGpuModule(gpuContext *gcontext)
 {
+	GpuDevAttributes *dattrs = &gpuDevAttrs[gcontext->cuda_dindex];
 	CUmodule	cuda_module;
 	CUresult	rc;
+	int			shmem_sz_static;
+	int			shmem_sz_dynamic;
 
+	Assert(gcontext->cuda_dindex < numGpuDevAttrs);
 	rc = cuModuleLoad(&cuda_module, pgstrom_fatbin_image_filename);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuModuleLoad('%s'): %s",
@@ -4911,8 +6269,72 @@ gpuservSetupGpuModule(gpuContext *gcontext)
 	gcontext->cuda_encode_catalog = __setupDevEncodeLinkageCatalog(cuda_module);
 	gcontext->cuda_module = cuda_module;
 
-	/* lookup CUDA functions and setup parameters */
-	__setupGpuKernelFunctionsAndParams(gcontext);
+	/* lookup CUDA functions */
+#define __GPU_KERNEL_RESOLVE_FUNCTION(KFUNC_NAME, KFUNC_VARIABLE)		\
+	do {																\
+		rc = cuModuleGetFunction(&gcontext->KFUNC_VARIABLE,				\
+								 gcontext->cuda_module, #KFUNC_NAME);	\
+		if (rc != CUDA_SUCCESS)											\
+			elog(ERROR, "failed on cuModuleGetFunction('%s'): %s",		\
+				 #KFUNC_NAME, cuStrError(rc));							\
+	} while(0)
+
+	__GPU_KERNEL_RESOLVE_FUNCTION(kern_gpujoin_main,
+								  cufn_kern_gpumain);
+	__GPU_KERNEL_RESOLVE_FUNCTION(gpujoin_prep_gistindex,
+								  cufn_prep_gistindex);
+	__GPU_KERNEL_RESOLVE_FUNCTION(gpujoin_merge_outer_join_map,
+								  cufn_merge_outer_join_map);
+	__GPU_KERNEL_RESOLVE_FUNCTION(kern_gpupreagg_final_merge,
+								  cufn_merge_gpupreagg_buffer);
+	__GPU_KERNEL_RESOLVE_FUNCTION(kern_gpusort_consolidate_buffer,
+								  cufn_gpusort_consolidate_buffer);
+	__GPU_KERNEL_RESOLVE_FUNCTION(kern_gpusort_partition_buffer,
+								  cufn_gpusort_partition_buffer);
+	__GPU_KERNEL_RESOLVE_FUNCTION(kern_gpusort_prep_buffer,
+								  cufn_gpusort_prep_buffer);
+	__GPU_KERNEL_RESOLVE_FUNCTION(kern_gpusort_exec_bitonic,
+								  cufn_gpusort_exec_bitonic);
+	__GPU_KERNEL_RESOLVE_FUNCTION(kern_buffer_simple_limit,
+								  cufn_kbuf_simple_limit);
+	__GPU_KERNEL_RESOLVE_FUNCTION(kern_buffer_partitioning,
+								  cufn_kbuf_partitioning);
+	__GPU_KERNEL_RESOLVE_FUNCTION(kern_buffer_reconstruction,
+								  cufn_kbuf_reconstruction);
+	__GPU_KERNEL_RESOLVE_FUNCTION(kern_gpucache_apply_redo,
+								  cufn_gpucache_apply_redo);
+	__GPU_KERNEL_RESOLVE_FUNCTION(kern_gpucache_compaction,
+								  cufn_gpucache_compaction);
+	__GPU_KERNEL_RESOLVE_FUNCTION(kern_windowrank_prep_hash,
+								  cufn_windowrank_prep_hash);
+	__GPU_KERNEL_RESOLVE_FUNCTION(kern_windowrank_exec_row_number,
+								  cufn_windowrank_exec_row_number);
+	__GPU_KERNEL_RESOLVE_FUNCTION(kern_windowrank_exec_rank,
+								  cufn_windowrank_exec_rank);
+	__GPU_KERNEL_RESOLVE_FUNCTION(kern_windowrank_exec_dense_rank,
+								  cufn_windowrank_exec_dense_rank);
+	__GPU_KERNEL_RESOLVE_FUNCTION(kern_windowrank_finalize,
+								  cufn_windowrank_finalize);
+	__GPU_KERNEL_RESOLVE_FUNCTION(kern_global_stair_sum_u32,
+								  cufn_global_stair_sum_u32);
+#undef __GPU_KERNEL_RESOLVE_FUNCTION
+	/* setup CUDA shared memory parameters */
+	rc = cuFuncGetAttribute(&shmem_sz_static,
+							CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES,
+							gcontext->cufn_kern_gpumain);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuFuncGetAttribute(SHARED_SIZE_BYTES): %s",
+			 cuStrError(rc));
+	shmem_sz_dynamic = (dattrs->MAX_SHARED_MEMORY_PER_BLOCK_OPTIN
+						- TYPEALIGN(1024, shmem_sz_static)
+						- 8192);	/* margin for L1-cache */
+	rc = cuFuncSetAttribute(gcontext->cufn_kern_gpumain,
+							CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+							shmem_sz_dynamic);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuFuncSetAttribute(MAX_DYNAMIC_SHARED_SIZE_BYTES, %d): %s",
+			 shmem_sz_dynamic, cuStrError(rc));
+	gcontext->gpumain_shmem_sz_limit = shmem_sz_dynamic;
 }
 
 /*
@@ -5086,6 +6508,8 @@ gpuservSetupGpuContext(int cuda_dindex)
 	rc = cuDeviceGet(&gcontext->cuda_device, dattrs->DEV_ID);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuDeviceGet: %s", cuStrError(rc));
+	gcontext->cuda_mlocation.id = gcontext->cuda_device;
+	gcontext->cuda_mlocation.type = CU_MEM_LOCATION_TYPE_DEVICE;
 
 	rc = cuDevicePrimaryCtxRetain(&gcontext->cuda_context,
 								  gcontext->cuda_device);
@@ -5407,18 +6831,6 @@ pgstrom_init_gpu_service(void)
 							   NULL,
 							   &pgstrom_cuda_toolkit_basedir,
 							   CUDA_TOOLKIT_BASEDIR,
-							   PGC_POSTMASTER,
-							   GUC_NOT_IN_SAMPLE,
-							   NULL, NULL, NULL);
-	DefineCustomStringVariable("pg_strom.host_compiler_binpath",
-							   "path to the host C compiler when nvcc launched",
-							   NULL,
-							   &pgstrom_host_compiler_binpath,
-#ifdef HOST_COMPILER_BINPATH
-							   HOST_COMPILER_BINPATH,
-#else
-							   "/usr/bin",
-#endif
 							   PGC_POSTMASTER,
 							   GUC_NOT_IN_SAMPLE,
 							   NULL, NULL, NULL);

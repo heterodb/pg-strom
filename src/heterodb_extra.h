@@ -30,7 +30,7 @@ typedef int64_t						gpumask_t;
 #define HETERODB_LICENSE_KEYLEN		256
 #define HETERODB_LICENSE_KEYBITS	(8 * HETERODB_LICENSE_KEYLEN)
 
-#define HETERODB_EXTRA_CURRENT_API_VERSION	20250115
+#define HETERODB_EXTRA_CURRENT_API_VERSION	20250316
 #define HETERODB_EXTRA_OLDEST_API_VERSION	20240115
 
 /* cufile.c */
@@ -74,7 +74,6 @@ extern heterodb_extra_ereport_callback_type
 					heterodbExtraRegisterEreportCallback(heterodb_extra_ereport_callback_type callback);
 extern int		   *heterodbExtraRegisterEreportLevel(int *p_new_ereport_level);
 extern int			heterodbExtraEreportLevel(void);
-extern bool			gpuDirectIsAvailable(void);
 
 extern int			heterodbLicenseReload(void);
 extern int			heterodbLicenseReloadPath(const char *path);
@@ -88,6 +87,7 @@ extern gpumask_t	heterodbGetOptimalGpus(const char *path, const char *policy);
 extern bool			gpuDirectInitDriver(void);
 extern bool			gpuDirectOpenDriver(void);
 extern bool			gpuDirectCloseDriver(void);
+#ifdef __cuda_cuda_h__
 extern bool			gpuDirectMapGpuMemory(CUdeviceptr m_segment,
 										  size_t segment_sz,
 										  unsigned long *p_iomap_handle);
@@ -100,6 +100,7 @@ extern bool			gpuDirectFileReadIOV(const char *pathname,
 										 off_t m_offset,
 										 unsigned long iomap_handle,
 										 const strom_io_vector *iovec,
+										 bool try_gpudirect_mode,
 										 uint32_t *p_npages_direct_read,
 										 uint32_t *p_npages_vfs_read);
 extern bool			gpuDirectFileReadAsyncIOV(const char *pathname,
@@ -108,15 +109,21 @@ extern bool			gpuDirectFileReadAsyncIOV(const char *pathname,
 											  unsigned long iomap_handle,
 											  const strom_io_vector *iovec,
 											  CUstream cuda_stream,
+											  bool try_gpudirect_mode,
 											  uint32_t *p_error_code_async,
 											  uint32_t *p_npages_direct_read,
 											  uint32_t *p_npages_vfs_read);
 extern const char  *gpuDirectGetProperty(void);
 extern bool			gpuDirectSetProperty(const char *key, const char *value);
+#endif	/* __cuda_cuda_h__ */
 extern void			gpuDirectCleanUpOnThreadTerminate(void);
 extern bool			heterodbExtraCloudGetVMInfo(const char *cloud_name,
 												const char **p_vm_type,
 												const char **p_vm_image,
 												const char **p_vm_ident);
+extern const char  *heterodbExtraCloudGetSignature(void);
+#ifdef	__PGSTROM_MODULE__
+extern bool			gpuDirectIsSupported(const void *__gpuDevAttr);
 extern const char  *heterodb_extra_init_module(const char *__extra_pathname);
+#endif
 #endif	/* HETERODB_EXTRA_H */

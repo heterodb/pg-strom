@@ -63,3 +63,8 @@ test: gpu_cache
 # ----------
 #test: misc distinct
 test: misc
+
+# ----------
+# GPU Sort
+# ----------
+test: gpu_sort

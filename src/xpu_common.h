@@ -170,6 +170,8 @@ typedef unsigned int		Oid;
 
 #define NAMEDATALEN			64		/* must follow the host configuration */
 #define BLCKSZ				8192	/* must follow the host configuration */
+#define RELSEG_SIZE			131072	/* must follow the host configuration */
+#define PG_PAGE_LAYOUT_VERSION 4	/* must follow the host configuration */
 
 #ifndef lengthof
 #define lengthof(array)		(sizeof (array) / sizeof ((array)[0]))
@@ -188,6 +190,9 @@ typedef unsigned int		Oid;
 #endif	/* POSTGRES_H */
 #define __MAXALIGNED__		__attribute__((aligned(MAXIMUM_ALIGNOF)));
 #define MAXIMUM_ALIGNOF_SHIFT 3
+/* Arrow buffer alignent */
+#define ALIGNOF_ARROW		64
+#define ARROW_ALIGN(len)	TYPEALIGN(ALIGNOF_ARROW,len)
 
 #ifndef HAS_GPUMASK_TYPEDEF
 #define HAS_GPUMASK_TYPEDEF
@@ -299,22 +304,6 @@ __memcmp(const void *__s1, const void *__s2, size_t n)
 			return 1;
 	}
 	return 0;
-}
-
-INLINE_FUNCTION(int)
-__strcmp(const char *s1, const char *s2)
-{
-	unsigned char	c1, c2;
-
-	do {
-		c1 = (unsigned char) *s1++;
-		c2 = (unsigned char) *s2++;
-
-		if (c1 == '\0')
-			return c1 - c2;
-	} while (c1 == c2);
-
-	return c1 - c2;
 }
 
 /* ----------------------------------------------------------------
@@ -512,6 +501,7 @@ typedef struct
 		KCXT->kvecs_ndims  = (SESSION)->kcxt_kvecs_ndims;				\
 		KCXT->kvecs_curr_buffer = NULL;									\
 		KCXT->kvecs_curr_id = 0;										\
+		KCXT->groupby_prepfn_bufsz = (SESSION)->groupby_prepfn_bufsz;	\
 		KCXT->kvars_slot = (struct xpu_datum_t **)						\
 			alloca(sizeof(struct xpu_datum_t *) * KCXT->kvars_nslots);	\
 		__vs_desc = SESSION_KVARS_SLOT_DESC(SESSION);					\
@@ -705,11 +695,16 @@ struct kern_colmeta {
 	 * PostgreSQL types, it can have variation of data accuracy in time
 	 * related data types, or precision in decimal data type.
 	 *
+	 * 'field_index' points the physical column index on the source
+	 * arrow/parquet files. If negative, column does not exist on the
+	 * file, it means virtual column.
+	 *
 	 * 'virtual_offset' is not zero if this is a virtual column.
 	 * if negative, it means NULL. Elsewhere, it points contents of the
 	 * virtual column in the format of PostgreSQL datum.
 	 */
 	ArrowTypeOptions attopts;
+	int				field_index;
 	int64_t			virtual_offset;
 	uint64_t		nullmap_offset;
 	uint64_t		nullmap_length;
@@ -725,6 +720,7 @@ typedef struct kern_colmeta		kern_colmeta;
 #define KDS_FORMAT_BLOCK		'b'		/* raw blocks for direct loading */
 #define KDS_FORMAT_COLUMN		'c'		/* columnar based storage format */
 #define KDS_FORMAT_ARROW		'a'		/* apache arrow format */
+#define KDS_FORMAT_PARQUET		'p'		/* apache parquet format */
 #define KDS_FORMAT_FALLBACK		'f'		/* CPU-fallback buffer */
 
 struct kern_data_store {
@@ -745,8 +741,10 @@ struct kern_data_store {
 	uint32_t		block_nloaded;	/* number of blocks already loaded by CPU */
 	/* only KDS_FORMAT_COLUMN */
 	uint32_t		column_nrooms;	/* = max_num_rows parameter */
-	/* only KDS_FORMAT_ARROW */
+	/* only KDS_FORMAT_ARROW/PARQUET */
 	uint32_t		arrow_virtual_usage; /* usage of virtual column buffer */
+	/* only KDS_FORMAT_PARQUET */
+	uint32_t		parquet_row_group;	/* row-group id to be loaded */
 	/* column definition */
 	uint32_t		nr_colmeta;	/* number of colmeta[] array elements;
 								 * maybe, >= ncols, if any composite types */
@@ -937,12 +935,15 @@ typedef struct HeapTupleHeaderData
 
 #define HEAP_XMIN_COMMITTED		0x0100	/* t_xmin committed */
 #define HEAP_XMIN_INVALID		0x0200	/* t_xmin invalid/aborted */
+#define HEAP_XMIN_FROZEN		(HEAP_XMIN_COMMITTED|HEAP_XMIN_INVALID)
 #define HEAP_XMAX_COMMITTED		0x0400	/* t_xmax committed */
 #define HEAP_XMAX_INVALID		0x0800	/* t_xmax invalid/aborted */
 #define HEAP_XMAX_IS_MULTI		0x1000	/* t_xmax is a MultiXactId */
 #define HEAP_UPDATED			0x2000	/* this is UPDATEd version of row */
 #define HEAP_MOVED_OFF			0x4000	/* unused in xPU */
 #define HEAP_MOVED_IN			0x8000	/* unused in xPU */
+#define HEAP_MOVED				(HEAP_MOVED_OFF|HEAP_MOVED_IN)
+#define HEAP_XACT_MASK			0xFFF0	/* visibility-related bits */
 
 /*
  * information stored in t_infomask2:
@@ -1181,11 +1182,57 @@ GistFollowRight(PageHeaderData *page)
  */
 struct kern_tupitem
 {
-	uint32_t		t_len;		/* length of tuple */
-	uint32_t		rowid;		/* unique Id of this item */
-	HeapTupleHeaderData	htup;
+	uint32_t		t_len;			/* actual length of minimal tuple */
+	uint32_t		hash;			/* hash value of this item */
+	uint16_t		__padding__;
+	uint16_t		t_infomask2;	/* number of attributes + various flags */
+	uint16_t		t_infomask;		/* various flag bits, see below */
+	uint8_t			t_hoff;			/* sizeof header incl. bitmap, padding */
+	/* ^ - 23 bytes - ^ */
+	uint8_t			t_bits[1];		/* null bitmap */
+	/*
+	 * +----------------+
+	 * | NULL-bitmap    |
+	 * +----------------+ <-- ((char *)titem + titem->t_hoff
+	 * |       :        |      - MINIMAL_TUPLE_OFFSET)
+	 * | Data Payload   |
+	 * |       :        |
+	 * +----------------+
+	 * | row-id (32bit) |
+	 * +----------------+ <-- (char *)titem + titem->t_len
+	 */
 };
 typedef struct kern_tupitem		kern_tupitem;
+#ifndef MINIMAL_TUPLE_OFFSET
+#define MINIMAL_TUPLE_OFFSET	(offsetof(HeapTupleHeaderData, t_infomask2) - \
+								 offsetof(kern_tupitem, t_infomask2))
+#endif
+#define ROWID_SIZE				sizeof(uint32_t)
+
+INLINE_FUNCTION(char *)
+KERN_TUPITEM_GET_PAYLOAD(const kern_tupitem *titem)
+{
+	return ((char *)titem + titem->t_hoff - MINIMAL_TUPLE_OFFSET);
+}
+
+INLINE_FUNCTION(uint32_t)
+KERN_TUPITEM_GET_ROWID(const kern_tupitem *titem)
+{
+	uint32_t	rowid;
+
+	memcpy(&rowid, ((const char *)titem
+					+ titem->t_len
+					- ROWID_SIZE), ROWID_SIZE);
+	return rowid;
+}
+
+INLINE_FUNCTION(void)
+KERN_TUPITEM_SET_ROWID(kern_tupitem *titem, uint32_t rowid)
+{
+	memcpy((char *)titem
+		   + titem->t_len
+		   - ROWID_SIZE, &rowid, ROWID_SIZE);
+}
 
 /*
  * kern_hashitem - individual items for KDS_FORMAT_HASH
@@ -1193,9 +1240,6 @@ typedef struct kern_tupitem		kern_tupitem;
 struct kern_hashitem
 {
 	uint64_t		next;		/* offset of the next entry */
-	uint32_t		hash;		/* 32-bit hash value */
-	uint32_t		__padding__;
-	/* HeapTuple of this entry */
 	kern_tupitem	t	__MAXALIGNED__;
 };
 typedef struct kern_hashitem	kern_hashitem;
@@ -1205,12 +1249,10 @@ typedef struct kern_hashitem	kern_hashitem;
  */
 struct kern_fallbackitem
 {
-	uint32_t		t_len;
-	uint16_t		depth;
-	uint8_t			__reserved__;
-	uint8_t			matched;
 	uint64_t		l_state;
-	HeapTupleHeaderData htup;
+	uint16_t		depth;
+	uint8_t			matched;
+	kern_tupitem	t	__MAXALIGNED__;
 };
 typedef struct kern_fallbackitem	kern_fallbackitem;
 
@@ -1314,7 +1356,7 @@ __KDS_HASH_ITEM_CHECK_VALID(const kern_data_store *kds, kern_hashitem *hitem)
 	char   *head = (KDS_BODY_ADDR(kds) + sizeof(uint64_t) * (kds->hash_nslots +
 															 kds->nitems));
 	return ((char *)hitem >= head &&
-			(char *)&hitem->t.htup + hitem->t.t_len <= tail);
+			(char *)&hitem->t + hitem->t.t_len <= tail);
 }
 #include <stdio.h>
 
@@ -1345,6 +1387,25 @@ KDS_HASH_NEXT_ITEM(const kern_data_store *kds, uint64_t hnext_offset)
 		return hnext;
 	}
 	return NULL;
+}
+
+/* ------------------------------------------------
+ *
+ * access functions for KDS_FORMAT_FALLBACK
+ *
+ * ------------------------------------------------
+ */
+INLINE_FUNCTION(kern_fallbackitem *)
+KDS_GET_FALLBACK_ITEM(const kern_data_store *kds, uint32_t kds_index)
+{
+	uint64_t    offset = __volatileRead(KDS_GET_ROWINDEX(kds) + kds_index);
+
+	if (!offset)
+		return NULL;
+	return (kern_fallbackitem *)
+		((const char *)kds + kds->length
+		 - offset
+		 - offsetof(kern_fallbackitem, t));
 }
 
 /* ------------------------------------------------
@@ -2085,13 +2146,16 @@ typedef struct
 #define DEVTASK__PINNED_ROW_RESULTS	0x00002000U	/* Pinned results in ROW format */
 #define DEVTASK__USED_GPUDIRECT		0x00004000U	/* Task used GPU-Direct SQL */
 #define DEVTASK__USED_GPUCACHE		0x00008000U	/* Task used GPU-Cache */
-#define DEVTASK__PREAGG_FINAL_MERGE	0x00010000U	/* PreAgg final buffer should be merged
-												 * on the xPU device side */
-
+#define DEVTASK__MERGE_FINAL_BUFFER	0x00010000U	/* Final buffer (GPU-PreAgg or pinned
+												 * inner buffer by GPU-Join/Scan) must
+												 * be merged to a single buffer, for
+												 * complete-aggregation or GPU-Sort */
+#define DEVTASK__SELECT_INTO_DIRECT	0x00020000U	/* Results shall be written to an empty
+												 * heap table files, without XACT logs.
+												 */
 #define DEVTASK__SCAN				0x10000000U	/* xPU-Scan */
 #define DEVTASK__JOIN				0x20000000U	/* xPU-Join */
 #define DEVTASK__PREAGG				0x40000000U	/* xPU-PreAgg */
-#define DEVTASK__SORT				0x80000000U	/* GPU-Sort */
 #define DEVTASK__MASK				0x70000000U	/* mask of avove workloads */
 
 #define TASK_KIND__GPUSCAN		(DEVTASK__SCAN   | DEVKIND__NVIDIA_GPU)
@@ -2202,6 +2266,7 @@ typedef bool  (*xpu_function_t)(XPU_PGFUNCTION_ARGS);
 	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &ARGNAME4))			\
 		return false
 
+#define __KAGG_ACTION__USE_FILTER	8192	/* only used in optimizer */
 #define KAGG_ACTION__VREF			101		/* simple var copy */
 #define KAGG_ACTION__VREF_NOKEY		102		/* simple var copy; but not a grouping-
 											 * key, if GROUP-BY primary key.
@@ -2224,6 +2289,52 @@ typedef bool  (*xpu_function_t)(XPU_PGFUNCTION_ARGS);
 #define KAGG_ACTION__PAVG_NUMERIC	604		/* <int4>,<int8+8> - NROWS+PSUM */
 #define KAGG_ACTION__STDDEV			701		/* <int4>,<float8>,<float8> - stddev */
 #define KAGG_ACTION__COVAR			801		/* <int4>,<float8>x5 - covariance */
+
+/* identifier of final functions */
+#define KAGG_FINAL__SIMPLE_VREF			1000
+#define KAGG_FINAL__FMINMAX_INT8		1101
+#define KAGG_FINAL__FMINMAX_INT16		1102
+#define KAGG_FINAL__FMINMAX_INT32		1103
+#define KAGG_FINAL__FMINMAX_INT64		1104
+#define KAGG_FINAL__FMINMAX_FP16		1105
+#define KAGG_FINAL__FMINMAX_FP32		1106
+#define KAGG_FINAL__FMINMAX_FP64		1107
+#define KAGG_FINAL__FMINMAX_NUMERIC		1108
+#define KAGG_FINAL__FMINMAX_CASH		1109
+#define KAGG_FINAL__FMINMAX_DATE		1110
+#define KAGG_FINAL__FMINMAX_TIME		1111
+#define KAGG_FINAL__FMINMAX_TIMESTAMP	1112
+#define KAGG_FINAL__FMINMAX_TIMESTAMPTZ	1113
+#define KAGG_FINAL__FSUM_INT			1200
+#define KAGG_FINAL__FSUM_INT64			1201
+#define KAGG_FINAL__FSUM_FP32			1202
+#define KAGG_FINAL__FSUM_FP64			1203
+#define KAGG_FINAL__FSUM_NUMERIC		1204
+#define KAGG_FINAL__FSUM_CASH			1205
+#define KAGG_FINAL__FAVG_INT			1300
+#define KAGG_FINAL__FAVG_INT64			1301
+#define KAGG_FINAL__FAVG_FP64			1302
+#define KAGG_FINAL__FAVG_NUMERIC		1303
+#define KAGG_FINAL__FSTDDEV_SAMP		1400
+#define KAGG_FINAL__FSTDDEV_SAMPF		1401
+#define KAGG_FINAL__FSTDDEV_POP			1402
+#define KAGG_FINAL__FSTDDEV_POPF		1403
+#define KAGG_FINAL__FVAR_SAMP			1500
+#define KAGG_FINAL__FVAR_SAMPF			1501
+#define KAGG_FINAL__FVAR_POP			1502
+#define KAGG_FINAL__FVAR_POPF			1503
+#define KAGG_FINAL__FCORR				1504
+#define KAGG_FINAL__FCOVAR_SAMP			1505
+#define KAGG_FINAL__FCOVAR_POP			1506
+#define KAGG_FINAL__FREGR_AVGX			1507
+#define KAGG_FINAL__FREGR_AVGY			1508
+#define KAGG_FINAL__FREGR_COUNT			1509
+#define KAGG_FINAL__FREGR_INTERCEPT		1510
+#define KAGG_FINAL__FREGR_R2			1511
+#define KAGG_FINAL__FREGR_SLOPE			1512
+#define KAGG_FINAL__FREGR_SXX			1513
+#define KAGG_FINAL__FREGR_SXY			1514
+#define KAGG_FINAL__FREGR_SYY			1515
 
 #define __PAGG_MINMAX_ATTRS__VALID	0x0001	/* value is not empty */
 
@@ -2293,50 +2404,60 @@ typedef struct
 
 typedef struct
 {
-	uint32_t	action;			/* any of KAGG_ACTION__* */
+	uint16_t	action;			/* any of KAGG_ACTION__* */
+	int16_t		arg0_slot_id;	/* arg0 of partial aggregate function */
+	int16_t		arg1_slot_id;	/* arg1 of partial aggregate function */
+	int16_t		filter_slot_id;	/* if non-negative, slot-id of the filter */
 	int32_t		typmod;			/* typmod of 1st arg - used for numeric */
-	int32_t		arg0_slot_id;
-	int32_t		arg1_slot_id;
 } kern_aggregate_desc;
 
+
+#define KSORT_KEY_ATTR__NULLS_FIRST			0x0400U
+#define KSORT_KEY_ATTR__ORDER_ASC			0x8000U
+#define KSORT_KEY_KIND__MASK				0x03ffU
+#define KSORT_KEY_KIND__SHIFT				16
 #define KSORT_KEY_KIND__VREF				0
 #define KSORT_KEY_KIND__PMINMAX_INT64		1
 #define KSORT_KEY_KIND__PMINMAX_FP64		2
 #define KSORT_KEY_KIND__PSUM_INT64			3
-#define KSORT_KEY_KIND__PSUM_INT128			4
-#define KSORT_KEY_KIND__PSUM_FP64			5
-#define KSORT_KEY_KIND__PSUM_NUMERIC		6
-#define KSORT_KEY_KIND__PAVG_INT64			7
-#define KSORT_KEY_KIND__PAVG_INT128			8
-#define KSORT_KEY_KIND__PAVG_FP64			9
-#define KSORT_KEY_KIND__PAVG_NUMERIC		10
-#define KSORT_KEY_KIND__PVARIANCE_SAMP		11
-#define KSORT_KEY_KIND__PVARIANCE_POP		12
-#define KSORT_KEY_KIND__PCOVAR_CORR			13
-#define KSORT_KEY_KIND__PCOVAR_SAMP			14
-#define KSORT_KEY_KIND__PCOVAR_POP			15
-#define KSORT_KEY_KIND__PCOVAR_AVGX			16
-#define KSORT_KEY_KIND__PCOVAR_AVGY			17
-#define KSORT_KEY_KIND__PCOVAR_COUNT		18
-#define KSORT_KEY_KIND__PCOVAR_REGR_R2		19
-#define KSORT_KEY_KIND__PCOVAR_REGR_SLOPE	20
-#define KSORT_KEY_KIND__PCOVAR_REGR_SXX		21
-#define KSORT_KEY_KIND__PCOVAR_REGR_SXY		22
-#define KSORT_KEY_KIND__PCOVAR_REGR_SYY		23
+#define KSORT_KEY_KIND__PSUM_FP64			4
+#define KSORT_KEY_KIND__PSUM_NUMERIC		5
+#define KSORT_KEY_KIND__PAVG_INT64			6
+#define KSORT_KEY_KIND__PAVG_FP64			7
+#define KSORT_KEY_KIND__PAVG_NUMERIC		8
+#define KSORT_KEY_KIND__PVARIANCE_SAMP		9
+#define KSORT_KEY_KIND__PVARIANCE_POP		10
+#define KSORT_KEY_KIND__PCOVAR_CORR			11
+#define KSORT_KEY_KIND__PCOVAR_SAMP			12
+#define KSORT_KEY_KIND__PCOVAR_POP			13
+#define KSORT_KEY_KIND__PCOVAR_AVGX			14
+#define KSORT_KEY_KIND__PCOVAR_AVGY			15
+#define KSORT_KEY_KIND__PCOVAR_COUNT		16
+#define KSORT_KEY_KIND__PCOVAR_INTERCEPT	17
+#define KSORT_KEY_KIND__PCOVAR_REGR_R2		18
+#define KSORT_KEY_KIND__PCOVAR_REGR_SLOPE	19
+#define KSORT_KEY_KIND__PCOVAR_REGR_SXX		20
+#define KSORT_KEY_KIND__PCOVAR_REGR_SXY		21
+#define KSORT_KEY_KIND__PCOVAR_REGR_SYY		22
+#define KSORT_KEY_KIND__NITEMS				23
+
+#define KSORT_WINDOW_FUNC__ROW_NUMBER		'n'
+#define KSORT_WINDOW_FUNC__RANK				'r'
+#define KSORT_WINDOW_FUNC__DENSE_RANK		'd'
 
 typedef struct
 {
-	uint16_t	key_kind;		/* any of KSORT_KEY_KIND__* */
+	uint16_t	kind;			/* any of KSORT_KEY_KIND__* */
 	int8_t		nulls_first;	/* true, if NULLs first */
-	int8_t		sort_order;		/* true, if smaller is first */
-	int32_t		source;			/* if >0, attribute number of the KDS.
-								 * elsewhere, it means the offset of temporary
-								 * calculated sorting key, according to the key_kind.
+	int8_t		order_asc;		/* true, if ORDER ASC */
+	uint16_t	src_anum;		/* source attribute number of KDS */
+	uint16_t	buf_offset;		/* if not KSORT_KEY_KIND__VREF, it means offset of
+								 * the temporary calculated sorting key.
 								 * location is:
-								 * ((char *)&tupitem->htup + tupitem->t_len - source)
+								 * ((char *)&tupitem->htup + tupitem->t_len + key_offset)
 								 */
-	int32_t		slot0_id;		/* slot-id to store the key0 */
-	int32_t		slot1_id;		/* slot-id to store the key1 */
+	TypeOpCode	key_type_code;
+	const struct xpu_datum_operators *key_ops;
 } kern_sortkey_desc;
 
 typedef struct
@@ -2377,6 +2498,15 @@ typedef struct
 	uint16_t	fb_slot_id;		/* kernel slot-id of this fallback variable */
 	int32_t		fb_kvec_offset;	/* kvec's buffer offset */
 } kern_fallback_desc;
+
+typedef struct
+{
+	int			nattrs;
+	struct {
+		int16_t	action;			/* any of KAGG_FINAL__* */
+		int16_t	resno;			/* source attribute number */
+	}			desc[1];
+} kern_aggfinal_projection_desc;
 
 #define KERN_EXPRESSION_MAGIC			(0x4b657870)	/* 'K' 'e' 'x' 'p' */
 
@@ -2458,6 +2588,11 @@ struct kern_expression
 		} proj;		/* Projection */
 		struct {
 			int			nkeys;
+			bool		needs_finalization;
+			char		window_rank_func;		/* one of KSORT_WINDOW_FUNC__* */
+			uint32_t	window_rank_limit;		/* rank() limit, if any */
+			uint16_t	window_partby_nkeys;	/* # of partition keys */
+			uint16_t	window_orderby_nkeys;	/* # of order-by keys */
 			kern_sortkey_desc desc[1];
 		} sort;		/* Sort */
 		struct {
@@ -2574,28 +2709,39 @@ typedef struct kern_session_info
 	uint32_t	xpucode_groupby_keyload;
 	uint32_t	xpucode_groupby_keycomp;
 	uint32_t	xpucode_groupby_actions;
+	uint32_t	xpucode_gpusort_keydesc;
 
 	/* database session info */
-	int64_t		hostEpochTimestamp;	/* = SetEpochTimestamp() */
-	uint64_t	xactStartTimestamp;	/* timestamp when transaction start */
-	uint32_t	session_xact_state;	/* offset to SerializedTransactionState */
-	uint32_t	session_timezone;	/* offset to pg_tz */
-	uint32_t	session_encode;		/* offset to xpu_encode_info;
-									 * !! function pointer must be set by server */
+	int64_t		hostEpochTimestamp;		/* = SetEpochTimestamp() */
+	uint64_t	xactStartTimestamp;		/* timestamp when transaction start */
+	uint32_t	session_curr_xid;		/* GetCurrentTransactionId() */
+	uint32_t	session_curr_cid;		/* GetCurrentCommandId() */
+	uint32_t	session_xact_state;		/* offset to SerializedTransactionState */
+	uint32_t	session_timezone;		/* offset to pg_tz */
+	uint32_t	session_encode;			/* offset to xpu_encode_info;
+										 * !! function pointer must be set by server */
 	int32_t		session_currency_frac_digits;	/* copy of lconv::frac_digits */
+	uint64_t	pinned_inner_buffer_partition_size; /* copy of pg_strom.pinned_inner_buffer_partition_size */
 	/* projection kds definition */
 	uint32_t	projection_kds_dst;		/* header portion of kds_dst */
-
+	/* SELECT INTO direct */
+	uint32_t	select_into_pathname;	/* base pathname of SELECT INTO if possible */
+	uint32_t	select_into_kds_head;	/* definition of SELECT INTO destination buffer */
+	uint32_t	select_into_projdesc;	/* SELECT INTO projection descriptor, if any */
 	/* join inner buffer */
-	uint32_t	pgsql_port_number;	/* = PostPortNumber */
-	uint32_t	pgsql_plan_node_id;	/* = Plan->plan_node_id */
-	uint32_t	join_inner_handle;	/* key of join inner buffer */
+	uint32_t	pgsql_port_number;		/* = PostPortNumber */
+	uint32_t	pgsql_plan_node_id;		/* = Plan->plan_node_id */
+	uint32_t	join_inner_handle;		/* key of join inner buffer */
 
 	/* group-by final buffer */
-	uint32_t	groupby_kds_final;	/* header portion of kds_final */
-	uint32_t	groupby_prepfn_bufsz; /* buffer size for preagg functions */
+	uint32_t	groupby_kds_final;		/* header portion of kds_final */
+	uint32_t	groupby_prepfn_bufsz;	/* buffer size for preagg functions */
 	float4_t	groupby_ngroups_estimation; /* planne's estimation of ngroups */
 
+	/* gpu-sort final buffer */
+	uint32_t	gpusort_htup_margin;	/* extra space at tail of the final
+										 * kern_tupitem for finalization */
+	uint32_t	gpusort_limit_count;	/* limit-pushdown, if positive */
 	/* fallback buffer */
 	uint32_t	fallback_kds_head;		/* offset to kds_fallback (header) */
 	uint32_t	fallback_desc_defs;		/* offset to kern_fallback_desc array */
@@ -2610,7 +2756,6 @@ typedef struct {
 	uint32_t	kds_src_pathname;	/* offset to const char *pathname */
 	uint32_t	kds_src_iovec;		/* offset to strom_io_vector */
 	uint32_t	kds_src_offset;		/* offset to kds_src */
-	int32_t		scan_repeat_id;		/* current repeat count */
 	char		data[1]				__MAXALIGNED__;
 } kern_exec_task;
 
@@ -2624,6 +2769,10 @@ typedef struct {
 	uint32_t	final_nitems;		/* final buffer's nitems, if any */
 	uint64_t	final_usage;		/* final buffer's usage, if any */
 	uint64_t	final_total;		/* final buffer's total size, if any */
+	uint32_t	final_sorting_msec;			/* usec for final buffer sorting */
+	uint32_t	final_reconstruction_msec;	/* usec for final buffer reconstruction */
+	uint32_t	join_reconstruction_msec;	/* usec for inner buffer reconstruction */
+	uint32_t	select_into_nblocks; /* number of blocks written by SELECT INTO direct */
 	/* statistics */
 	uint32_t	npages_direct_read;	/* # of pages read by GPU-Direct Storage */
 	uint32_t	npages_vfs_read;	/* # of pages read by VFS (fallback) */
@@ -2653,10 +2802,6 @@ typedef struct dlist_node
 	struct dlist_node *prev;
 	struct dlist_node *next;
 } dlist_node;
-typedef struct dlist_head
-{
-	dlist_node		head;
-} dlist_head;
 #endif
 
 typedef struct
@@ -2664,6 +2809,7 @@ typedef struct
 	uint32_t	magic;
 	uint32_t	tag;
 	uint64_t	length;
+	int32_t		repeat_id;
 	void	   *priv;
 	dlist_node	chain;
 	union {
@@ -2895,6 +3041,21 @@ SESSION_KEXP_GROUPBY_ACTIONS(const kern_session_info *session)
 	return kexp;
 }
 
+INLINE_FUNCTION(kern_expression *)
+SESSION_KEXP_GPUSORT_KEYDESC(const kern_session_info *session)
+{
+	kern_expression *kexp = NULL;
+
+	if (session->xpucode_gpusort_keydesc)
+	{
+		kexp = (kern_expression *)
+			((char *)session + session->xpucode_gpusort_keydesc);
+		assert(kexp->opcode == FuncOpCode__SortKeys &&
+			   kexp->exptype == TypeOpCode__int4);
+	}
+	return kexp;
+}
+
 /* see access/transam/xact.c */
 typedef struct
 {
@@ -2929,6 +3090,32 @@ SESSION_ENCODE(kern_session_info *session)
 	if (session->session_encode == 0)
 		return NULL;
 	return (struct xpu_encode_info *)((char *)session + session->session_encode);
+}
+
+INLINE_FUNCTION(const char *)
+SESSION_SELECT_INTO_PATHNAME(const kern_session_info *session)
+{
+	if (session->select_into_pathname == 0)
+		return NULL;
+	return (const char *)((const char *)session + session->select_into_pathname);
+}
+
+INLINE_FUNCTION(const kern_data_store *)
+SESSION_SELECT_INTO_KDS_HEAD(const kern_session_info *session)
+{
+	if (session->select_into_kds_head == 0)
+		return NULL;
+	return (const kern_data_store *)
+		((const char *)session + session->select_into_kds_head);
+}
+
+INLINE_FUNCTION(const kern_aggfinal_projection_desc *)
+SESSION_SELECT_INTO_PROJDESC(const kern_session_info *session)
+{
+	if (session->select_into_projdesc == 0)
+		return NULL;
+	return (const kern_aggfinal_projection_desc *)
+		((const char *)session + session->select_into_projdesc);
 }
 
 /* ----------------------------------------------------------------
@@ -3072,26 +3259,39 @@ SESSION_ENCODE(kern_session_info *session)
  * ----------------------------------------------------------------
  */
 EXTERN_FUNCTION(int)
-kern_form_heaptuple(kern_context *kcxt,
-					const kern_expression *kproj,
-					const kern_data_store *kds_dst,
-					HeapTupleHeaderData *htup);
-EXTERN_FUNCTION(int)
-kern_estimate_heaptuple(kern_context *kcxt,
+kern_form_minimal_tuple(kern_context *kcxt,
 						const kern_expression *kproj,
-						const kern_data_store *kds_dst);
+						const kern_data_store *kds_dst,
+						kern_tupitem *titem,
+						uint32_t rowid);
+EXTERN_FUNCTION(int)
+kern_estimate_minimal_tuple(kern_context *kcxt,
+							const kern_expression *kproj,
+							const kern_data_store *kds_dst);
+EXTERN_FUNCTION(int)
+kern_form_heap_tuple(kern_context *kcxt,
+					 const kern_expression *kproj,
+					 const kern_data_store *kds_dst,
+					 HeapTupleHeaderData *htup);
+EXTERN_FUNCTION(int)
+kern_estimate_heap_tuple(kern_context *kcxt,
+						 const kern_expression *kproj,
+						 const kern_data_store *kds_dst);
+EXTERN_FUNCTION(const void *)
+kern_fetch_minimal_tuple_attr(const kern_data_store *kds,
+							  const kern_tupitem *titem, int anum);
 EXTERN_FUNCTION(bool)
-ExecLoadVarsHeapTuple(kern_context *kcxt,
+ExecLoadVarsMinimalTuple(kern_context *kcxt,
+						 const kern_expression *kexp_load_vars,
+						 int depth,
+						 const kern_data_store *kds,
+						 const kern_tupitem *titem);
+EXTERN_FUNCTION(bool)
+ExecLoadVarsOuterHeap(kern_context *kcxt,
 					  const kern_expression *kexp_load_vars,
-					  int depth,
-					  const kern_data_store *kds,
+					  const kern_expression *kexp_scan_quals,
+					  const kern_data_store *kds_src,
 					  const HeapTupleHeaderData *htup);
-EXTERN_FUNCTION(bool)
-ExecLoadVarsOuterRow(kern_context *kcxt,
-					 const kern_expression *kexp_load_vars,
-					 const kern_expression *kexp_scan_quals,
-					 const kern_data_store *kds_src,
-					 const HeapTupleHeaderData *htup);
 EXTERN_FUNCTION(bool)
 ExecLoadVarsOuterArrow(kern_context *kcxt,
 					   const kern_expression *kexp_load_vars,
@@ -3208,6 +3408,7 @@ struct kern_multirels
 		uint64_t	kds_offset;		/* offset to KDS */
 		uint64_t	ojmap_offset;	/* offset to outer-join map, if any */
 		uint64_t	gist_offset;	/* offset to GiST-index pages, if any */
+		int16_t		gist_ctid_resno;/* CTID resno of inner tuples */
 		bool		is_nestloop;	/* true, if NestLoop */
 		bool		left_outer;		/* true, if JOIN_LEFT or JOIN_FULL */
 		bool		right_outer;	/* true, if JOIN_RIGHT or JOIN_FULL */
@@ -3350,6 +3551,43 @@ __atomic_add_int64(int64_t *ptr, int64_t ival)
 	return atomicAdd((unsigned long long int *)ptr, (unsigned long long int)ival);
 #else
 	return __atomic_fetch_add(ptr, ival, __ATOMIC_SEQ_CST);
+#endif
+}
+
+/*
+ * __atomic_add_int128_packed
+ *
+ * atomically increment packed int128 value using 64bit atomic operation.
+ */
+INLINE_FUNCTION(void)
+__atomic_add_int128_packed(int128_packed_t *ptr, int128_t ival)
+{
+#ifdef __CUDACC__
+	uint64_t	old_lo;
+	uint64_t	new_hi;
+	uint64_t	temp	__attribute__((unused));
+
+	old_lo = atomicAdd((unsigned long long *)&ptr->u64_lo,
+					   (uint64_t)(ival & ULONG_MAX));
+	asm volatile("add.cc.u64 %0, %2, %3;\n"
+				 "addc.u64   %1, %4, %5;\n"
+				 : "=l"(temp),  "=l"(new_hi)
+				 : "l"(old_lo), "l"((uint64_t)(ival & ULONG_MAX)),
+				   "n"(0),      "l"((uint64_t)((ival>>64) & ULONG_MAX)));
+	/* new_hi = ival_hi + carry bit of (old_lo + ival_lo) */
+	if (new_hi != 0)
+		atomicAdd((unsigned long long *)&ptr->u64_hi, new_hi);
+#else
+	uint64_t	val_lo = (uint64_t)(ival & ULONG_MAX);
+	uint64_t	val_hi = (uint64_t)((ival >> 64) & ULONG_MAX);
+	uint64_t	old_lo;
+	uint64_t	temp;
+
+	old_lo = __atomic_add_uint64(&ptr->u64_lo, val_lo);
+	if (__builtin_add_overflow(old_lo, val_lo, &temp))
+		val_hi++;
+	if (val_hi != 0)
+		__atomic_add_uint64(&ptr->u64_hi, val_hi);
 #endif
 }
 
@@ -3611,6 +3849,16 @@ __atomic_cas_uint64(uint64_t *ptr, uint64_t comp, uint64_t newval)
 #endif
 }
 
+INLINE_FUNCTION(void)
+__atomic_thread_fense(void)
+{
+#ifdef __CUDACC__
+	__threadfence();
+#else
+	__atomic_thread_fence(__ATOMIC_SEQ_CST);
+#endif
+}
+
 /* ----------------------------------------------------------------
  *
  * xPU PreAgg common utility functions
@@ -3666,6 +3914,69 @@ __preagg_fetch_xdatum_as_float64(float8_t *p_fval, const xpu_datum_t *xdatum)
 	return true;
 }
 
+/* ----------------------------------------------------------------
+ *
+ * C++ Specific Utility functions
+ *
+ * ----------------------------------------------------------------
+ */
+#ifdef __cplusplus
+/*
+ * Template based Double Linked List
+ */
+template <typename T>
+struct __dlist_node
+{
+	T	   *owner;		/* NULL if dlist head */
+	struct __dlist_node<T> *prev;
+	struct __dlist_node<T> *next;
+	__dlist_node()
+	{
+		owner = NULL;
+		prev = next = this;
+	}
+};
+#define __dlist_foreach(entry, lhead)									\
+	for (auto __iter = (lhead)->next, __iter_next = __iter->next;		\
+		 (entry = __iter->owner) != NULL;								\
+		 __iter = __iter_next, __iter_next = __iter->next, entry = __iter->owner)
+
+template <typename T>
+INLINE_FUNCTION(void)
+__dlist_delete(__dlist_node<T> *node)
+{
+	assert(node->owner != NULL);	/* should not list head */
+	if (node->next && node->prev)
+	{
+		node->prev->next = node->next;
+		node->next->prev = node->prev;
+	}
+	else
+	{
+		assert(!node->next && node->prev);
+	}
+	node->prev = node->next = NULL;
+}
+
+template <typename T>
+INLINE_FUNCTION(void)
+__dlist_push_tail(__dlist_node<T> *head, __dlist_node<T> *node)
+{
+	assert(!head->owner && node->owner);
+	node->prev = head->prev;
+	head->prev->next = node;
+	head->prev = node;
+	node->next = head;
+}
+
+template <typename T>
+INLINE_FUNCTION(void)
+__dlist_move_tail(__dlist_node<T> *head, __dlist_node<T> *node)
+{
+	__dlist_delete(node);
+	__dlist_push_tail(head, node);
+}
+#endif
 /* ----------------------------------------------------------------
  *
  * Misc functions

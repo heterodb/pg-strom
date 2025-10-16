@@ -98,6 +98,8 @@
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#postgresql">PostgreSQLのインストール</a>
     </li>
+    <li class="toctree-l2"><a class="reference internal" href="#libarrowlibparquet">libarrow/libparquetのインストール</a>
+    </li>
     <li class="toctree-l2"><a class="reference internal" href="#pg-strom">PG-Stromのインストール</a>
         <ul>
     <li class="toctree-l3"><a class="reference internal" href="#rpm">RPMによるインストール</a>
@@ -141,6 +143,8 @@
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="../postgis/">GPU版PostGIS</a>
                   </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../gpusort/">GPUソート</a>
+                  </li>
                   <li class="toctree-l1"><a class="reference internal" href="../troubles/">トラブルシューティング</a>
                   </li>
               </ul>
@@ -151,6 +155,8 @@
                   <li class="toctree-l1"><a class="reference internal" href="../arrow_fdw/">Apache Arrow</a>
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="../gpucache/">GPUキャッシュ</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../pinned_buffer/">Pinned Inner Buffer</a>
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="../fluentd/">Fluentd連携</a>
                   </li>
@@ -168,6 +174,8 @@
               </ul>
               <p class="caption"><span class="caption-text">リリースノート</span></p>
               <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v6.0/">PG-Strom v6.0</a>
+                  </li>
                   <li class="toctree-l1"><a class="reference internal" href="../release_v5.2/">PG-Strom v5.2</a>
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="../release_v5.1/">PG-Strom v5.1</a>
@@ -443,6 +451,17 @@ Mon Jun  3 09:56:41 2024
 |  No running processes found                                                             |
 +-----------------------------------------------------------------------------------------+
 </code></pre>
+<div class="admonition tips">
+<p class="admonition-title">Tips</p>
+<p><strong>NVSwitch搭載システムの追加設定</strong></p>
+<p>複数のGPUを搭載し、それらのインターコネクトにNVSwitchを使用するシステムでは、<code>nvidia-fabricmanager</code>モジュールの追加インストールが必要です。このパッケージがインストールされていない場合、CUDAの初期化を行う<code>cuInit()</code>が<code>CUDA_ERROR_SYSTEM_NOT_READY</code>エラーで失敗し、PG-Stromを起動する事ができません。
+以下のコマンドで<code>nvidia-fabricmanager</code>を追加インストールしてください。
+<a href="https://docs.nvidia.com/gpudirect-storage/troubleshooting-guide/index.html#cuda-error-system-not-ready-after-installation">(参考情報)</a></p>
+</div>
+<pre><code># dnf install nvidia-fabricmanager
+# systemctl enable nvidia-fabricmanager.service
+# systemctl start nvidia-fabricmanager.service
+</code></pre>
 <h3 id="gpudirect-storage">GPUDirect Storageの確認</h3>
 <p>上記の手順でCUDA Toolkitのインストールが完了すると、GPUDirect Storageが利用可能な状態となっているはずです。
 以下の通り、<code>gdscheck</code>ツールを用いてストレージデバイス毎のコンフィグを確認してください。
@@ -616,6 +635,14 @@ EPELの設定のように、yumリポジトリの設定を行うだけの小さ�
 <p class="admonition-title">Note</p>
 <p>Red Hat Enterprise Linuxの場合、パッケージ名<code>postgresql</code>がディストリビューション標準のものと競合してしまい、PGDG提供のパッケージをインストールする事ができません。そのため、<code>dnf -y module disable postgresql</code> コマンドを用いてディストリビューション標準の<code>postgresql</code>モジュールを無効化します。</p>
 </div>
+<h2 id="libarrowlibparquet">libarrow/libparquetのインストール</h2>
+<p>PG-Strom v6.1以降では、ビルドとインストールに<code>libarrow</code>と<code>libparquet</code>が必要です。</p>
+<p>Linuxディストリビューションの提供しているパッケージは古い場合があるため、<a href="https://arrow.apache.org/install/">開発者コミュニティのガイダンス</a>にしたがって、<code>arrow-devel</code>パッケージと<code>parquet-devel</code>パッケージをインストールしてください。</p>
+<p>ここまでのインストール手順との重複を除く、最小インストールに必要なステップは以下の通りです。</p>
+<pre><code>$ sudo dnf install -y https://packages.apache.org/artifactory/arrow/almalinux/$(cut -d: -f5 /etc/system-release-cpe | cut -d. -f1)/apache-arrow-release-latest.rpm
+$ sudo dnf install -y arrow-devel
+$ sudo dnf install -y parquet-devel
+</code></pre>
 <h2 id="pg-strom">PG-Stromのインストール</h2>
 <p>本節ではPG-Stromのインストール方法について説明します。
 推奨はRPMによるインストールですが、開発者向けにソースコードからのビルド方法についても紹介します。</p>
@@ -784,11 +811,19 @@ $ sudo dpkg -i heterodb-extra_5.4-1_amd64.deb
 </code></pre>
 <p>PG-Stromはソースコードをチェックアウトしてインストールします。
 この時、ターゲットとするPostgreSQLの<code>pg_config</code>を指定するのを忘れないようにしてください。</p>
-<p>インストール後の設定は Red Hat Enterprise Linux や Rocky Linux の場合と同じです。</p>
+<p>インストール後の設定は Red Hat Enterprise Linux や Rocky Linux の場合とほぼ同じです。</p>
 <pre><code>$ git clone https://github.com/heterodb/pg-strom.git
 $ cd pg-strom/src
 $ make PG_CONFIG=/path/to/pgsql/bin/pg_config -j 8
 $ sudo make PG_CONFIG=/path/to/pgsql/bin/pg_config install
+</code></pre>
+<p>ただし、パッケージインストールしたPostgreSQLを使用してsystemctl経由でこれを起動する場合、PATH環境変数がクリアされてしまいます。（これはおそらくセキュリティ面での理由でしょう）
+そのため、初回起動時にGPUバイナリをビルドするために起動したスクリプトが正しく動作しません。
+これを避けるため、Ubuntu Linuxを利用する場合は<code>/etc/postgresql/PGVERSION/main/environment</code>に以下の内容を追記してください。</p>
+<pre><code>/etc/postgresql/PGVERSION/main/environment:
+
+
+PATH='/usr/local/cuda/bin:/usr/bin:/bin'
 </code></pre>
               
             </div>

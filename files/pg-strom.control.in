@@ -1,0 +1,5 @@
+Package: pg-strom-pg@@PG_MAJORVERSION@@
+Maintainer: KaiGai Kohei <kaigai@heterodb.com>
+Architecture: amd64
+Version: @@PGSTROM_VERSION@@
+Description: PG-Strom - extension for GPU acceleration in PostgreSQL database
