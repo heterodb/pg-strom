@@ -104,11 +104,18 @@ EXTRA_CLEAN = $(CUDA_OBJS) $(GENERATED-HEADERS) \
               $(shell ls -d pgstrom-gpucode-V*-*.fatbin 2>/dev/null)
 EXTENSION = pg_strom
 PG_CPPFLAGS := $(PGSTROM_FLAGS) -I $(CUDA_IPATH)
-PG_CXXFLAGS := -std=c++17 -Wno-sign-compare
+#PG_CXXFLAGS := -std=c++17 -Wno-sign-compare
+PG_CXXFLAGS += -std=c++17 -Wno-sign-compare
 SHLIB_LINK += -L $(CUDA_LPATH) -lcuda
 
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
+
+override CXXFLAGS += -std=c++17
+
+# .bcファイル（LLVMビットコード）生成用のルールを明示的に定義
+%.bc: %.cpp
+	clang++ -xc++ -std=c++17 $(CPPFLAGS) $(CXXFLAGS) -flto=thin -emit-llvm -c -o $@ $<
 
 #
 # Device Attributes
