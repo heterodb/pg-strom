@@ -1098,6 +1098,20 @@ extern Relids	fixup_relids_by_partition_leaf(PlannerInfo *root,
 extern int		__appendBinaryStringInfo(StringInfo buf,
 										 const void *data, int datalen);
 extern int		__appendZeroStringInfo(StringInfo buf, int nbytes);
+typedef struct LargeStringInfoData
+{
+	char	   *data;
+	size_t		len;
+	size_t		maxlen;
+} LargeStringInfoData;
+typedef LargeStringInfoData *LargeStringInfo;
+extern void		initLargeStringInfo(LargeStringInfo buf);
+extern void		resetLargeStringInfo(LargeStringInfo buf);
+extern size_t	appendBinaryLargeStringInfo(LargeStringInfo buf,
+											const void *data, size_t len);
+extern size_t	appendStringLargeStringInfo(LargeStringInfo buf, const char *str);
+extern size_t	appendZeroLargeStringInfo(LargeStringInfo buf, size_t nbytes);
+extern void		enlargeLargeStringInfo(LargeStringInfo buf, size_t needed);
 extern char	   *get_type_name(Oid type_oid, bool missing_ok);
 extern Oid		get_type_namespace(Oid type_oid);
 extern char	   *get_type_extension_name(Oid type_oid);
