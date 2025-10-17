@@ -110,6 +110,14 @@ SHLIB_LINK += -L $(CUDA_LPATH) -lcuda
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
 
+# Our C++ code (and libarrow/libparquet) expects C++17 as baseline,
+# however, some distribution has different defaults for clang.
+# PostgreSQL's makefile has no particular label to give "-std=c++17"
+# to clang to build JIT bytecode. So, we inject this option after
+# the inclusion of buildchain.
+#
+BITCODE_CXXFLAGS += $(PG_CXXFLAGS)
+
 #
 # Device Attributes
 #
