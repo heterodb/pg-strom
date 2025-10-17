@@ -1493,6 +1493,7 @@ typedef struct
 	ParamPathInfo  *param_info;
 	double			num_groups;
 	bool			try_parallel;
+	bool			has_aggfuncs;
 	PathTarget	   *target_upper;
 	PathTarget	   *target_partial;
 	PathTarget	   *target_agg_final;
@@ -1897,6 +1898,7 @@ xpugroupby_build_path_target_expression(Node *node, void *__priv)
 				 nodeToString(altfn_proj));
 		}
 		add_new_column_to_pathtarget(con->target_agg_final, (Expr *)altfn_agg);
+		con->has_aggfuncs = true;
 		return altfn_proj;
 	}
 	/* check whether it is grouping-key expression */
@@ -2125,7 +2127,8 @@ try_add_final_groupby_paths(xpugroupby_build_path_context *con, Path *part_path)
 													con->group_rel,
 													__path,
 													con->target_proj_final);
-		__path = pgstrom_create_dummy_path(con->root, __path);
+		if (con->has_aggfuncs)
+			__path = pgstrom_create_dummy_path(con->root, __path);
 		add_path(con->group_rel, __path);
 	}
 	else if (parse->distinctClause)
@@ -2146,6 +2149,7 @@ try_add_final_groupby_paths(xpugroupby_build_path_context *con, Path *part_path)
 													con->group_rel,
 													__path,
 													con->target_proj_final);
+		Assert(!con->has_aggfuncs);
 		add_path(con->group_rel, __path);
 	}
 	else
@@ -2165,7 +2169,8 @@ try_add_final_groupby_paths(xpugroupby_build_path_context *con, Path *part_path)
 													con->group_rel,
 													__path,
 													con->target_proj_final);
-		__path = pgstrom_create_dummy_path(con->root, __path);
+		if (con->has_aggfuncs)
+			__path = pgstrom_create_dummy_path(con->root, __path);
 		add_path(con->group_rel, __path);
 	}
 }
@@ -2600,8 +2605,11 @@ __try_add_xpupreagg_normal_path(PlannerInfo *root,
 								   &num_groups);
 			__path->pathkeys = __sortkeys_upper;
 		}
-		/* inject dummy path to resolve outer-reference by Aggref or others */
-		__path = pgstrom_create_dummy_path(root, __path);
+		/*
+		 * inject dummy path to resolve outer-references by Aggref
+		 */
+		if (con.has_aggfuncs)
+			__path = pgstrom_create_dummy_path(root, __path);
 		/* add fully-work */
 		add_path(group_rel, __path);
 
