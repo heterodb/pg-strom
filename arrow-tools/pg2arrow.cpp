@@ -218,7 +218,7 @@ palloc0(size_t sz)
 	if (!p)
 		Elog("out of memory");
 	memset(p, 0, sz);
-	return 0;
+	return p;
 }
 
 static inline char *
@@ -2901,6 +2901,7 @@ parse_options(int argc, char * const argv[])
 						Elog("unknown --compress method [%s]", optarg);
 					compression_methods.push_back(comp);
 				}
+				break;
 			case 'h':		/* --host */
 				if (pgsql_hostname)
 					Elog("-h, --host was given twice");
