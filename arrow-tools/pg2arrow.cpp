@@ -1996,6 +1996,11 @@ pgsql_flush_record_batch(pgsqlHandlerVector &pgsql_handlers)
 		if (!rv.ok())
 			Elog("failed on parquet::arrow::FileWriter::WriteRecordBatch: %s",
 				 rv.ToString().c_str());
+		/* flush to the disk */
+		rv = parquet_file_writer->NewBufferedRowGroup();
+		if (!rv.ok())
+			Elog("failed on parquet::arrow::FileWriter::NewBufferedRowGroup: %s",
+				 rv.ToString().c_str());
 	}
 	else
 	{
@@ -2012,13 +2017,25 @@ pgsql_flush_record_batch(pgsqlHandlerVector &pgsql_handlers)
 	/* end critical section */
 	/* print progress */
 	if (shows_progress)
-		printf("%s[%u] nitems=%ld, length=%ld at file offset=%ld\n",
+	{
+		time_t		t = time(NULL);
+		struct tm	tm;
+
+		localtime_r(&t, &tm);
+		printf("%04d-%02d-%02d %02d:%02d:%02d %s[%u] nitems=%ld, length=%ld at file offset=%ld\n",
+			   tm.tm_year + 1900,
+			   tm.tm_mon + 1,
+			   tm.tm_mday,
+			   tm.tm_hour,
+			   tm.tm_min,
+			   tm.tm_sec,
 			   !parquet_mode ? "Record Batch" : "Row Group",
 			   chunk_id,
 			   nrows,
 			   foffset_before.ok() && foffset_after.ok() ?
 			   foffset_after.ValueOrDie() - foffset_before.ValueOrDie() : -1,
 			   foffset_before.ok() ? foffset_before.ValueOrDie() : -1);
+	}
 	/* reset buffers */
 	for (auto cell = pgsql_handlers.begin(); cell != pgsql_handlers.end(); cell++)
 	{
