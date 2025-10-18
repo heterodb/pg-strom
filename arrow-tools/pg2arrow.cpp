@@ -75,8 +75,13 @@ using compressOption = struct compressOption;
 
 struct configOption
 {
-	const char	   *name;
-	const char	   *value;
+	std::string		name;
+	std::string		value;
+	configOption(const char *__name, const char *__value)
+	{
+		name = std::string(__name);
+		value = std::string(__value);
+	}
 };
 using configOption	= struct configOption;
 
@@ -113,7 +118,7 @@ static const char  *dump_schema_filename = NULL;	/* --schema */
 static const char  *dump_schema_tablename = NULL;	/* --schema-name */
 static bool			shows_progress = false;			/* --progress */
 static int			verbose;						/* --verbose */
-static std::vector<configOption>	pgsql_config_options;	/* --set */
+static std::vector<configOption *>	pgsql_config_options;	/* --set */
 
 // ------------------------------------------------
 // Other static variables
@@ -2271,16 +2276,18 @@ pgsql_server_connect(void)
 			 PQerrorMessage(conn));
 
 	/* assign configuration parameters */
-	for (auto conf = pgsql_config_options.begin(); conf != pgsql_config_options.end(); conf++)
+	for (int i=0; i < pgsql_config_options.size(); i++)
 	{
-		std::ostringstream buf;
-
-		buf << "SET " << conf->name << " = '" << conf->value << "'";
-		query = buf.str().c_str();
-		res = PQexec(conn, query);
+		auto	conf = pgsql_config_options[i];
+		char   *temp = (char *)alloca(conf->name.size() +
+									  conf->value.size() + 100);
+		sprintf(temp, "SET %s = '%s'",
+				conf->name.c_str(),
+				conf->value.c_str());
+		res = PQexec(conn, temp);
 		if (PQresultStatus(res) != PGRES_COMMAND_OK)
 			Elog("failed on change parameter by [%s]: %s",
-				 query, PQresultErrorMessage(res));
+				 temp, PQresultErrorMessage(res));
 		PQclear(res);
 	}
 	/*
@@ -2969,13 +2976,13 @@ parse_options(int argc, char * const argv[])
 			case 1007:		/* --set */
 				{
 					char   *pos = strchr(optarg, ':');
-					configOption config;
+					configOption *config;
 
 					if (!pos)
 						Elog("config option must be --set=KEY:VALUE form");
 					*pos++ = '\0';
-					config.name  = __trim(optarg);
-					config.value = __trim(pos);
+					config = new configOption(__trim(optarg),
+											  __trim(pos));
 					pgsql_config_options.push_back(config);
 				}
 				break;
