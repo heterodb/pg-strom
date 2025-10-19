@@ -1,0 +1,69 @@
+--
+-- arrow_utils - test for pg2arrow
+--
+\t on
+SET pg_strom.regression_test_mode=on;
+SET client_min_messages = error;
+DROP SCHEMA IF EXISTS regtest_arrow_utils_temp CASCADE;
+CREATE SCHEMA regtest_arrow_utils_temp;
+RESET client_min_messages;
+SET search_path = regtest_arrow_utils_temp,public;
+CREATE TYPE comp AS (
+  a     int,
+  b     numeric(12,4),
+  c     text,
+  d     timestamp
+);
+CREATE TYPE city AS ENUM ('Tokyo','Osaka','Kyoto','Yokohama','Nagoya');
+CREATE TABLE tt_1 (
+  id    int,
+  i2    smallint,
+  i4    int,
+  i8    bigint,
+  f2    float2,
+  f4    float4,
+  f8    float8,
+  c     comp,
+  num   numeric(16,4)
+);
+CREATE TABLE tt_2 (
+  id    int,
+  v1    text,
+  v2    bytea,
+  dt    date,
+  tm    time,
+  ts    timestamp,
+  tz    timestamp with time zone  
+);
+--
+-- Test of basic feature 1
+--
+SELECT pgstrom.random_setseed(20200211);
+ 
+
+INSERT INTO tt_1 (
+  SELECT x, pgstrom.random_int(1,   -32000,    32000),
+            pgstrom.random_int(1, -3200000,  3200000),
+            pgstrom.random_int(1, -3200000,  3200000),
+            pgstrom.random_float(1,   -10000.0,    10000.0),
+            pgstrom.random_float(1,  -100000.0,   100000.0),
+            pgstrom.random_float(1, -1000000.0,  1000000.0),
+            null,
+           pgstrom.random_float(1, -1000000.0,  1000000.0)
+    FROM generate_series(1,2500) x);
+UPDATE tt_1 SET c.a = pgstrom.random_int(2, -3200000,  3200000),
+                c.b = pgstrom.random_float(2, -100000.0, 100000.0),
+                c.c = pgstrom.random_text_len(2, 40),
+                c.d = pgstrom.random_timestamp(2);
+\! $PG2ARROW_CMD -c 'SELECT * FROM regtest_arrow_utils_temp.tt_1' -o $ARROW_TEST_DATA_DIR/test_pg2arrow_tt1.arrow
+[ERROR] Decimal128 cannot map NaN, +Inf or -Inf in PostgreSQL Numeric
+pg2arrow: opened the output file '/home/onishi/pg-strom/test/data/test_pg2arrow_tt1.arrow'
+\set test_pg2arrow_tt1_path `echo -n $ARROW_TEST_DATA_DIR/test_pg2arrow_tt1.arrow` 
+IMPORT FOREIGN SCHEMA ft_1
+  FROM SERVER arrow_fdw
+  INTO regtest_arrow_utils_temp
+OPTIONS (file :'test_pg2arrow_tt1_path');
+server closed the connection unexpectedly
+	This probably means the server terminated abnormally
+	before or while processing the request.
+connection to server was lost

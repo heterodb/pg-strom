@@ -1,0 +1,538 @@
+---
+--- Misc tests according to issues
+---
+SET pg_strom.regression_test_mode = on;
+SET client_min_messages = error;
+DROP SCHEMA IF EXISTS regtest_miscs CASCADE;
+CREATE SCHEMA regtest_miscs;
+SET search_path = regtest_miscs,public;
+SET pg_strom.enabled=on;
+SET enable_seqscan=0;
+-- #624
+CREATE TABLE t1(c0 money , c1 money);
+INSERT INTO t1(c0, c1) VALUES(1, 1);
+EXPLAIN(costs off, verbose)
+SELECT SUM(t1.c1) FROM t1;
+                   QUERY PLAN                    
+-------------------------------------------------
+ Custom Scan (GpuPreAgg) on regtest_miscs.t1
+   Output: pgstrom.fsum_cach((pgstrom.psum(c1)))
+   GPU Projection: pgstrom.psum(t1.c1)
+   GPU Group Key: 
+(4 rows)
+
+SELECT SUM(t1.c1) FROM t1;
+ERROR:  type with OID 0 does not exist
+-- #625
+DROP TABLE IF EXISTS t0;
+DROP TABLE IF EXISTS t1;
+CREATE TABLE t0(c0 int , c1 int);
+INSERT INTO t0(c0, c1) VALUES(0, 1);
+CREATE TABLE t1(LIKE t0);
+ALTER TABLE t0 DROP c1;
+EXPLAIN(costs off, verbose)
+SELECT * FROM t1 LEFT OUTER JOIN t0 ON (t1.c0 = t1.c1);
+                    QUERY PLAN                     
+---------------------------------------------------
+ Custom Scan (GpuJoin) on regtest_miscs.t0
+   Output: t1.c0, t1.c1, t0.c0
+   GPU Projection: t1.c0, t1.c1, t0.c0
+   GPU Right Outer Join Quals [1]: (t1.c0 = t1.c1)
+   ->  Seq Scan on regtest_miscs.t1
+         Disabled: true
+         Output: t1.c0, t1.c1
+(7 rows)
+
+SELECT * FROM t1 LEFT OUTER JOIN t0 ON (t1.c0 = t1.c1);
+ c0 | c1 | c0 
+----+----+----
+(0 rows)
+
+-- #626
+DROP TABLE IF EXISTS t1;
+DROP TABLE IF EXISTS t2;
+CREATE TABLE t1(c0 INT);
+CREATE TABLE t2(LIKE t1);
+INSERT INTO t2(c0) VALUES(1);
+INSERT INTO t1(c0) VALUES(1);
+EXPLAIN(costs off, verbose)
+SELECT t2.c0 FROM t1 RIGHT OUTER JOIN t2 ON ((CAST(0.1 AS MONEY)) IN (CAST(0.1 AS MONEY)));
+                  QUERY PLAN                  
+----------------------------------------------
+ Nested Loop Left Join
+   Output: t2.c0
+   Join Filter: ((0.1)::money = (0.1)::money)
+   ->  Seq Scan on regtest_miscs.t2
+         Disabled: true
+         Output: t2.c0
+   ->  Materialize
+         ->  Seq Scan on regtest_miscs.t1
+               Disabled: true
+(9 rows)
+
+SELECT t2.c0 FROM t1 RIGHT OUTER JOIN t2 ON ((CAST(0.1 AS MONEY)) IN (CAST(0.1 AS MONEY)));
+ c0 
+----
+  1
+(1 row)
+
+-- #627
+DROP TABLE IF EXISTS t1;
+DROP TABLE IF EXISTS t2;
+CREATE TABLE t1(c0 INT);
+CREATE TABLE t2(LIKE t1);
+INSERT INTO t2(c0) VALUES(1);
+INSERT INTO t1(c0) VALUES(1);
+EXPLAIN(costs off, verbose)
+SELECT t2 FROM t1 RIGHT OUTER JOIN t2 ON ((CAST(0.1 AS MONEY)) IN (CAST(0.1 AS MONEY)));
+                  QUERY PLAN                  
+----------------------------------------------
+ Nested Loop Left Join
+   Output: t2.*
+   Join Filter: ((0.1)::money = (0.1)::money)
+   ->  Seq Scan on regtest_miscs.t2
+         Disabled: true
+         Output: t2.*
+   ->  Materialize
+         ->  Seq Scan on regtest_miscs.t1
+               Disabled: true
+(9 rows)
+
+SELECT t2 FROM t1 RIGHT OUTER JOIN t2 ON ((CAST(0.1 AS MONEY)) IN (CAST(0.1 AS MONEY)));
+ t2  
+-----
+ (1)
+(1 row)
+
+-- #628
+DROP TABLE IF EXISTS t1;
+DROP TABLE IF EXISTS t2;
+CREATE TABLE t1(c0 INT);
+CREATE TABLE t2(LIKE t1);
+INSERT INTO t2(c0) VALUES(1);
+INSERT INTO t1(c0) VALUES(1);
+EXPLAIN(costs off, verbose)
+SELECT t1.c0 FROM t1 RIGHT OUTER JOIN t2 ON ((CAST(0.1 AS MONEY)) NOT IN (CAST(0.1 AS MONEY)));
+                  QUERY PLAN                   
+-----------------------------------------------
+ Nested Loop Left Join
+   Output: t1.c0
+   Join Filter: ((0.1)::money <> (0.1)::money)
+   ->  Seq Scan on regtest_miscs.t2
+         Disabled: true
+         Output: t2.c0
+   ->  Materialize
+         Output: t1.c0
+         ->  Seq Scan on regtest_miscs.t1
+               Disabled: true
+               Output: t1.c0
+(11 rows)
+
+SELECT t1.c0 FROM t1 RIGHT OUTER JOIN t2 ON ((CAST(0.1 AS MONEY)) NOT IN (CAST(0.1 AS MONEY)));
+ c0 
+----
+   
+(1 row)
+
+-- #630
+DROP TABLE IF EXISTS t0;
+DROP TABLE IF EXISTS t1;
+CREATE TABLE t0(c0 money , c1 boolean);
+CREATE TABLE t1(LIKE t0);
+INSERT INTO t0(c0, c1) VALUES((1)::MONEY, TRUE);
+INSERT INTO t1(c0, c1) VALUES((1)::MONEY, TRUE);
+EXPLAIN(costs off, verbose)
+SELECT SUM(t1.c0) FROM t1 LEFT OUTER JOIN t0 ON ((t0.c0)IS DISTINCT FROM(CAST(1.0E1 AS MONEY))) WHERE (t0.c1) IS NULL;
+                            QUERY PLAN                             
+-------------------------------------------------------------------
+ Custom Scan (GpuPreAgg) on regtest_miscs.t0
+   Output: pgstrom.fsum_cach((pgstrom.psum(t1.c0)))
+   GPU Projection: pgstrom.psum(t1.c0)
+   GPU Scan Quals: (t0.c0 IS DISTINCT FROM ('10'::numeric)::money)
+   GPU Right Outer Join Quals [1]: [(t0.c1 IS NULL)]
+   GPU Group Key: 
+   ->  Seq Scan on regtest_miscs.t1
+         Disabled: true
+         Output: t1.c0
+(9 rows)
+
+SELECT SUM(t1.c0) FROM t1 LEFT OUTER JOIN t0 ON ((t0.c0)IS DISTINCT FROM(CAST(1.0E1 AS MONEY))) WHERE (t0.c1) IS NULL;
+ERROR:  type with OID 0 does not exist
+-- #631
+DROP TABLE IF EXISTS t0;
+DROP TABLE IF EXISTS t1;
+create table t0 (
+"c0" bigint ,
+"c1" float ,
+"c2" decimal(40, 20) 
+);
+insert into t0 values (0.1,1,0.1);
+create table t1 (
+"c0" bigint ,
+"c1" float ,
+"c2" decimal(40, 20) 
+);
+insert into t1 values (0.1,1,0.1);
+EXPLAIN(costs off, verbose)
+WITH MYWITH AS (SELECT 1 AS f1
+   FROM  (SELECT "c2" AS f6 FROM t0) AS t1 
+    INNER JOIN  (SELECT "c1" AS f5 FROM t1) AS t2  
+    ON (( ((f5)  IN (f6))) AND ((1 > ((f6)::bigint >> 5)) IS FALSE)))
+SELECT * FROM MYWITH;
+                        QUERY PLAN                         
+-----------------------------------------------------------
+ Custom Scan (GpuJoin) on regtest_miscs.t0
+   Output: 1
+   GPU Projection: 
+   GPU Scan Quals: ((1 > ((t0.c2)::bigint >> 5)) IS FALSE)
+   GPU Join Quals [1]: ((t0.c2)::double precision = t1.c1)
+   GPU Outer Hash [1]: (t0.c2)::double precision
+   GPU Inner Hash [1]: t1.c1
+   ->  Seq Scan on regtest_miscs.t1
+         Disabled: true
+         Output: t1.c1
+(10 rows)
+
+WITH MYWITH AS (SELECT 1 AS f1
+   FROM  (SELECT "c2" AS f6 FROM t0) AS t1 
+    INNER JOIN  (SELECT "c1" AS f5 FROM t1) AS t2  
+    ON (( ((f5)  IN (f6))) AND ((1 > ((f6)::bigint >> 5)) IS FALSE)))
+SELECT * FROM MYWITH;
+ f1 
+----
+(0 rows)
+
+-- #632
+DROP TABLE IF EXISTS t0;
+create table t0 (c1 float, c2 decimal(40, 20));
+insert into t0 values (1,0.1);
+SELECT * FROM
+        (SELECT c2 AS f1,
+                c1 AS f2
+         FROM t0) AS t3
+      WHERE((f2) IN (f2, 1))
+        AND (NOT (f1 = ALL
+                    (SELECT c2
+                     FROM t0)));
+ f1 | f2 
+----+----
+(0 rows)
+
+-- #633
+DROP TABLE IF EXISTS t0;
+CREATE TABLE t0(c0 INT );
+INSERT INTO t0(c0) VALUES(1);
+SELECT AVG(0.1) FROM t0 GROUP BY t0.c0;
+ERROR:  type with OID 0 does not exist
+-- #634
+DROP TABLE IF EXISTS t1;
+DROP TABLE IF EXISTS t2;
+CREATE TABLE t1(c0 int);
+CREATE TABLE t2(LIKE t1);
+INSERT INTO t1(c0) VALUES(1);
+INSERT INTO t2(c0) VALUES(1);
+SELECT MIN(t2.c0)
+FROM t2
+LEFT OUTER JOIN
+    (SELECT c0 FROM t1) AS sub0 
+        ON (t2.c0 > 0) 
+GROUP BY (t2.c0)
+HAVING BOOL_AND(TRUE);
+ min 
+-----
+   1
+(1 row)
+
+-- #635
+DROP TABLE IF EXISTS t0;
+CREATE TABLE t0(c0 int , c1 int );
+INSERT INTO t0(c0, c1) VALUES(1, 1);
+SELECT MIN(c0) FROM t0 GROUP BY t0.c0 HAVING CAST((MIN('1')) AS BOOLEAN);
+ min 
+-----
+   1
+(1 row)
+
+-- #636
+DROP TABLE IF EXISTS t0;
+CREATE TABLE t0(c0 INT , c1 INT  PRIMARY KEY );
+INSERT INTO t0(c1, c0) VALUES(1, 1);
+SELECT MAX(c0) FROM t0 GROUP BY t0.c1 HAVING t0.c0<MIN(t0.c0);
+ max 
+-----
+(0 rows)
+
+-- #637
+DROP TABLE IF EXISTS t1;
+CREATE TABLE t1(c0 int) USING heap;
+INSERT INTO t1(c0) VALUES(1);
+SELECT c0 FROM t1 GROUP BY t1.c0 HAVING NOT (MIN(65536))::BOOLEAN;
+ERROR:  type with OID 0 does not exist
+-- #638
+DROP TABLE IF EXISTS t1;
+CREATE TABLE t1(c0 int) USING heap;
+INSERT INTO t1(c0) VALUES(1);
+SELECT MIN(1) FROM t1 GROUP BY t1.c0 HAVING NOT (MIN(1))::BOOLEAN;
+ERROR:  type with OID 0 does not exist
+-- #639
+DROP TABLE IF EXISTS t1;
+DROP TABLE IF EXISTS t2;
+CREATE TABLE t1(c0 int);
+CREATE TABLE t2(LIKE t1);
+INSERT INTO t1(c0) VALUES(1);
+INSERT INTO t2(c0) VALUES(1);
+SELECT MIN(t2.c0)
+FROM t2
+LEFT OUTER JOIN
+    (SELECT c0 FROM t1) AS sub0 
+        ON t2.c0 > 0 
+GROUP BY (t2.c0)
+HAVING TRUE;
+ min 
+-----
+   1
+(1 row)
+
+-- #642
+DROP TABLE IF EXISTS t1;
+DROP TABLE IF EXISTS t2;
+CREATE TABLE t1(c0 int);
+CREATE TABLE t2(LIKE t1);
+INSERT INTO t1(c0) VALUES(1);
+INSERT INTO t2(c0) VALUES(1);
+SELECT MIN(t2.c0)
+FROM t2
+LEFT OUTER JOIN
+    (SELECT c0 FROM t1) AS sub0 
+        ON t2.c0 > 0 
+GROUP BY (t2.c0)
+HAVING TRUE;
+ min 
+-----
+   1
+(1 row)
+
+-- #643
+DROP TABLE IF EXISTS t0;
+DROP TABLE IF EXISTS t1;
+CREATE TABLE t0(c0 int, UNIQUE(c0));
+CREATE TABLE t1(LIKE t0);
+INSERT INTO t0 VALUES(1);
+INSERT INTO t1 VALUES(1);
+SELECT * FROM t0 LEFT OUTER JOIN t1 ON FALSE CROSS JOIN (SELECT * FROM t0, t1 WHERE TRUE ORDER BY t0.c0 ASC, t1.c0 DESC) AS sub;
+ c0 | c0 | c0 | c0 
+----+----+----+----
+  1 |    |  1 |  1
+(1 row)
+
+-- #644
+DROP TABLE IF EXISTS t0;
+DROP TABLE IF EXISTS t1;
+CREATE TABLE t0(c0 DECIMAL) ;
+CREATE TABLE t1(LIKE t0);
+INSERT INTO t0(c0) VALUES(NULL);
+INSERT INTO t1(c0) VALUES(NULL);
+SELECT * FROM t0 RIGHT OUTER JOIN t1 ON ((t1.c0)::INT) IS NULL;
+ c0 | c0 
+----+----
+    |   
+(1 row)
+
+-- #645
+DROP TABLE IF EXISTS t1;
+DROP TABLE IF EXISTS t3;
+CREATE TABLE t1(c0 int);
+CREATE TABLE t3(LIKE t1);
+INSERT INTO t1(c0) VALUES(1);
+INSERT INTO t3(c0) VALUES(1);
+SELECT (((t1.c0) BETWEEN SYMMETRIC 0 AND 1)OR(((0.1)::MONEY) IN (CAST(0.1 AS MONEY), CAST(0.0 AS MONEY)))) FROM t1, t3 WHERE (t1.c0) BETWEEN SYMMETRIC (0) AND (t3.c0);
+ERROR:  type with OID 0 does not exist
+-- #646
+DROP TABLE IF EXISTS t1;
+DROP TABLE IF EXISTS t2;
+DROP TABLE IF EXISTS t3;
+CREATE TABLE t1(c0 CHAR, c1 DECIMAL);
+CREATE TABLE t2(LIKE t1);
+CREATE TABLE t3(LIKE t1);
+INSERT INTO t3(c0, c1) VALUES(B'1', 0.5);
+INSERT INTO t2(c0, c1) VALUES(B'1', 0.7);
+INSERT INTO t1(c0) VALUES(B'1');
+SELECT ('[0,1)'::int4range), (t1.c1)::INT FROM t1, t2, t3 WHERE ((t3.c1)!=(t2.c1));
+ERROR:  type with OID 0 does not exist
+-- #647
+DROP TABLE IF EXISTS t0;
+DROP TABLE IF EXISTS t1;
+CREATE TABLE t0(c0 int , c1 int);
+CREATE TABLE t1(LIKE t0);
+INSERT INTO t0(c0, c1) VALUES(1, 0), (1, 0);
+INSERT INTO t1(c0, c1) VALUES(1, 0);
+SELECT * FROM t1, t0 WHERE ((t1.c1) IS NOT DISTINCT FROM (t0.c1)) IS TRUE;
+ c0 | c1 | c0 | c1 
+----+----+----+----
+  1 |  0 |  1 |  0
+  1 |  0 |  1 |  0
+(2 rows)
+
+-- #648
+DROP TABLE IF EXISTS t1;
+DROP TABLE IF EXISTS t2;
+CREATE TABLE t1(c0 money , c1 int4range);
+CREATE TABLE t2(LIKE t1);
+INSERT INTO t1(c0, c1) VALUES(CAST(0.5 AS MONEY), ('[0,1]'::int4range));
+INSERT INTO t2(c1, c0) VALUES('[0,1]'::int4range, (0.7)::MONEY);
+EXPLAIN(costs off, verbose)
+SELECT t1.c0 FROM t2, t1 WHERE (t2.c0) BETWEEN SYMMETRIC (t1.c0) AND ((0.9)::MONEY);
+                                                        QUERY PLAN                                                        
+--------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuJoin) on regtest_miscs.t2
+   Output: t1.c0
+   GPU Projection: t1.c0
+   GPU Scan Quals: ((t2.c0 <= (0.9)::money) OR (t2.c0 >= (0.9)::money))
+   GPU Join Quals [1]: (((t2.c0 >= t1.c0) AND (t2.c0 <= (0.9)::money)) OR ((t2.c0 >= (0.9)::money) AND (t2.c0 <= t1.c0)))
+   ->  Seq Scan on regtest_miscs.t1
+         Disabled: true
+         Output: t1.c0
+(8 rows)
+
+SELECT t1.c0 FROM t2, t1 WHERE (t2.c0) BETWEEN SYMMETRIC (t1.c0) AND ((0.9)::MONEY);
+ERROR:  type with OID 0 does not exist
+-- #649
+DROP TABLE IF EXISTS t0;
+DROP TABLE IF EXISTS t1;
+CREATE TABLE t0(c0 money);
+CREATE TABLE t1(LIKE t0);
+VACUUM FREEZE ANALYZE t1(c0);
+INSERT INTO t1(c0) VALUES((0.1)::MONEY);
+INSERT INTO t0(c0) VALUES((0.1)::MONEY);
+EXPLAIN(costs off, verbose)
+SELECT * FROM t1, t0 WHERE (t0.c0) BETWEEN (t1.c0) AND (CAST(0.8 AS MONEY));
+                QUERY PLAN                 
+-------------------------------------------
+ Custom Scan (GpuJoin) on regtest_miscs.t0
+   Output: t1.c0, t0.c0
+   GPU Projection: t1.c0, t0.c0
+   GPU Scan Quals: (t0.c0 <= (0.8)::money)
+   GPU Join Quals [1]: (t0.c0 >= t1.c0)
+   ->  Seq Scan on regtest_miscs.t1
+         Disabled: true
+         Output: t1.c0
+(8 rows)
+
+SELECT * FROM t1, t0 WHERE (t0.c0) BETWEEN (t1.c0) AND (CAST(0.8 AS MONEY));
+  c0   |  c0   
+-------+-------
+ $0.10 | $0.10
+(1 row)
+
+-- #650
+DROP TABLE IF EXISTS t0;
+DROP TABLE IF EXISTS t1;
+CREATE TABLE t0(c0 REAL);
+CREATE TABLE t1(c0 boolean);
+INSERT INTO t1(c0) VALUES(null);
+INSERT INTO t0(c0) VALUES(0.1);
+EXPLAIN(costs off, verbose)
+SELECT * FROM t0,t1 WHERE ((t0.c0)::INT IS NOT DISTINCT FROM (t0.c0)) OR (t1.c0);
+                                              QUERY PLAN                                              
+------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuJoin) on regtest_miscs.t1
+   Output: t0.c0, t1.c0
+   GPU Projection: t0.c0, t1.c0
+   GPU Join Quals [1]: ((NOT (((t0.c0)::integer)::double precision IS DISTINCT FROM t0.c0)) OR t1.c0)
+   ->  Seq Scan on regtest_miscs.t0
+         Disabled: true
+         Output: t0.c0
+(7 rows)
+
+SELECT * FROM t0,t1 WHERE ((t0.c0)::INT IS NOT DISTINCT FROM (t0.c0)) OR (t1.c0);
+ c0 | c0 
+----+----
+(0 rows)
+
+-- #679
+DROP TABLE IF EXISTS t0;
+DROP TABLE IF EXISTS t1;
+CREATE TABLE t0(c0 serial CHECK(true) NO INHERIT UNIQUE PRIMARY KEY) ;
+CREATE TABLE t1(LIKE t0);
+INSERT INTO t0(c0) VALUES(1);
+INSERT INTO t1(c0) VALUES(1);
+EXPLAIN(costs off, verbose)
+SELECT * FROM t0 RIGHT OUTER JOIN (SELECT * FROM t1, t0 ORDER BY t0.c0 DESC, t1.c0 DESC) AS sub0 ON FALSE;
+                                  QUERY PLAN                                  
+------------------------------------------------------------------------------
+ Nested Loop Left Join
+   Output: c0, t1.c0, t0.c0
+   Join Filter: false
+   ->  Incremental Sort
+         Output: t1.c0, t0.c0
+         Sort Key: t0.c0 DESC, t1.c0 DESC
+         Presorted Key: t0.c0
+         ->  Nested Loop
+               Output: t1.c0, t0.c0
+               ->  Index Only Scan Backward using t0_pkey on regtest_miscs.t0
+                     Output: t0.c0
+               ->  Materialize
+                     Output: t1.c0
+                     ->  Seq Scan on regtest_miscs.t1
+                           Disabled: true
+                           Output: t1.c0
+   ->  Result
+         Output: c0
+         One-Time Filter: false
+(19 rows)
+
+SELECT * FROM t0 RIGHT OUTER JOIN (SELECT * FROM t1, t0 ORDER BY t0.c0 DESC, t1.c0 DESC) AS sub0 ON FALSE;
+ c0 | c0 | c0 
+----+----+----
+    |  1 |  1
+(1 row)
+
+-- #680
+DROP TABLE IF EXISTS t0;
+DROP TABLE IF EXISTS t1;
+CREATE TABLE t0(c0 money, c1 BIT, c2 inet);
+CREATE TABLE IF NOT EXISTS t1(LIKE t0);
+INSERT INTO t1(c2, c0) VALUES('45.143.62.35', (1.0)::MONEY);
+INSERT INTO t0(c1, c0, c2) VALUES('B1', CAST(0.5 AS MONEY), '83.157.203.154');
+EXPLAIN(costs off, verbose)
+SELECT t1.c1, t0.c2 FROM t1 FULL OUTER JOIN t0 ON (t0.c2) IN (t1.c2) WHERE ((t0.c0) IN ((0.1)::MONEY)) ISNULL;
+                                      QUERY PLAN                                      
+--------------------------------------------------------------------------------------
+ Custom Scan (GpuJoin) on regtest_miscs.t1
+   Output: t1.c1, t0.c2
+   GPU Projection: t1.c1, t0.c2
+   GPU Full Outer Join Quals [1]: (t0.c2 = t1.c2), [((t0.c0 = (0.1)::money) IS NULL)]
+   GPU Outer Hash [1]: t1.c2
+   GPU Inner Hash [1]: t0.c2
+   ->  Seq Scan on regtest_miscs.t0
+         Disabled: true
+         Output: t0.c2, t0.c0
+(9 rows)
+
+SELECT t1.c1, t0.c2 FROM t1 FULL OUTER JOIN t0 ON (t0.c2) IN (t1.c2) WHERE ((t0.c0) IN ((0.1)::MONEY)) ISNULL;
+ERROR:  type with OID 0 does not exist
+-- #683
+DROP TABLE IF EXISTS t2;
+DROP TABLE IF EXISTS t3;
+CREATE TABLE t2(c0 bigint);
+CREATE TABLE t3(LIKE t2);
+INSERT INTO t3(c0) VALUES(33092);
+EXPLAIN(costs off, verbose)
+SELECT DISTINCT ON (t3.c0 + 1) t3.c0 FROM t3 FULL OUTER JOIN t2 ON (t2.c0) IN (t3.c0);
+                    QUERY PLAN                    
+--------------------------------------------------
+ Custom Scan (GpuPreAgg) on regtest_miscs.t3
+   Output: t3.c0, ((t3.c0 + 1))
+   GPU Projection: t3.c0, (t3.c0 + 1)
+   GPU Full Outer Join Quals [1]: (t2.c0 = t3.c0)
+   GPU Outer Hash [1]: t3.c0
+   GPU Inner Hash [1]: t2.c0
+   GPU Group Key: (t3.c0 + 1)
+   ->  Seq Scan on regtest_miscs.t2
+         Disabled: true
+         Output: t2.c0
+(10 rows)
+
+SELECT DISTINCT ON (t3.c0 + 1) t3.c0 FROM t3 FULL OUTER JOIN t2 ON (t2.c0) IN (t3.c0);
+ERROR:  type with OID 0 does not exist
+DROP SCHEMA regtest_miscs CASCADE;

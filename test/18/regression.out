@@ -1,0 +1,29 @@
+# using postmaster on Unix socket, port 5433
+ok 1         - pgstrom_init                                7 ms
+ok 2         - pgstrom_guc                                 6 ms
+# parallel group (7 tests):  additional_dtype dtype_text dtype_time dtype_numeric dtype_int dtype_jsonb dtype_float
+not ok 3     + dtype_int                                3729 ms
+not ok 4     + dtype_float                             23054 ms
+not ok 5     + dtype_numeric                            3653 ms
+not ok 6     + dtype_time                               2952 ms
+not ok 7     + dtype_text                               2843 ms
+not ok 8     + dtype_jsonb                              5687 ms
+ok 9         + additional_dtype                          385 ms
+# parallel group (4 tests):  dexpr_scalar_array_op dfunc_math dfunc_mbtext dexpr_misc
+not ok 10    + dfunc_math                               2651 ms
+ok 11        + dfunc_mbtext                             2787 ms
+not ok 12    + dexpr_scalar_array_op                     361 ms
+not ok 13    + dexpr_misc                               9742 ms
+# parallel group (4 tests):  arrow_python_data arrow_utils arrow_cpu arrow_index
+not ok 14    + arrow_cpu                                 766 ms
+not ok 15    + arrow_utils                               548 ms
+# (test process exited with exit code 2)
+not ok 16    + arrow_index                              3952 ms
+ok 17        + arrow_python_data                         155 ms
+not ok 18    - gpu_cache                                1992 ms
+not ok 19    - misc                                     1279 ms
+not ok 20    - gpu_sort                                 2204 ms
+1..20
+# 15 of 20 tests failed.
+# The differences that caused some tests to fail can be viewed in the file "/home/onishi/pg-strom/test/18/regression.diffs".
+# A copy of the test summary that you see above is saved in the file "/home/onishi/pg-strom/test/18/regression.out".
