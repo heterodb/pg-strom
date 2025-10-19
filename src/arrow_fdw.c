@@ -117,7 +117,7 @@ struct ArrowFdwState
 	pg_atomic_uint32	__rbatch_nload_local;	/* if single process */
 	pg_atomic_uint32   *rbatch_nskip;
 	pg_atomic_uint32	__rbatch_nskip_local;	/* if single process */
-	StringInfoData		chunk_buffer;	/* buffer to load record-batch */
+	LargeStringInfoData	chunk_buffer;	/* buffer to load record-batch */
 	File				curr_filp;		/* current arrow file to read */
 	kern_data_store	   *curr_kds;		/* current chunk to read */
 	uint32_t			curr_index;		/* current index on the chunk */
@@ -3626,7 +3626,7 @@ __arrowKdsAssignVirtualColumns(kern_data_store *kds,
 							   kern_colmeta *cmeta,
 							   bool virtual_isnull,
 							   Datum virtual_datum,
-							   StringInfo chunk_buffer)
+							   LargeStringInfo chunk_buffer)
 {
 	if (virtual_isnull)
 	{
@@ -3639,27 +3639,27 @@ __arrowKdsAssignVirtualColumns(kern_data_store *kds,
 								 chunk_buffer->len - (char *)kds);
 		if (cmeta->attbyval)
 		{
-			appendBinaryStringInfo(chunk_buffer,
-								   (char *)&virtual_datum,
-								   cmeta->attlen);
+			appendBinaryLargeStringInfo(chunk_buffer,
+										(char *)&virtual_datum,
+										cmeta->attlen);
 		}
 		else if (cmeta->attlen > 0)
 		{
-			appendBinaryStringInfo(chunk_buffer,
-								   DatumGetPointer(virtual_datum),
-								   cmeta->attlen);
+			appendBinaryLargeStringInfo(chunk_buffer,
+										DatumGetPointer(virtual_datum),
+										cmeta->attlen);
 		}
 		else if (cmeta->attlen == -1)
 		{
-			appendBinaryStringInfo(chunk_buffer,
-								   DatumGetPointer(virtual_datum),
-								   VARSIZE_ANY(virtual_datum));
+			appendBinaryLargeStringInfo(chunk_buffer,
+										DatumGetPointer(virtual_datum),
+										VARSIZE_ANY(virtual_datum));
 		}
 		else
 		{
 			elog(ERROR, "unknown type length: %d", cmeta->attlen);
 		}
-		__appendZeroStringInfo(chunk_buffer, 0);
+		appendZeroLargeStringInfo(chunk_buffer, 0);
 	}
 }
 
@@ -3667,7 +3667,7 @@ static kern_data_store *
 __arrowFdwSetupKDSHead(Relation relation,
 					   Bitmapset *referenced,
 					   RecordBatchState *rb_state,
-					   StringInfo chunk_buffer)
+					   LargeStringInfo chunk_buffer)
 {
 	ArrowFileState *af_state = rb_state->af_state;
 	TupleDesc	tupdesc = RelationGetDescr(relation);
@@ -3686,7 +3686,7 @@ __arrowFdwSetupKDSHead(Relation relation,
 		kds_format = KDS_FORMAT_PARQUET;
 
 	/* setup KDS and I/O-vector */
-	enlargeStringInfo(chunk_buffer, estimate_kern_data_store(tupdesc));
+	enlargeLargeStringInfo(chunk_buffer, estimate_kern_data_store(tupdesc));
 	kds = (kern_data_store *)(chunk_buffer->data + head_off);
 	setup_kern_data_store(kds, tupdesc, 0, kds_format);
 	kds->nitems = rb_state->rb_nitems;
@@ -3752,7 +3752,7 @@ static inline strom_io_vector *
 arrowFdwLoadRecordBatch(Relation relation,
 						Bitmapset *referenced,
 						RecordBatchState *rb_state,
-						StringInfo chunk_buffer)
+						LargeStringInfo chunk_buffer)
 {
 	kern_data_store *kds = __arrowFdwSetupKDSHead(relation,
 												  referenced,
@@ -3765,7 +3765,7 @@ static kern_data_store *
 arrowFdwFillupRecordBatch(Relation relation,
 						  Bitmapset *referenced,
 						  RecordBatchState *rb_state,
-						  StringInfo chunk_buffer)
+						  LargeStringInfo chunk_buffer)
 {
 	ArrowFileState	*af_state = rb_state->af_state;
 	kern_data_store	*kds;
@@ -3773,13 +3773,13 @@ arrowFdwFillupRecordBatch(Relation relation,
 	char	   *base;
 	File		filp;
 
-	resetStringInfo(chunk_buffer);
+	resetLargeStringInfo(chunk_buffer);
 	iovec = arrowFdwLoadRecordBatch(relation,
 									referenced,
 									rb_state,
 									chunk_buffer);
 	kds = (kern_data_store *)chunk_buffer->data;
-	enlargeStringInfo(chunk_buffer, kds->length);
+	enlargeLargeStringInfo(chunk_buffer, kds->length);
 	kds = (kern_data_store *)chunk_buffer->data;
 	filp = PathNameOpenFile(af_state->filename, O_RDONLY | PG_BINARY);
 	base = (char *)kds + KDS_HEAD_LENGTH(kds) + kds->arrow_virtual_usage;
@@ -3837,12 +3837,12 @@ arrowFdwFillupRecordBatch(Relation relation,
 static void *
 __parquetFillupAllocBuffer(void *__priv, size_t sz)
 {
-	StringInfo	buf = __priv;
+	LargeStringInfo buf = __priv;
 	void	   *result;
 
 	PG_TRY();
 	{
-		enlargeStringInfo(buf, sz);
+		enlargeLargeStringInfo(buf, sz);
 		result = buf->data + buf->len;
 	}
 	PG_CATCH();
@@ -3860,21 +3860,21 @@ static kern_data_store *
 parquetFillupRowGroup(Relation relation,
 					  Bitmapset *referenced,
 					  RecordBatchState *rb_state,
-					  StringInfo chunk_buffer)
+					  LargeStringInfo chunk_buffer)
 {
 	kern_data_store *kds_head;
 	kern_data_store *kds;
 	const char		*error_message = NULL;
 
 	/* prepare the KDS buffer */
-	resetStringInfo(chunk_buffer);
+	resetLargeStringInfo(chunk_buffer);
 	__arrowFdwSetupKDSHead(relation, referenced, rb_state, chunk_buffer);
 	kds_head = alloca(chunk_buffer->len);
 	memcpy(kds_head, chunk_buffer->data, chunk_buffer->len);
 	Assert(kds_head->format == KDS_FORMAT_PARQUET);
 
 	/* read a row-group of the Parquet file */
-	resetStringInfo(chunk_buffer);
+	resetLargeStringInfo(chunk_buffer);
 	kds = parquetReadOneRowGroup(rb_state->af_state->filename,
 								 kds_head,
 								 __parquetFillupAllocBuffer, chunk_buffer,
@@ -4887,7 +4887,7 @@ __arrowFdwExecInit(ScanState *ss,
 	arrow_state->rbatch_index = &arrow_state->__rbatch_index_local;
 	arrow_state->rbatch_nload = &arrow_state->__rbatch_nload_local;
 	arrow_state->rbatch_nskip = &arrow_state->__rbatch_nskip_local;
-	initStringInfo(&arrow_state->chunk_buffer);
+	initLargeStringInfo(&arrow_state->chunk_buffer);
 	arrow_state->curr_filp  = -1;
 	arrow_state->curr_kds   = NULL;
 	arrow_state->curr_index = 0;
@@ -5017,7 +5017,7 @@ pgstromScanChunkArrowFdw(pgstromTaskState *pts,
 						 struct iovec *xcmd_iov, int *xcmd_iovcnt)
 {
 	ArrowFdwState  *arrow_state = pts->arrow_state;
-	StringInfo		chunk_buffer = &arrow_state->chunk_buffer;
+	LargeStringInfo	chunk_buffer = &arrow_state->chunk_buffer;
 	RecordBatchState *rb_state;
 	ArrowFileState *af_state;
 	XpuCommand *xcmd;
@@ -5038,10 +5038,10 @@ pgstromScanChunkArrowFdw(pgstromTaskState *pts,
 	af_state = rb_state->af_state;
 
 	/* XpuCommand header */
-	resetStringInfo(chunk_buffer);
-	appendBinaryStringInfo(chunk_buffer,
-						   pts->xcmd_buf.data,
-						   pts->xcmd_buf.len);
+	resetLargeStringInfo(chunk_buffer);
+	appendBinaryLargeStringInfo(chunk_buffer,
+								pts->xcmd_buf.data,
+								pts->xcmd_buf.len);
 	/* kds_src (arrow or parquet) */
 	kds_src_offset = chunk_buffer->len;
 	kds_src = __arrowFdwSetupKDSHead(pts->css.ss.ss_currentRelation,
@@ -5055,8 +5055,8 @@ pgstromScanChunkArrowFdw(pgstromTaskState *pts,
 													   arrow_state->referenced,
 													   kds_src);
 		size_t		iovec_sz = offsetof(strom_io_vector, ioc[iovec->nr_chunks]);
-		kds_src_iovec = __appendBinaryStringInfo(chunk_buffer,
-												 iovec, iovec_sz);
+		kds_src_iovec = appendBinaryLargeStringInfo(chunk_buffer,
+													iovec, iovec_sz);
 	}
 	else
 	{
@@ -5065,10 +5065,9 @@ pgstromScanChunkArrowFdw(pgstromTaskState *pts,
 	/* arrow/parquet filename */
 	kds_src_pathname = chunk_buffer->len;
 	if (!pts->ds_entry)
-		appendStringInfoString(chunk_buffer, af_state->filename);
+		appendStringLargeStringInfo(chunk_buffer, af_state->filename);
 	else
-		appendStringInfoString(chunk_buffer, af_state->dpu_path);
-	appendStringInfoChar(chunk_buffer, '\0');
+		appendStringLargeStringInfo(chunk_buffer, af_state->dpu_path);
 
 	/* assign offset of XpuCommand */
 	xcmd = (XpuCommand *)chunk_buffer->data;
@@ -5454,7 +5453,7 @@ RecordBatchAcquireSampleRows(Relation relation,
 	TupleDesc		tupdesc = RelationGetDescr(relation);
 	kern_data_store *kds;
 	Bitmapset	   *referenced = NULL;
-	StringInfoData	buffer;
+	LargeStringInfoData buffer;
 	Datum		   *values;
 	bool		   *isnull;
 	int				count;
@@ -5462,7 +5461,7 @@ RecordBatchAcquireSampleRows(Relation relation,
 
 	/* ANALYZE needs to fetch all the attributes */
 	referenced = bms_make_singleton(-FirstLowInvalidHeapAttributeNumber);
-	initStringInfo(&buffer);
+	initLargeStringInfo(&buffer);
 	/* Load an example KDS buffer */
 	if (ArrowMetadataVersionIsParquet(rb_state->af_state->version))
 		kds = parquetFillupRowGroup(relation, referenced, rb_state, &buffer);

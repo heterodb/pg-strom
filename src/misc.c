@@ -550,6 +550,94 @@ __appendZeroStringInfo(StringInfo buf, int nbytes)
 }
 
 /*
+ * StringInfo in 64bit length
+ */
+void
+initLargeStringInfo(LargeStringInfo buf)
+{
+	buf->maxlen = (4UL << 20);		/* start from 4MB */
+	buf->len = 0;
+	buf->data = (char *)palloc_extended(buf->maxlen, MCXT_ALLOC_HUGE);
+}
+void
+resetLargeStringInfo(LargeStringInfo buf)
+{
+	buf->data[0] = '\0';
+	buf->len = 0;
+}
+size_t
+appendBinaryLargeStringInfo(LargeStringInfo buf,
+							const void *data, size_t len)
+{
+	size_t	padding = (MAXALIGN(buf->len) - buf->len);
+	size_t	pos;
+
+	/* Make more room if needed */
+	enlargeLargeStringInfo(buf, padding + len);
+	/* Ensure max-alignment */
+	if (padding > 0)
+	{
+		memset(buf->data + buf->len, 0, padding);
+		buf->len += padding;
+	}
+	pos = buf->len;
+	/* OK, append the data */
+	memcpy(buf->data + buf->len, data, len);
+	buf->len += len;
+	/* keep a trailing null in place */
+	buf->data[buf->len] = '\0';
+
+	return pos;
+}
+size_t
+appendStringLargeStringInfo(LargeStringInfo buf, const char *str)
+{
+	return appendBinaryLargeStringInfo(buf, str, strlen(str)+1);
+}
+size_t
+appendZeroLargeStringInfo(LargeStringInfo buf, size_t nbytes)
+{
+	size_t	padding = (MAXALIGN(buf->len) - buf->len);
+	size_t	pos;
+
+	/* Make more room if needed */
+	enlargeLargeStringInfo(buf, padding + nbytes);
+	/* Ensure max-alignment */
+	if (padding > 0)
+	{
+		memset(buf->data + buf->len, 0, padding);
+		buf->len += padding;
+	}
+	pos = buf->len;
+	if (nbytes > 0)
+	{
+		memset(buf->data + pos, 0, nbytes);
+		buf->len += nbytes;
+	}
+	return pos;
+}
+void
+enlargeLargeStringInfo(LargeStringInfo buf, size_t needed)
+{
+	size_t	newlen;
+
+	needed += buf->len + 1;		/* total space required now */
+	if (needed <= buf->maxlen)
+		return;					/* got enough space already */
+	/*
+	 * We don't want to allocate just a little more space with each append;
+	 * for efficiency, double the buffer size each time it overflows.
+	 * Actually, we might need to more than double it if 'needed' is big...
+	 */
+	newlen = 2 * buf->maxlen;
+	while (needed > newlen)
+		newlen = 2 * newlen;
+
+	buf->data = (char *)repalloc_huge(buf->data, newlen);
+	buf->maxlen = newlen;
+}
+
+/*
  * get_type_name
  */
 char *

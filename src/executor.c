@@ -1961,7 +1961,6 @@ __pgstromExecTaskOpenConnection(pgstromTaskState *pts)
 		 * length of BITMAPLEN(kds->ncols) and may expand the starting
 		 * point of t_hoff for all the tuples.
 		 */
-		kds_dst_tupdesc = CreateTupleDescCopy(pts->css.ss.ps.scandesc);
 		foreach (lc, cscan->custom_scan_tlist)
 		{
 			TargetEntry *tle = lfirst(lc);
@@ -1969,8 +1968,8 @@ __pgstromExecTaskOpenConnection(pgstromTaskState *pts)
 			if (!tle->resjunk)
 				nvalids = tle->resno;
 		}
-		Assert(nvalids <= kds_dst_tupdesc->natts);
-		kds_dst_tupdesc->natts = nvalids;
+		Assert(nvalids <= pts->css.ss.ps.scandesc->natts);
+		kds_dst_tupdesc = CreateTupleDescTruncatedCopy(pts->css.ss.ps.scandesc, nvalids);
 	}
 	/* build the session information */
 	session = pgstromBuildSessionInfo(pts, inner_handle, kds_dst_tupdesc);

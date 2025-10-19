@@ -75,8 +75,13 @@ using compressOption = struct compressOption;
 
 struct configOption
 {
-	const char	   *name;
-	const char	   *value;
+	std::string		name;
+	std::string		value;
+	configOption(const char *__name, const char *__value)
+	{
+		name = std::string(__name);
+		value = std::string(__value);
+	}
 };
 using configOption	= struct configOption;
 
@@ -113,7 +118,7 @@ static const char  *dump_schema_filename = NULL;	/* --schema */
 static const char  *dump_schema_tablename = NULL;	/* --schema-name */
 static bool			shows_progress = false;			/* --progress */
 static int			verbose;						/* --verbose */
-static std::vector<configOption>	pgsql_config_options;	/* --set */
+static std::vector<configOption *>	pgsql_config_options;	/* --set */
 
 // ------------------------------------------------
 // Other static variables
@@ -218,7 +223,7 @@ palloc0(size_t sz)
 	if (!p)
 		Elog("out of memory");
 	memset(p, 0, sz);
-	return 0;
+	return p;
 }
 
 static inline char *
@@ -1996,6 +2001,11 @@ pgsql_flush_record_batch(pgsqlHandlerVector &pgsql_handlers)
 		if (!rv.ok())
 			Elog("failed on parquet::arrow::FileWriter::WriteRecordBatch: %s",
 				 rv.ToString().c_str());
+		/* flush to the disk */
+		rv = parquet_file_writer->NewBufferedRowGroup();
+		if (!rv.ok())
+			Elog("failed on parquet::arrow::FileWriter::NewBufferedRowGroup: %s",
+				 rv.ToString().c_str());
 	}
 	else
 	{
@@ -2012,13 +2022,25 @@ pgsql_flush_record_batch(pgsqlHandlerVector &pgsql_handlers)
 	/* end critical section */
 	/* print progress */
 	if (shows_progress)
-		printf("%s[%u] nitems=%ld, length=%ld at file offset=%ld\n",
+	{
+		time_t		t = time(NULL);
+		struct tm	tm;
+
+		localtime_r(&t, &tm);
+		printf("%04d-%02d-%02d %02d:%02d:%02d %s[%u] nitems=%ld, length=%ld at file offset=%ld\n",
+			   tm.tm_year + 1900,
+			   tm.tm_mon + 1,
+			   tm.tm_mday,
+			   tm.tm_hour,
+			   tm.tm_min,
+			   tm.tm_sec,
 			   !parquet_mode ? "Record Batch" : "Row Group",
 			   chunk_id,
 			   nrows,
 			   foffset_before.ok() && foffset_after.ok() ?
 			   foffset_after.ValueOrDie() - foffset_before.ValueOrDie() : -1,
 			   foffset_before.ok() ? foffset_before.ValueOrDie() : -1);
+	}
 	/* reset buffers */
 	for (auto cell = pgsql_handlers.begin(); cell != pgsql_handlers.end(); cell++)
 	{
@@ -2254,16 +2276,18 @@ pgsql_server_connect(void)
 			 PQerrorMessage(conn));
 
 	/* assign configuration parameters */
-	for (auto conf = pgsql_config_options.begin(); conf != pgsql_config_options.end(); conf++)
+	for (int i=0; i < pgsql_config_options.size(); i++)
 	{
-		std::ostringstream buf;
-
-		buf << "SET " << conf->name << " = '" << conf->value << "'";
-		query = buf.str().c_str();
-		res = PQexec(conn, query);
+		auto	conf = pgsql_config_options[i];
+		char   *temp = (char *)alloca(conf->name.size() +
+									  conf->value.size() + 100);
+		sprintf(temp, "SET %s = '%s'",
+				conf->name.c_str(),
+				conf->value.c_str());
+		res = PQexec(conn, temp);
 		if (PQresultStatus(res) != PGRES_COMMAND_OK)
 			Elog("failed on change parameter by [%s]: %s",
-				 query, PQresultErrorMessage(res));
+				 temp, PQresultErrorMessage(res));
 		PQclear(res);
 	}
 	/*
@@ -2901,6 +2925,7 @@ parse_options(int argc, char * const argv[])
 						Elog("unknown --compress method [%s]", optarg);
 					compression_methods.push_back(comp);
 				}
+				break;
 			case 'h':		/* --host */
 				if (pgsql_hostname)
 					Elog("-h, --host was given twice");
@@ -2951,13 +2976,13 @@ parse_options(int argc, char * const argv[])
 			case 1007:		/* --set */
 				{
 					char   *pos = strchr(optarg, ':');
-					configOption config;
+					configOption *config;
 
 					if (!pos)
 						Elog("config option must be --set=KEY:VALUE form");
 					*pos++ = '\0';
-					config.name  = __trim(optarg);
-					config.value = __trim(pos);
+					config = new configOption(__trim(optarg),
+											  __trim(pos));
 					pgsql_config_options.push_back(config);
 				}
 				break;
