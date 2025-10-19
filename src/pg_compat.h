@@ -158,6 +158,24 @@ typedef Node *(*tree_mutator_callback) (Node *node, void *context);
 #endif
 
 /*
+ * MEMO: PostgreSQL v18 changed TupleDesc's layout for CompactAttribute array.
+ * It points some payloads using tupdesc->natts, thus, it is not legal to change
+ * natts after the construction, unlike v17 or before.
+ *
+ * git: 5983a4cffc31640fda6643f10146a5b72b203eaa
+ */
+#if PG_VERSION_NUM < 180000
+static inline TupleDesc
+CreateTupleDescTruncatedCopy(TupleDesc __tupdesc, int natts)
+{
+	TupleDesc	tupdesc = CreateTupleDescCopy(__tupdesc);
+
+	tupdesc->natts = natts;
+	return tupdesc;
+}
+#endif
+
+/*
  * MEMO: CUDA 13.0 changed the following APIs. The existing _v2 APIs were renamed
  * to the primary one, and legacy interfaces were deprecated.
  * - cuMemPrefetchAsync
