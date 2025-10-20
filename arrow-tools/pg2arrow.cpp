@@ -1298,193 +1298,209 @@ pgsql_define_arrow_field(arrowField &arrow_field,
 	auto	pool = arrow::default_memory_pool();
 	arrowBuilder	builder = nullptr;
 	pgsqlHandler	handler = nullptr;
+	const char	   *type_hint = NULL;
+	std::shared_ptr<arrow::KeyValueMetadata> metadata = NULLPTR;
 
-	/* array type */
-	if (typelemid != 0)
-	{
-		handler = pgsql_define_arrow_list_field(attname, typelemid);
-		builder = handler->arrow_builder;
-		goto out;
-	}
-	/* composite type */
-	if (typrelid != 0)
-	{
-		handler = pgsql_define_arrow_composite_field(attname, typrelid);
-		builder = handler->arrow_builder;
-		goto out;
-	}
-	/* enum type */
 	if (typtype == 'e')
 	{
+		/* enum type */
 		Elog("Enum type is not supported yet");
 	}
+	else if (typelemid != 0)
+	{
+		/* array type */
+		handler = pgsql_define_arrow_list_field(attname, typelemid);
+		builder = handler->arrow_builder;
+	}
+	else if (typrelid != 0)
+	{
+		/* composite type */
+		char   *temp = (char *)alloca(strlen(typname) +
+									  (extname ? strlen(extname) : 0) + 10);
+		sprintf(temp, "%s%s%s",
+				typname,
+				extname ? "@" : "",
+				extname ? extname : "");
+		type_hint = temp;
+		handler = pgsql_define_arrow_composite_field(attname, typrelid);
+		builder = handler->arrow_builder;
+	}
 	/* several known type provided by extension */
-	if (extname != NULL)
+	if (!handler && extname != NULL)
 	{
 		/* contrib/cube (relocatable) */
 		if (strcmp(typname, "cube") == 0 &&
 			strcmp(extname, "cube") == 0)
 		{
-			goto out;
+			//type_hint = "cube@cube";
+			//FIXME: add cube handler
 		}
 	}
 	/* other built-in types */
-	if (strcmp(typname, "bool") == 0 &&
-		strcmp(nspname, "pg_catalog") == 0)
+	if (!handler && strcmp(nspname, "pg_catalog") == 0)
 	{
-		builder = std::make_shared<arrow::BooleanBuilder>(arrow::boolean(), pool);
-		handler = std::make_shared<pgsqlBoolHandler>();
-	}
-	else if (strcmp(typname, "int1") == 0 &&
-			 strcmp(nspname, "pg_catalog") == 0)
-	{
-		builder = std::make_shared<arrow::Int8Builder>(arrow::int8(), pool);
-		handler = std::make_shared<pgsqlInt8Handler>();
-	}
-	else if (strcmp(typname, "int2") == 0 &&
-			 strcmp(nspname, "pg_catalog") == 0)
-	{
-		builder = std::make_shared<arrow::Int16Builder>(arrow::int16(), pool);
-		handler = std::make_shared<pgsqlInt16Handler>();
-	}
-	else if (strcmp(typname, "int4") == 0 &&
-			 strcmp(nspname, "pg_catalog") == 0)
-	{
-		builder = std::make_shared<arrow::Int32Builder>(arrow::int32(), pool);
-		handler = std::make_shared<pgsqlInt32Handler>();
-	}
-	else if (strcmp(typname, "int8") == 0 &&
-			 strcmp(nspname, "pg_catalog") == 0)
-	{
-		builder = std::make_shared<arrow::Int64Builder>(arrow::int64(), pool);
-		handler = std::make_shared<pgsqlInt64Handler>();
-	}
-	else if (strcmp(typname, "float2") == 0 &&
-			 strcmp(nspname, "pg_catalog") == 0)
-	{
-		builder = std::make_shared<arrow::HalfFloatBuilder>(arrow::float16(), pool);
-		handler = std::make_shared<pgsqlFloat16Handler>();
-	}
-	else if (strcmp(typname, "float4") == 0 &&
-			 strcmp(nspname, "pg_catalog") == 0)
-	{
-		builder = std::make_shared<arrow::FloatBuilder>(arrow::float32(), pool);
-		handler = std::make_shared<pgsqlFloat32Handler>();
-	}
-	else if (strcmp(typname, "float8") == 0 &&
-			 strcmp(nspname, "pg_catalog") == 0)
-	{
-		builder = std::make_shared<arrow::DoubleBuilder>(arrow::float64(), pool);
-		handler = std::make_shared<pgsqlFloat64Handler>();
-	}
-	else if (strcmp(typname, "numeric") == 0 &&
-			 strcmp(nspname, "pg_catalog") == 0)
-	{
-		int		precision = 36;
-		int		scale = 9;
-
-		if (atttypmod >= (int)sizeof(int32_t))
+		if (strcmp(typname, "bool") == 0)
 		{
-			//See, numeric_typmod_precision and numeric_typmod_scale
-			precision = ((atttypmod - sizeof(int32_t)) >> 16) & 0xffff;
-			scale     = (((atttypmod - sizeof(int32_t)) & 0x7ff) ^ 1024) - 1024;
+			builder = std::make_shared<arrow::BooleanBuilder>(arrow::boolean(), pool);
+			handler = std::make_shared<pgsqlBoolHandler>();
 		}
-		builder = std::make_shared<arrow::Decimal128Builder>
-			(arrow::decimal128(precision, scale), pool);
-		handler = std::make_shared<pgsqlNumericHandler>();
-	}
-	else if (strcmp(typname, "date") == 0 &&
-			 strcmp(nspname, "pg_catalog") == 0)
-	{
-		builder = std::make_shared<arrow::Date32Builder>(arrow::date32(), pool);
-		handler = std::make_shared<pgsqlDateHandler>();
-	}
-	else if (strcmp(typname, "time") == 0 &&
-			 strcmp(nspname, "pg_catalog") == 0)
-	{
-		builder = std::make_shared<arrow::Time64Builder>
-			(arrow::time64(arrow::TimeUnit::MICRO), pool);
-		handler = std::make_shared<pgsqlTimeHandler>();
-	}
-	else if (strcmp(typname, "timestamp") == 0 &&
-			 strcmp(nspname, "pg_catalog") == 0)
-	{
-		builder = std::make_shared<arrow::TimestampBuilder>
-			(arrow::timestamp(arrow::TimeUnit::MICRO), pool);
-		handler = std::make_shared<pgsqlTimestampHandler>();
-	}
-	else if (strcmp(typname, "timestamptz") == 0 &&
-			 strcmp(nspname, "pg_catalog") == 0)
-	{
-		//set timezone
-		builder = std::make_shared<arrow::TimestampBuilder>
-			(arrow::timestamp(arrow::TimeUnit::MICRO), pool);
-		handler = std::make_shared<pgsqlTimestampHandler>();
-	}
-	else if (strcmp(typname, "interval") == 0 &&
-			 strcmp(nspname, "pg_catalog") == 0)
-	{
-		builder = std::make_shared<arrow::DayTimeIntervalBuilder>
-			(arrow::month_day_nano_interval(), pool);
-		handler = std::make_shared<pgsqlIntervalHandler>();
-	}
-	else if ((strcmp(typname, "text") == 0 ||
-			  strcmp(typname, "varchar") == 0) &&
-			 strcmp(nspname, "pg_catalog") == 0)
-	{
-		builder = std::make_shared<arrow::StringBuilder>(arrow::utf8(), pool);
-		handler = std::make_shared<pgsqlTextHandler>();
-	}
-	else if (strcmp(typname, "bpchar") == 0 &&
-			 strcmp(nspname, "pg_catalog") == 0)
-	{
-		int		width = Max(atttypmod - sizeof(int32_t), 0);
-		builder = std::make_shared<arrow::FixedSizeBinaryBuilder>
-			(arrow::fixed_size_binary(width));
-		handler = std::make_shared<pgsqlBpCharHandler>(width);
+		else if (strcmp(typname, "int1") == 0)
+		{
+			builder = std::make_shared<arrow::Int8Builder>(arrow::int8(), pool);
+			handler = std::make_shared<pgsqlInt8Handler>();
+		}
+		else if (strcmp(typname, "int2") == 0)
+		{
+			builder = std::make_shared<arrow::Int16Builder>(arrow::int16(), pool);
+			handler = std::make_shared<pgsqlInt16Handler>();
+		}
+		else if (strcmp(typname, "int4") == 0)
+		{
+			builder = std::make_shared<arrow::Int32Builder>(arrow::int32(), pool);
+			handler = std::make_shared<pgsqlInt32Handler>();
+		}
+		else if (strcmp(typname, "int8") == 0)
+		{
+			builder = std::make_shared<arrow::Int64Builder>(arrow::int64(), pool);
+			handler = std::make_shared<pgsqlInt64Handler>();
+		}
+		else if (strcmp(typname, "float2") == 0)
+		{
+			builder = std::make_shared<arrow::HalfFloatBuilder>(arrow::float16(), pool);
+			handler = std::make_shared<pgsqlFloat16Handler>();
+		}
+		else if (strcmp(typname, "float4") == 0)
+		{
+			builder = std::make_shared<arrow::FloatBuilder>(arrow::float32(), pool);
+			handler = std::make_shared<pgsqlFloat32Handler>();
+		}
+		else if (strcmp(typname, "float8") == 0)
+		{
+			builder = std::make_shared<arrow::DoubleBuilder>(arrow::float64(), pool);
+			handler = std::make_shared<pgsqlFloat64Handler>();
+		}
+		else if (strcmp(typname, "numeric") == 0)
+		{
+			int		precision = 36;
+			int		scale = 9;
+
+			if (atttypmod >= (int)sizeof(int32_t))
+			{
+				//See, numeric_typmod_precision and numeric_typmod_scale
+				precision = ((atttypmod - sizeof(int32_t)) >> 16) & 0xffff;
+				scale     = (((atttypmod - sizeof(int32_t)) & 0x7ff) ^ 1024) - 1024;
+			}
+			builder = std::make_shared<arrow::Decimal128Builder>
+				(arrow::decimal128(precision, scale), pool);
+			handler = std::make_shared<pgsqlNumericHandler>();
+		}
+		else if (strcmp(typname, "date") == 0)
+		{
+			builder = std::make_shared<arrow::Date32Builder>(arrow::date32(), pool);
+			handler = std::make_shared<pgsqlDateHandler>();
+		}
+		else if (strcmp(typname, "time") == 0)
+		{
+			builder = std::make_shared<arrow::Time64Builder>
+				(arrow::time64(arrow::TimeUnit::MICRO), pool);
+			handler = std::make_shared<pgsqlTimeHandler>();
+		}
+		else if (strcmp(typname, "timestamp") == 0)
+		{
+			builder = std::make_shared<arrow::TimestampBuilder>
+				(arrow::timestamp(arrow::TimeUnit::MICRO), pool);
+			handler = std::make_shared<pgsqlTimestampHandler>();
+		}
+		else if (strcmp(typname, "timestamptz") == 0)
+		{
+			//set timezone
+			builder = std::make_shared<arrow::TimestampBuilder>
+				(arrow::timestamp(arrow::TimeUnit::MICRO), pool);
+			handler = std::make_shared<pgsqlTimestampHandler>();
+		}
+		else if (strcmp(typname, "interval") == 0)
+		{
+			builder = std::make_shared<arrow::DayTimeIntervalBuilder>
+				(arrow::month_day_nano_interval(), pool);
+			handler = std::make_shared<pgsqlIntervalHandler>();
+		}
+		else if (strcmp(typname, "text") == 0 ||
+				 strcmp(typname, "varchar") == 0)
+		{
+			builder = std::make_shared<arrow::StringBuilder>(arrow::utf8(), pool);
+			handler = std::make_shared<pgsqlTextHandler>();
+		}
+		else if (strcmp(typname, "bpchar") == 0)
+		{
+			int		width = Max(atttypmod - sizeof(int32_t), 0);
+			builder = std::make_shared<arrow::FixedSizeBinaryBuilder>
+				(arrow::fixed_size_binary(width));
+			handler = std::make_shared<pgsqlBpCharHandler>(width);
+		}
+		if (handler)
+			type_hint = typname;
 	}
 	/* elsewhere, we save the values just bunch of binary data */
-	else if (attlen == 1)
+	if (!handler)
 	{
-		builder = std::make_shared<arrow::Int8Builder>(arrow::int8(), pool);
-		handler = std::make_shared<pgsqlInt8Handler>();
+		char   *temp = (char *)alloca((nspname ? strlen(nspname) : 0) +
+									  (typname ? strlen(typname) : 0) +
+									  (extname ? strlen(extname) : 0) + 20);
+		sprintf(temp, "%s%s%s%s%s",
+				nspname ? nspname : "",
+				nspname ? "." : "",
+				typname ? typname : "",
+				extname ? "@" : "",
+				extname ? extname : "");
+		type_hint = temp;
+
+		if (attlen == 1)
+		{
+			builder = std::make_shared<arrow::Int8Builder>(arrow::int8(), pool);
+			handler = std::make_shared<pgsqlInt8Handler>();
+		}
+		else if (attlen == 2)
+		{
+			builder = std::make_shared<arrow::Int16Builder>(arrow::int16(), pool);
+			handler = std::make_shared<pgsqlInt16Handler>();
+		}
+		else if (attlen == 4)
+		{
+			builder = std::make_shared<arrow::Int32Builder>(arrow::int32(), pool);
+			handler = std::make_shared<pgsqlInt32Handler>();
+		}
+		else if (attlen == 8)
+		{
+			builder = std::make_shared<arrow::Int64Builder>(arrow::int64(), pool);
+			handler = std::make_shared<pgsqlInt64Handler>();
+		}
+		else if (attlen == -1)
+		{
+			builder = std::make_shared<arrow::BinaryBuilder>(arrow::binary(), pool);
+			handler = std::make_shared<pgsqlByteaHandler>();
+		}
+		else
+		{
+			/*
+			 * MEMO: Unfortunately, we have no portable way to pack user defined
+			 * fixed-length binary data types, because their 'send' handler often
+			 * manipulate its internal data representation.
+			 * Please check box_send() for example. It sends four float8 (which
+			 * is reordered to bit-endien) values in 32bytes. We cannot understand
+			 * its binary format without proper knowledge.
+			 */
+			Elog("PostgreSQL type: '%s' is not supported", typname);
+		}
 	}
-	else if (attlen == 2)
-	{
-		builder = std::make_shared<arrow::Int16Builder>(arrow::int16(), pool);
-		handler = std::make_shared<pgsqlInt16Handler>();
-	}
-	else if (attlen == 4)
-	{
-		builder = std::make_shared<arrow::Int32Builder>(arrow::int32(), pool);
-		handler = std::make_shared<pgsqlInt32Handler>();
-	}
-	else if (attlen == 8)
-	{
-		builder = std::make_shared<arrow::Int64Builder>(arrow::int64(), pool);
-		handler = std::make_shared<pgsqlInt64Handler>();
-	}
-	else if (attlen == -1)
-	{
-		builder = std::make_shared<arrow::BinaryBuilder>(arrow::binary(), pool);
-		handler = std::make_shared<pgsqlByteaHandler>();
-	}
-	else
-	{
-		/*
-		 * MEMO: Unfortunately, we have no portable way to pack user defined
-		 * fixed-length binary data types, because their 'send' handler often
-		 * manipulate its internal data representation.
-		 * Please check box_send() for example. It sends four float8 (which
-		 * is reordered to bit-endien) values in 32bytes. We cannot understand
-		 * its binary format without proper knowledge.
-		 */
-		Elog("PostgreSQL type: '%s' is not supported", typname);
-	}
-out:
 	/*
 	 * Common setup handler, builder, and field
 	 */
+	if (type_hint)
+	{
+		metadata = std::make_shared<arrow::KeyValueMetadata>();
+		metadata->Append(std::string("pg_type"),
+						 std::string(type_hint));
+	}
 	handler->attname = std::string(attname);
 	handler->typname = std::string(typname);
 	handler->type_oid = atttypid;
@@ -1496,7 +1512,7 @@ out:
 	handler->arrow_builder = builder;
 	handler->arrow_array = nullptr;
 	pgsql_handler = handler;
-	arrow_field = arrow::field(attname, builder->type(), true);
+	arrow_field = arrow::field(attname, builder->type(), true, metadata);
 }
 
 /*
@@ -1630,7 +1646,8 @@ pgsql_define_arrow_composite_field(const char *attname, Oid comptype_relid)
 			 " WHERE b.typnamespace = n.oid"
 			 "   AND b.type_id = a.atttypid"
 			 "   AND a.attnum > 0"
-			 "   AND a.attrelid = %u", comptype_relid);
+			 "   AND a.attrelid = %u"
+			 " ORDER BY a.attnum ASC", comptype_relid);
 	res = PQexec(pgsql_conn, query);
 	if (PQresultStatus(res) != PGRES_TUPLES_OK)
 		Elog("failed on pg_type system catalog query: %s",

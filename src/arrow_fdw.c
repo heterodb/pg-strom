@@ -1766,7 +1766,7 @@ __lookupCompositePGType(int nattrs, Oid *type_oids, Oid hint_oid)
 			htup = systable_getnext(sscan);
 			if (!HeapTupleIsValid(htup))
 				break;
-			comp_oid = ((Form_pg_type) GETSTRUCT(htup))->oid;
+			comp_oid = ((Form_pg_class) GETSTRUCT(htup))->reltype;
 		}
 
 		if (pg_type_aclcheck(comp_oid,
