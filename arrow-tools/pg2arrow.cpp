@@ -1202,6 +1202,37 @@ public:
 };
 
 // ----------------------------------------------------------------
+// Handlers of extra data types
+// ----------------------------------------------------------------
+class pgsqlExtraCubeHandler final : public pgsqlBinaryVarlenaHandler
+{
+	std::vector<uint64_t>	cube_buffer;
+public:
+	std::string_view fetchBinary(const char *addr, int sz)
+	{
+		uint32_t	header = be32toh(*((uint32_t *)addr));
+		uint32_t	nitems = (header & 0x7fffffffU);
+		uint64_t   *pos;
+
+		if ((header & 0x80000000U) == 0)
+			nitems += nitems;
+		if (sz != sizeof(uint32_t) + sizeof(uint64_t) * nitems)
+			Elog("cube binary data looks broken");
+		cube_buffer.clear();
+		pos = (uint64_t *)(addr + sizeof(uint32_t));
+		for (uint32_t i=0; i < nitems; i++)
+		{
+			cube_buffer.push_back(be64toh(*pos));
+			pos++;
+		}
+		return std::string_view((char *)cube_buffer.data(),
+								cube_buffer.size() * sizeof(uint64_t));
+	}
+	PGSQL_BINARY_PUT_VALUE_TEMPLATE(Binary)
+	PGSQL_BINARY_MOVE_VALUE_TEMPLATE(Binary)
+};
+
+// ----------------------------------------------------------------
 //
 // Embedding the Statistics (Arrow)
 //
@@ -1332,8 +1363,9 @@ pgsql_define_arrow_field(arrowField &arrow_field,
 		if (strcmp(typname, "cube") == 0 &&
 			strcmp(extname, "cube") == 0)
 		{
-			//type_hint = "cube@cube";
-			//FIXME: add cube handler
+			builder = std::make_shared<arrow::BinaryBuilder>(arrow::binary(), pool);
+			handler = std::make_shared<pgsqlExtraCubeHandler>();
+			type_hint = "cube@cube";
 		}
 	}
 	/* other built-in types */
