@@ -268,6 +268,15 @@ receiveGpuDevAttrs(int fdesc)
 				 dtemp.COMPUTE_CAPABILITY_MINOR);
 			continue;
 		}
+		else if (dtemp.COMPUTE_CAPABILITY_MAJOR == 7 &&
+				 dtemp.COMPUTE_CAPABILITY_MINOR <  5)
+		{
+			elog(LOG, "PG-Strom: GPU%d %s - CC %d.%d may work, but not supported",
+				 dtemp.DEV_ID,
+				 dtemp.DEV_NAME,
+				 dtemp.COMPUTE_CAPABILITY_MAJOR,
+				 dtemp.COMPUTE_CAPABILITY_MINOR);
+		}
 		dindex = heterodbValidateDevice(dtemp.DEV_NAME,
 										dtemp.DEV_UUID);
 		if (dindex >= 0)
