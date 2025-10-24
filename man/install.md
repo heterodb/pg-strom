@@ -17,16 +17,16 @@ This chapter introduces the steps to install PG-Strom.
     - CPU、ストレージ、およびネットワークデバイスには特別な要件はありませんが、[note002:HW Validation List](https://github.com/heterodb/pg-strom/wiki/002:-HW-Validation-List)はハードウェア選定の上で参考になるかもしれません。
     - GPUダイレクトSQL実行を利用するにはNVME規格に対応したSSD、またはRoCEに対応した高速NICが必要で、GPUと同一のPCIe Root Complex配下に接続されている必要があります。
 - **GPUデバイス**
-    - PG-Stromを実行するには少なくとも一個のGPUデバイスがシステム上に必要です。これらはCUDA Toolkitでサポートされており、computing capability が6.0以降のモデル（Pascal世代以降）である必要があります。
+    - PG-Stromを実行するには少なくとも一個のGPUデバイスがシステム上に必要です。これらはCUDA Toolkitでサポートされており、computing capability が7.5以降のモデル（Turing世代以降）である必要があります。
     - [002: HW Validation List - List of supported GPU models](https://github.com/heterodb/pg-strom/wiki/002:-HW-Validation-List#list-of-supported-gpu-models)を参考にGPUを選定してください。
 - **Operating System**
-    - PG-Stromの実行には、CUDA Toolkitによりサポートされているx86_64アーキテクチャ向けのLinux OSが必要です。推奨環境はRed Hat Enterprise LinuxまたはRocky Linuxバージョン 9.x、または8.xです。
+    - PG-Stromの実行には、CUDA Toolkitによりサポートされているx86_64アーキテクチャ向けのLinux OSが必要です。推奨環境はRed Hat Enterprise LinuxまたはRocky Linuxバージョン 9.x、または10.xです。
     - GPUダイレクトSQL（cuFileドライバ）を利用するには、CUDA Toolkitに含まれるnvidia-fsドライバと、Mellanox OFED (OpenFabrics Enterprise Distribution) ドライバのインストールが必要です。
 - **PostgreSQL**
-    - PG-Strom v5.0の実行にはPostgreSQLバージョン15以降が必要です。
+    - PG-Strom v6.1の実行にはPostgreSQLバージョン15以降が必要です。
     - PG-Stromが内部的に利用しているAPIの中には、これ以前のバージョンでは提供されていないものが含まれています。
 - **CUDA Toolkit**
-    - PG-Stromの実行にはCUDA Toolkit バージョン12.2update1以降が必要です。
+    - PG-Stromの実行にはCUDA Toolkit バージョン13.0以降が必要です。
     - PG-Stromが内部的に利用しているAPIの中には、これ以前のバージョンでは提供されていないものが含まれています。
 }
 @en{
@@ -35,13 +35,13 @@ This chapter introduces the steps to install PG-Strom.
     - [note002:HW Validation List](https://github.com/heterodb/pg-strom/wiki/002:-HW-Validation-List) may help you to choose the hardware.
     - GPU Direct SQL Execution needs NVME-SSD devices, or fast network card with RoCE support, and to be installed under the same PCIe Root Complex where GPU is located on.
 - **GPU Device**
-    - PG-Strom requires at least one GPU device on the system, which is supported by CUDA Toolkit, has computing capability 6.0 (Pascal generation) or later;
+    - PG-Strom requires at least one GPU device on the system, which is supported by CUDA Toolkit, has computing capability 7.5 (Turing generation) or later;
     - Please check at [002: HW Validation List - List of supported GPU models](https://github.com/heterodb/pg-strom/wiki/002:-HW-Validation-List#list-of-supported-gpu-models) for GPU selection.
 - **Operating System**
-    - PG-Strom requires Linux operating system for x86_64 architecture, and its distribution supported by CUDA Toolkit. Our recommendation is Red Hat Enterprise Linux or Rocky Linux version 9.x or 8.x series.
+    - PG-Strom requires Linux operating system for x86_64 architecture, and its distribution supported by CUDA Toolkit. Our recommendation is Red Hat Enterprise Linux or Rocky Linux version 9.x or 10.x series.
     - GPU Direct SQL (with cuFile driver) needs the `nvidia-fs` driver distributed with CUDA Toolkit, and Mellanox OFED (OpenFabrics Enterprise Distribution) driver.
 - **PostgreSQL**
-    - PG-Strom v5.0 requires PostgreSQL v15 or later.
+    - PG-Strom v6.1 requires PostgreSQL v15 or later.
     - Some of PostgreSQL APIs used by PG-Strom internally are not included in the former versions.
 - **CUDA Toolkit**
     - PG-Strom requires CUDA Toolkit version 12.2update1 or later.
@@ -745,6 +745,39 @@ $ nvidia-smi -q
         Free                              : 65535 MiB
         :
 ```
+
+@ja:###`/etc/cufile.json`の編集
+@en:###Edit `/etc/cufile.json`
+@ja{
+GPUダイレクトSQLが内部的に利用するcuFileライブラリの設定ファイル `/etc/cufile.json` を編集します。
+
+JSON形式で記述されたコンフィグのうち、`"execution"`セクションの`"parallel_io"`の値を`false`に変更します。
+}
+@en{
+Edit the configuration file `/etc/cufile.json`, which is used internally by GPU Direct SQL.
+
+In the JSON-formatted configuration, change the value of `"parallel_io"` in the `"execution"` section to `false`, from the default value (`true`).
+}
+```
+  "execution" : {
+          :
+      // enable support for parallel IO
+      "parallel_io" : false,
+          :
+  },
+```
+@ja{
+!!! Tips
+    cuFileは一定サイズ（デフォルト8MB）よりも大きなI/Oリクエストを分割し、内部のスレッドプールを使用して、複数のI/O要求を並行して実行します。
+    これはシングルスレッドのGPUアプリケーションがI/Oを効率的に実行するには有効な仕組みですが、PG-Stromのようにマルチスレッド化されており、細分化されたI/O要求を同時並行で実行するようなアプリケーションにとっては、却ってオーバーヘッドが大きくなってしまいます。
+    そのため、PG-StromではcuFileのParallel-I/O機能を無効化する事を推奨しています。
+}
+@en{
+!!! Tips
+    cuFile splits I/O requests larger than a certain size (default 8MB) and uses an internal thread pool to execute multiple I/O requests in parallel.
+    While this is an effective mechanism for single-threaded GPU applications to perform I/O efficiently, it actually increases overhead for applications like PG-Strom, which are multi-threaded and execute finely granular I/O requests concurrently.
+    Therefore, PG-Strom recommends disabling cuFile's Parallel-I/O functionality.
+}
 
 @ja:##HeteroDB 拡張モジュール
 @en:##HeteroDB extra modules
