@@ -2546,9 +2546,18 @@ __try_add_xpupreagg_normal_path(PlannerInfo *root,
 	/* build GpuPreAgg path */
 	cpath = __buildXpuPreAggCustomPath(&con);
 
-	/* Agg(CPU) [+ Gather] + GpuPreAgg, if CPU fallback may happen */
-	/* Elsewhere, no Agg(CPU) is needed */
+	/* Agg(CPU) [+ Gather] + GpuPreAgg,
+	 * If CPU fallback may happen, because a part of results are kept in
+	 * CPU-side, thus GPU-Service cannot generate final aggregation result
+	 * by itself, or
+	 * If no-grouping aggregation, because it must generate an empty result
+	 * when input set is empty. The no-grouping aggregation is a relatively
+	 * lightweight operation because CPU processes up to one tuple, so we
+	 * can ignore this overhead.
+	 * Elsewhere, no CPU-based Agg-node is needed.
+	 */
 	if (pgstrom_cpu_fallback_elevel < ERROR ||
+		parse->groupClause == NIL ||
 		(xpu_task_flags & DEVKIND__ANY) != DEVKIND__NVIDIA_GPU)
 	{
 		Path   *__path = &cpath->path;
