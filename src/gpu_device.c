@@ -865,6 +865,7 @@ pgstrom_print_gpu_properties(const char *manual_config)
 		Datum	json;
 		Datum	gpus_array;
 		Datum	disk_array;
+		Datum	vfs_array;
 
 		PG_TRY();
 		{
@@ -933,6 +934,20 @@ pgstrom_print_gpu_properties(const char *manual_config)
 					}
 				}
 			}
+
+			vfs_array = __fetchJsonField(json, "vfs");
+			if (disk_array != 0)
+			{
+				Datum	vfs;
+
+				for (int i=0; (vfs = __fetchJsonElement(vfs_array, i)) != 0UL; i++)
+				{
+					char   *dir = __fetchJsonFieldText(vfs, "dir");
+					char   *optimal_gpus = __fetchJsonFieldOptimalGpus(vfs);
+
+					elog(LOG, "[VFS] '%s' --> %s", dir, optimal_gpus);
+				}
+			}
 		}
 		PG_CATCH();
 		{
@@ -994,7 +1009,6 @@ pgstrom_init_gpu_options(void)
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
 	/* on/off GPU-Direct SQL */
-	fprintf(stderr, "gpudirect_supported_gpus = %lu\n", gpudirect_supported_gpus);
 	DefineCustomBoolVariable("pg_strom.gpudirect_enabled",
 							 "enables GPUDirect SQL",
 							 NULL,
