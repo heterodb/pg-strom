@@ -144,8 +144,8 @@ PG-Strom %{version}-%{release} built for PostgreSQL v18, based on %{__githash}
 %define __pkglibdir_18     %(%{__pg_config_18} --pkglibdir)
 %define __pkgbindir_18     %(%{__pg_config_18} --bindir)
 %define __pkgsharedir_18   %(%{__pg_config_18} --sharedir)
-%define __systemd_conf_18  %{_unitdir}/postgresql-17.service.d/pg_strom.conf
-%define __make_options_18  PG_CONFIG=%{__pg_config_17} %{__make_options_common} BINDIR=%{__pkgbindir_18}
+%define __systemd_conf_18  %{_unitdir}/postgresql-18.service.d/pg_strom.conf
+%define __make_options_18  PG_CONFIG=%{__pg_config_18} %{__make_options_common} BINDIR=%{__pkgbindir_18}
 %endif
 
 %prep
