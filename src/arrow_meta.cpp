@@ -87,14 +87,6 @@ static inline void *__palloc0(size_t sz)
 		Elog("out of memory (sz=%lu)", sz);
 	return ptr;
 }
-
-static inline void *__repalloc(void *ptr, size_t sz)
-{
-	ptr = repalloc_extended(ptr, sz, MCXT_ALLOC_HUGE | MCXT_ALLOC_NO_OOM);
-	if (!ptr)
-		Elog("out of memory (sz=%lu)", sz);
-	return ptr;
-}
 #else
 static inline void *__palloc(size_t sz)
 {
@@ -109,13 +101,6 @@ static inline void *__palloc0(size_t sz)
 	if (!ptr)
 		Elog("out of memory (sz=%lu)", sz);
 	memset(ptr, 0, sz);
-	return ptr;
-}
-static inline void *__repalloc(void *ptr, size_t sz)
-{
-	ptr = realloc(ptr, sz);
-	if (!ptr)
-		Elog("out of memory (sz=%lu)", sz);
 	return ptr;
 }
 #endif
