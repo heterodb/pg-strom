@@ -2075,7 +2075,7 @@ __setupGpuJoinPinnedInnerBufferReconstruct(gpuClient *gclient,
 		int32_t		mem_attr;
 
 		rc = cuMemRangeGetAttribute(&mem_attr, sizeof(int32_t),
-									CU_MEM_ADVISE_SET_READ_MOSTLY,
+									CU_MEM_RANGE_ATTRIBUTE_READ_MOSTLY,
 									m_kds_in, kds_head->length);
 		if (rc != CUDA_SUCCESS)
 		{
@@ -3875,7 +3875,7 @@ again:
 					int32_t		mem_attr;
 
 					rc = cuMemRangeGetAttribute(&mem_attr, sizeof(int32_t),
-												CU_MEM_ADVISE_SET_READ_MOSTLY,
+												CU_MEM_RANGE_ATTRIBUTE_READ_MOSTLY,
 												(CUdeviceptr)kds_in,
 												kds_in->length);
 					if (rc != CUDA_SUCCESS)
