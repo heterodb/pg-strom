@@ -936,7 +936,7 @@ pgstrom_print_gpu_properties(const char *manual_config)
 			}
 
 			vfs_array = __fetchJsonField(json, "vfs");
-			if (disk_array != 0)
+			if (vfs_array != 0)
 			{
 				Datum	vfs;
 
