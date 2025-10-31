@@ -17,7 +17,7 @@ PG-Strom v6.1における主要な変更は点は以下の通りです。
 }
 
 @en{
-Major changes in PG-Strom v6.0 are as follows:
+Major changes in PG-Strom v6.1 are as follows:
 
 - Support of Apache Parquet files.
 - Migration to libarrow/libparquet, from own implementation.

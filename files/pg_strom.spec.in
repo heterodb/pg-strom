@@ -44,7 +44,7 @@ BuildRequires: postgresql15-devel
 BuildRequires: arrow-devel >= 21
 BuildRequires: parquet-devel >= 21
 Requires: postgresql15-server
-Requires: heterodb-extra >= %{__heterodb_extra_min_version}
+Recommends: heterodb-extra >= %{__heterodb_extra_min_version}
 Requires: %{name}
 Requires: arrow-devel >= 21
 Requires: parquet-devel >= 21
@@ -73,7 +73,7 @@ BuildRequires: postgresql16-devel
 BuildRequires: arrow-devel >= 21
 BuildRequires: parquet-devel >= 21
 Requires: postgresql16-server
-Requires: heterodb-extra >= %{__heterodb_extra_min_version}
+Recommends: heterodb-extra >= %{__heterodb_extra_min_version}
 Requires: %{name}
 Requires: arrow-devel >= 21
 Requires: parquet-devel >= 21
@@ -102,7 +102,7 @@ BuildRequires: postgresql17-devel
 BuildRequires: arrow-devel >= 21
 BuildRequires: parquet-devel >= 21
 Requires: postgresql17-server
-Requires: heterodb-extra >= %{__heterodb_extra_min_version}
+Recommends: heterodb-extra >= %{__heterodb_extra_min_version}
 Requires: %{name}
 Requires: arrow-devel >= 21
 Requires: parquet-devel >= 21
@@ -131,7 +131,7 @@ BuildRequires: postgresql18-devel
 BuildRequires: arrow-devel >= 21
 BuildRequires: parquet-devel >= 21
 Requires: postgresql18-server
-Requires: heterodb-extra >= %{__heterodb_extra_min_version}
+Recommends: heterodb-extra >= %{__heterodb_extra_min_version}
 Requires: %{name}
 Requires: arrow-devel >= 21
 Requires: parquet-devel >= 21
@@ -144,8 +144,8 @@ PG-Strom %{version}-%{release} built for PostgreSQL v18, based on %{__githash}
 %define __pkglibdir_18     %(%{__pg_config_18} --pkglibdir)
 %define __pkgbindir_18     %(%{__pg_config_18} --bindir)
 %define __pkgsharedir_18   %(%{__pg_config_18} --sharedir)
-%define __systemd_conf_18  %{_unitdir}/postgresql-17.service.d/pg_strom.conf
-%define __make_options_18  PG_CONFIG=%{__pg_config_17} %{__make_options_common} BINDIR=%{__pkgbindir_18}
+%define __systemd_conf_18  %{_unitdir}/postgresql-18.service.d/pg_strom.conf
+%define __make_options_18  PG_CONFIG=%{__pg_config_18} %{__make_options_common} BINDIR=%{__pkgbindir_18}
 %endif
 
 %prep
@@ -368,6 +368,7 @@ fi
 - Add SELECT INTO Direct mode
 - Reduction of GPU kernel memory footpoint using MinimalTuple
 - Add supports for PostgreSQL v18
+- Hetedodb-extra is marked as recommends, for OSS only installation
 - various bug fixes
 
 * Tue Apr 1 2025 KaiGai Kohei <kaigai@heterodb.com> - 6.0-1

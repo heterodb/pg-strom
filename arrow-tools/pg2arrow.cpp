@@ -1100,8 +1100,6 @@ public:
 			if (!rv.ok())
 				Elog("unable to put NULL to '%s' field (Struct): %s",
 					 attname.c_str(), rv.ToString().c_str());
-			for (int j=0; j < children.size(); j++)
-				children[j]->putValue(NULL, 0);
 		}
 		else
 		{
@@ -1119,7 +1117,7 @@ public:
 
 				if (j >= nvalids)
 					child->putValue(NULL, 0);
-				else if (pos + 2*sizeof(int32_t) >= addr + sz)
+				else if (pos + 2*sizeof(int32_t) > addr + sz)
 					Elog("out of range - binary composite has corrupted");
 				else
 				{
@@ -1541,6 +1539,7 @@ pgsql_define_arrow_field(arrowField &arrow_field,
 	handler->type_byval = (attbyval == 't');
 	handler->type_len = attlen;
 	handler->stats_enabled = false;
+	handler->composite_flatten = false;
 	handler->arrow_builder = builder;
 	handler->arrow_array = nullptr;
 	pgsql_handler = handler;
