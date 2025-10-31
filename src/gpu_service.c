@@ -5918,9 +5918,20 @@ gpuservHandleGpuTaskFinal(gpuContext *gcontext,
 	}
 
 	/*
-	 * Is the GpuPreAgg final buffer written back?
+	 * Is the GPU-PreAgg final buffer written back?
+	 *
+	 * If CPU-Fallback is enabled, it always write back the final buffer, and
+	 * runs CPU-based Agg node.
+	 * In addition, no-group aggregation always has CPU-based Agg-node to handle
+	 * empty result set. So, it must be written back.
+	 *
+	 * TODO: more simple conditions are needed.
 	 */
-	if (SESSION_SUPPORTS_CPU_FALLBACK(gclient->h_session))
+	if (SESSION_SUPPORTS_CPU_FALLBACK(gclient->h_session) ||
+		((gclient->xpu_task_flags & DEVTASK__PREAGG) != 0 &&
+		 !SESSION_KEXP_GROUPBY_KEYHASH(gclient->h_session) &&
+		 !SESSION_KEXP_GROUPBY_KEYLOAD(gclient->h_session) &&
+		 !SESSION_KEXP_GROUPBY_KEYCOMP(gclient->h_session)))
 	{
 		for (int __dindex=0; __dindex < numGpuDevAttrs; __dindex++)
 		{
