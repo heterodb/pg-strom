@@ -195,6 +195,17 @@ public:
 		if (arrow_array)
 			arrow_array = nullptr;
 	}
+	virtual	~pgsqlBinaryHandler()
+	{
+		/* NOTE:
+		 * This class has virtual functions but does not require custom destruction.
+		 * However, without a virtual destructor, '-Wnon-virtual-dtor' warns that
+		 * deleting through a base pointer may cause undefined behavior.
+		 * We do NOT delete instances via base pointers in this design,
+		 * but the virtual destructor is added intentionally to silence the warning
+		 * and avoid future maintenance pitfalls.
+		 */
+	}
 };
 
 // ------------------------------------------------

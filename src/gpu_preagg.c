@@ -1847,7 +1847,9 @@ replace_expression_by_agg_altfuncs(Node *node, void *__priv)
 	{
 		Node   *aggfn = make_alternative_aggref(con, (Aggref *)node, true);
 
-		if (!aggfn)
+		if (aggfn)
+			con->has_aggfuncs = true;
+		else
 		{
 			elog(DEBUG2, "no alternative (agg) function for: %s",
 				 nodeToString(node));
@@ -1885,7 +1887,9 @@ replace_expression_by_proj_altfuncs(Node *node, void *__priv)
 	{
 		Node   *aggfn = make_alternative_aggref(con, (Aggref *)node, false);
 
-		if (!aggfn)
+		if (aggfn)
+			con->has_aggfuncs = true;
+		else
 		{
 			elog(DEBUG2, "no alternative (proj) function for: %s",
 				 nodeToString(node));

@@ -1005,6 +1005,7 @@ heterodbExtraEreportCallback(char ereport_class,
 							 const char *message)
 {
 	const char *label = (ereport_class == 'E' ? "error" :
+						 ereport_class == 'N' ? "notice" :
 						 ereport_class == 'I' ? "info" :
 						 ereport_class == 'D' ? "debug" : "???");
 	ereport(LOG, (errhidestmt(true),
