@@ -1454,9 +1454,9 @@ pgsql_define_arrow_field(arrowField &arrow_field,
 		}
 		else if (strcmp(typname, "timestamptz") == 0)
 		{
-			//set timezone
 			builder = std::make_shared<arrow::TimestampBuilder>
-				(arrow::timestamp(arrow::TimeUnit::MICRO), pool);
+				(arrow::timestamp(arrow::TimeUnit::MICRO,
+								  std::string(server_timezone)), pool);
 			handler = std::make_shared<pgsqlTimestampHandler>();
 		}
 		else if (strcmp(typname, "interval") == 0)
