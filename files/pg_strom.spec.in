@@ -25,6 +25,8 @@ AutoReqProv: no
 %define __HAS_PG16      %(test -x %{__pg_config_16} && echo -n 1 || echo -n 0)
 %define __HAS_PG17      %(test -x %{__pg_config_17} && echo -n 1 || echo -n 0)
 %define __HAS_PG18      %(test -x %{__pg_config_18} && echo -n 1 || echo -n 0)
+%define __ARROW_VERSION %(pkgconf --exists arrow && pkgconf --modversion arrow | sed 's/\./ /g' | awk '{print $1}' || echo -n 00)
+%define __PARQUET_VERSION %(pkgconf --exists parquet && pkgconf --modversion parquet | sed 's/\./ /g' | awk '{print $1}' || echo -n 00)
 
 %define __make_options_common VERSION=%{version} RELEASE=%{release} GITHASH=%{__githash} DESTDIR=%{buildroot} CUDA_PATH=%{__cuda_path}
 
@@ -46,8 +48,8 @@ BuildRequires: parquet-devel >= 21
 Requires: postgresql15-server
 Recommends: heterodb-extra >= %{__heterodb_extra_min_version}
 Requires: %{name}
-Requires: arrow-devel >= 21
-Requires: parquet-devel >= 21
+Requires: arrow%{__ARROW_VERSION}00-libs
+Requires: parquet%{__PARQUET_VERSION}00-libs
 Requires(post): %{_sbindir}/update-alternatives
 Requires(postun): %{_sbindir}/update-alternatives
 
@@ -75,8 +77,8 @@ BuildRequires: parquet-devel >= 21
 Requires: postgresql16-server
 Recommends: heterodb-extra >= %{__heterodb_extra_min_version}
 Requires: %{name}
-Requires: arrow-devel >= 21
-Requires: parquet-devel >= 21
+Requires: arrow%{__ARROW_VERSION}00-libs
+Requires: parquet%{__PARQUET_VERSION}00-libs
 Requires(post): %{_sbindir}/update-alternatives
 Requires(postun): %{_sbindir}/update-alternatives
 
@@ -104,8 +106,8 @@ BuildRequires: parquet-devel >= 21
 Requires: postgresql17-server
 Recommends: heterodb-extra >= %{__heterodb_extra_min_version}
 Requires: %{name}
-Requires: arrow-devel >= 21
-Requires: parquet-devel >= 21
+Requires: arrow%{__ARROW_VERSION}00-libs
+Requires: parquet%{__PARQUET_VERSION}00-libs
 Requires(post): %{_sbindir}/update-alternatives
 Requires(postun): %{_sbindir}/update-alternatives
 
@@ -133,8 +135,8 @@ BuildRequires: parquet-devel >= 21
 Requires: postgresql18-server
 Recommends: heterodb-extra >= %{__heterodb_extra_min_version}
 Requires: %{name}
-Requires: arrow-devel >= 21
-Requires: parquet-devel >= 21
+Requires: arrow%{__ARROW_VERSION}00-libs
+Requires: parquet%{__PARQUET_VERSION}00-libs
 Requires(post): %{_sbindir}/update-alternatives
 Requires(postun): %{_sbindir}/update-alternatives
 
@@ -258,7 +260,7 @@ fi
 if [ "$1" -eq 0 ]; then
     /usr/sbin/update-alternatives --remove pgsql-pg2arrow   %{__pkgbindir_15}/pg2arrow   || exit 0
     /usr/sbin/update-alternatives --remove pgsql-arrow2csv  %{__pkgbindir_15}/arrow2csv  || exit 0
-	/usr/sbin/update-alternatives --remove pgsql-tsv2arrow  %{__pkgbindir_15}/tsv2arrow  || exit 0
+    /usr/sbin/update-alternatives --remove pgsql-tsv2arrow  %{__pkgbindir_15}/tsv2arrow  || exit 0
 fi
 %endif
 
@@ -283,7 +285,7 @@ fi
 if [ "$1" -eq 1 ]; then
     /usr/sbin/update-alternatives --install /usr/bin/pg2arrow   pgsql-pg2arrow   %{__pkgbindir_17}/pg2arrow   1700 || exit 0
     /usr/sbin/update-alternatives --install /usr/bin/arrow2csv  pgsql-arrow2csv  %{__pkgbindir_17}/arrow2csv  1700 || exit 0
-	/usr/sbin/update-alternatives --install /usr/bin/tsv2arrow  pgsql-tsv2arrow  %{__pkgbindir_17}/tsv2arrow  1700 || exit 0
+    /usr/sbin/update-alternatives --install /usr/bin/tsv2arrow  pgsql-tsv2arrow  %{__pkgbindir_17}/tsv2arrow  1700 || exit 0
 fi
 %postun PG17
 if [ "$1" -eq 0 ]; then
