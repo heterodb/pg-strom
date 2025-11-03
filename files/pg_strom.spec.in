@@ -25,8 +25,8 @@ AutoReqProv: no
 %define __HAS_PG16      %(test -x %{__pg_config_16} && echo -n 1 || echo -n 0)
 %define __HAS_PG17      %(test -x %{__pg_config_17} && echo -n 1 || echo -n 0)
 %define __HAS_PG18      %(test -x %{__pg_config_18} && echo -n 1 || echo -n 0)
-%define __ARROW_VERSION %(pkgconf --exists arrow && pkgconf --modversion arrow | sed 's/\./ /g' | awk '{print $1}' || echo -n 00)
-%define __PARQUET_VERSION %(pkgconf --exists parquet && pkgconf --modversion parquet | sed 's/\./ /g' | awk '{print $1}' || echo -n 00)
+%define __ARROW_VERSION   %(pkgconf --exists arrow   && pkgconf --modversion arrow   | awk -F. '{printf "%02u", $1}' || echo -n 00)
+%define __PARQUET_VERSION %(pkgconf --exists parquet && pkgconf --modversion parquet | awk -F. '{printf "%02u", $1}' || echo -n 00)
 
 %define __make_options_common VERSION=%{version} RELEASE=%{release} GITHASH=%{__githash} DESTDIR=%{buildroot} CUDA_PATH=%{__cuda_path}
 
@@ -300,7 +300,7 @@ fi
 if [ "$1" -eq 1 ]; then
     /usr/sbin/update-alternatives --install /usr/bin/pg2arrow   pgsql-pg2arrow   %{__pkgbindir_18}/pg2arrow   1800 || exit 0
     /usr/sbin/update-alternatives --install /usr/bin/arrow2csv  pgsql-arrow2csv  %{__pkgbindir_18}/arrow2csv  1800 || exit 0
-	/usr/sbin/update-alternatives --install /usr/bin/tsv2arrow  pgsql-tsv2arrow  %{__pkgbindir_18}/tsv2arrow  1800 || exit 0
+    /usr/sbin/update-alternatives --install /usr/bin/tsv2arrow  pgsql-tsv2arrow  %{__pkgbindir_18}/tsv2arrow  1800 || exit 0
 fi
 %postun PG18
 if [ "$1" -eq 0 ]; then
