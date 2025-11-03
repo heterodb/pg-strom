@@ -5858,7 +5858,9 @@ gpuservHandleGpuTaskFinal(gpuContext *gcontext,
 	if (SESSION_SUPPORTS_CPU_FALLBACK(gclient->h_session))
 	{
 		kern_multirels *d_kmrels = (kern_multirels *)gq_buf->m_kmrels;
-
+		/* sanity checks */
+		assert((gclient->xpu_task_flags & (DEVTASK__SELECT_INTO_DIRECT |
+										   DEVTASK__MERGE_FINAL_BUFFER)) == 0);
 		/* Merge RIGHT-OUTER-JOIN Map to the shared host buffer */
 		if (h_kmrels && d_kmrels)
 		{
@@ -5928,10 +5930,8 @@ gpuservHandleGpuTaskFinal(gpuContext *gcontext,
 	 * TODO: more simple conditions are needed.
 	 */
 	if (SESSION_SUPPORTS_CPU_FALLBACK(gclient->h_session) ||
-		((gclient->xpu_task_flags & DEVTASK__PREAGG) != 0 &&
-		 !SESSION_KEXP_GROUPBY_KEYHASH(gclient->h_session) &&
-		 !SESSION_KEXP_GROUPBY_KEYLOAD(gclient->h_session) &&
-		 !SESSION_KEXP_GROUPBY_KEYCOMP(gclient->h_session)))
+		(gclient->xpu_task_flags & (DEVTASK__PREAGG |
+									DEVTASK__MERGE_FINAL_BUFFER)) == DEVTASK__PREAGG)
 	{
 		for (int __dindex=0; __dindex < numGpuDevAttrs; __dindex++)
 		{
