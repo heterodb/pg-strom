@@ -922,10 +922,7 @@ __assignArrowStatsBinaryOne(MinMaxStatDatum *stats,
 
 	switch (field->type.node.tag)
 	{
-		case ArrowNodeTag__Int:
-		case ArrowNodeTag__Date:
-		case ArrowNodeTag__Time:
-		case ArrowNodeTag__Timestamp: {
+		case ArrowNodeTag__Int: {
 			int64_t	__min = strtol(__min_token, &end1, 10);
 			int64_t	__max = strtol(__max_token, &end2, 10);
 
@@ -999,6 +996,111 @@ __assignArrowStatsBinaryOne(MinMaxStatDatum *stats,
 			}
 			PG_END_TRY();
 			break;
+		case ArrowNodeTag__Date: {
+			int64_t	__min = strtol(__min_token, &end1, 10);
+			int64_t	__max = strtol(__max_token, &end2, 10);
+
+			if (*end1 != '\0' && *end2 != '\0')
+				stats->isnull = true;
+			else
+			{
+				int64_t		__drift = (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE);
+
+				switch (field->type.Date.unit)
+				{
+					case ArrowDateUnit__Day:
+						stats->isnull = false;
+						stats->min.datum = __min - __drift;
+						stats->max.datum = __max - __drift;
+						break;
+					case ArrowDateUnit__MilliSecond:
+						stats->isnull = false;
+						stats->min.datum = __min / (SECS_PER_DAY * 1000) - __drift;
+						stats->max.datum = __max / (SECS_PER_DAY * 1000) - __drift;
+						break;
+					default:
+						stats->isnull = true;
+						break;
+				}
+			}
+			break;
+		}
+		case ArrowNodeTag__Time: {
+			int64_t	__min = strtol(__min_token, &end1, 10);
+			int64_t	__max = strtol(__max_token, &end2, 10);
+
+			if (*end1 != '\0' && *end2 != '\0')
+				stats->isnull = true;
+			else
+			{
+				switch (field->type.Time.unit)
+				{
+					case ArrowTimeUnit__Second:
+						stats->isnull = false;
+						stats->min.datum = __min * 1000000L;
+						stats->max.datum = __max * 1000000L;
+                        break;
+                    case ArrowTimeUnit__MilliSecond:
+						stats->isnull = false;
+						stats->min.datum = __min * 1000L;
+						stats->max.datum = __max * 1000L;
+                        break;
+                    case ArrowTimeUnit__MicroSecond:
+						stats->isnull = false;
+						stats->min.datum = __min;
+						stats->max.datum = __max;
+                        break;
+                    case ArrowTimeUnit__NanoSecond:
+						stats->isnull = false;
+						stats->min.datum = __min / 1000L;
+						stats->max.datum = __max / 1000L;
+						break;
+					default:
+						stats->isnull = true;
+						break;
+				}
+			}
+			break;
+		}
+		case ArrowNodeTag__Timestamp: {
+			int64_t	__min = strtol(__min_token, &end1, 10);
+			int64_t	__max = strtol(__max_token, &end2, 10);
+
+			if (*end1 != '\0' && *end2 != '\0')
+				stats->isnull = true;
+			else
+			{
+				int64_t		__drift = (POSTGRES_EPOCH_JDATE -
+									   UNIX_EPOCH_JDATE) * USECS_PER_DAY;
+				switch (field->type.Timestamp.unit)
+				{
+					case ArrowTimeUnit__Second:
+						stats->isnull = false;
+						stats->min.datum = __min * 1000000L - __drift;
+						stats->max.datum = __max * 1000000L - __drift;
+						break;
+					case ArrowTimeUnit__MilliSecond:
+						stats->isnull = false;
+						stats->min.datum = __min * 1000L - __drift;
+						stats->max.datum = __max * 1000L - __drift;
+						break;
+					case ArrowTimeUnit__MicroSecond:
+						stats->isnull = false;
+						stats->min.datum = __min - __drift;
+						stats->max.datum = __max - __drift;
+						break;
+					case ArrowTimeUnit__NanoSecond:
+						stats->isnull = false;
+						stats->min.datum = __min / 1000L - __drift;
+						stats->max.datum = __max / 1000L - __drift;
+						break;
+					default:
+						stats->isnull = true;
+						break;
+				}
+			}
+			break;
+		}
 		default:
 			/* not supported */
 			stats->isnull = true;
