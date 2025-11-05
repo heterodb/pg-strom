@@ -4213,10 +4213,8 @@ ArrowGetForeignPaths(PlannerInfo *root,
 			compute_parallel_worker(baserel,
 									baserel->pages, -1.0,
 									max_parallel_workers_per_gather);
-//FIXME: Just a workaround to add inner_path of GpuJoin in parallel mode.
-//       We should add non-parallel inner_path
-//		if (num_workers == 0)
-//			return;
+		if (num_workers == 0)
+			return;
 
 		fpath = create_foreignscan_path(root,
 										baserel,
@@ -4231,6 +4229,7 @@ ArrowGetForeignPaths(PlannerInfo *root,
 										NIL,	/* no restrict-info of Join push-down */
 										NIL);	/* no particular private */
 		fpath->path.parallel_aware = true;
+		fpath->path.parallel_workers = num_workers;
 		cost_arrow_fdw_seqscan(&fpath->path,
 							   root,
 							   baserel,
