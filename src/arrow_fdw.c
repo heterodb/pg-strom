@@ -3775,6 +3775,7 @@ __arrowFdwSetupKDSHead(Relation relation,
 	TupleDesc	tupdesc = RelationGetDescr(relation);
 	size_t		head_off = chunk_buffer->len;
 	char		kds_format = KDS_FORMAT_ARROW;
+	bool		all_fields = bms_is_member(-FirstLowInvalidHeapAttributeNumber, referenced);
 	kern_data_store *kds;
 
 	/*
@@ -3808,7 +3809,7 @@ __arrowFdwSetupKDSHead(Relation relation,
 			__arrowKdsAssignAttrOptions(kds,
 										&kds->colmeta[j],
 										&rb_state->fields[field_index]);
-			if (bms_is_member(k+1, referenced))
+			if (all_fields || bms_is_member(k+1, referenced))
 				kds->colmeta[j].field_index = field_index;
 			else
 				kds->colmeta[j].field_index = -1;	/* not referenced */
