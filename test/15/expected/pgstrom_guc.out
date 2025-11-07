@@ -27,7 +27,7 @@ SHOW pg_strom.enable_brin;
  on
 
 SHOW pg_strom.cpu_fallback;
- notice
+ off
 
 SHOW pg_strom.gpu_setup_cost;
  100

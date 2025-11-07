@@ -47,11 +47,11 @@ IMPORT FOREIGN SCHEMA regtest_arrow
   INTO regtest_arrow_index_temp
 OPTIONS (file :'test_arrow_index_path');
 
-EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF,BUFFERS OFF)
 SELECT * FROM regtest_arrow_index_temp.regtest_arrow
  WHERE date_num=(SELECT date_num FROM regtest_arrow_index_temp.target_num);
 
-EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF,BUFFERS OFF)
 SELECT count(*)
   FROM regtest_arrow
  WHERE date_num between '2019-04-14' and '2023-05-23';
@@ -69,11 +69,11 @@ RESET pg_strom.enabled;
 -- ORDER BY int_num
 
 \! $PG2ARROW_CMD -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY int_num' -o $ARROW_TEST_DATA_DIR/test_arrow_index.data --stat=int_num > /dev/null 2>&1
-EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF,BUFFERS OFF)
 SELECT * FROM regtest_arrow_index_temp.regtest_arrow
  WHERE int_num=(SELECT int_num FROM regtest_arrow_index_temp.target_num);
 
-EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF,BUFFERS OFF)
 SELECT count(*)
   FROM regtest_arrow
  WHERE int_num between -50000 and 50000;
@@ -90,11 +90,11 @@ RESET pg_strom.enabled;
 
 -- ORDER BY float
 \! $PG2ARROW_CMD -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY float_num' -o $ARROW_TEST_DATA_DIR/test_arrow_index.data --stat=float_num > /dev/null 2>&1
-EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF,BUFFERS OFF)
 SELECT * FROM regtest_arrow_index_temp.regtest_arrow
  WHERE float_num=(SELECT float_num FROM regtest_arrow_index_temp.target_num);
 
-EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF,BUFFERS OFF)
 SELECT count(*)
   FROM regtest_arrow
  WHERE float_num between -2000 and 2000;
@@ -111,11 +111,11 @@ RESET pg_strom.enabled;
 
 -- ORDER BY half
 \! $PG2ARROW_CMD -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY half_num' -o $ARROW_TEST_DATA_DIR/test_arrow_index.data --stat=half_num > /dev/null 2>&1
-EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF,BUFFERS OFF)
 SELECT * FROM regtest_arrow_index_temp.regtest_arrow
  WHERE half_num=(SELECT half_num FROM regtest_arrow_index_temp.target_num);
 
-EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF,BUFFERS OFF)
 SELECT count(*)
   FROM regtest_arrow
  WHERE half_num between -2000 and 2000;
@@ -132,11 +132,11 @@ RESET pg_strom.enabled;
 
 -- ORDER BY decimal
 \! $PG2ARROW_CMD -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY decimal_num' -o $ARROW_TEST_DATA_DIR/test_arrow_index.data --stat=decimal_num > /dev/null 2>&1
-EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF,BUFFERS OFF)
 SELECT * FROM regtest_arrow_index_temp.regtest_arrow
  WHERE decimal_num=(SELECT decimal_num FROM regtest_arrow_index_temp.target_num);
 
-EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF,BUFFERS OFF)
 SELECT count(*)
   FROM regtest_arrow
  WHERE decimal_num between -5000 and 5000;
@@ -153,11 +153,11 @@ RESET pg_strom.enabled;
 
 -- ORDER BY time
 \! $PG2ARROW_CMD -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY time_num' -o $ARROW_TEST_DATA_DIR/test_arrow_index.data --stat=time_num > /dev/null 2>&1
-EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF,BUFFERS OFF)
 SELECT * FROM regtest_arrow_index_temp.regtest_arrow
  WHERE time_num=(SELECT time_num FROM regtest_arrow_index_temp.target_num);
 
-EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF,BUFFERS OFF)
 SELECT count(*)
   FROM regtest_arrow
  WHERE time_num between '09:00:00' and '17:00:00';
@@ -174,11 +174,11 @@ RESET pg_strom.enabled;
 
 -- ORDER BY timestamp
 \! $PG2ARROW_CMD -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY timestamp_num' -o $ARROW_TEST_DATA_DIR/test_arrow_index.data --stat=timestamp_num
-EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF,BUFFERS OFF)
 SELECT * FROM regtest_arrow_index_temp.regtest_arrow
 WHERE timestamp_num=(SELECT timestamp_num FROM regtest_arrow_index_temp.target_num);
 
-EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF,BUFFERS OFF)
 SELECT count(*)
   FROM regtest_arrow
  WHERE timestamp_num between '2019-04-14 09:00:00' and '2023-05-23 17:00:00';
