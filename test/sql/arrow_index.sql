@@ -2,7 +2,7 @@
 --- Test for apache_arrow with index
 ---
 -- \t on
--- SET pg_strom.regression_test_mode = on;
+SET pg_strom.regression_test_mode = on;
 SET client_min_messages = error;
 DROP SCHEMA IF EXISTS regtest_arrow_index_temp CASCADE;
 CREATE SCHEMA regtest_arrow_index_temp;
@@ -41,7 +41,7 @@ CREATE TABLE target_num AS SELECT * FROM arrow_index_data WHERE id=500000;
 
 \getenv arrow_test_data_dir_path ARROW_TEST_DATA_DIR
 \set test_arrow_index_path :arrow_test_data_dir_path '/test_arrow_index.data'
-\! $PG2ARROW_CMD -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY date_num' -o $ARROW_TEST_DATA_DIR/test_arrow_index.data --stat=date_num
+\! $PG2ARROW_CMD -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY date_num' -o $ARROW_TEST_DATA_DIR/test_arrow_index.data --stat=date_num > /dev/null 2>&1
 IMPORT FOREIGN SCHEMA regtest_arrow
   FROM SERVER arrow_fdw
   INTO regtest_arrow_index_temp
@@ -68,7 +68,7 @@ RESET pg_strom.enabled;
 
 -- ORDER BY int_num
 
-\! $PG2ARROW_CMD -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY int_num' -o $ARROW_TEST_DATA_DIR/test_arrow_index.data --stat=int_num
+\! $PG2ARROW_CMD -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY int_num' -o $ARROW_TEST_DATA_DIR/test_arrow_index.data --stat=int_num > /dev/null 2>&1
 EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
 SELECT * FROM regtest_arrow_index_temp.regtest_arrow
  WHERE int_num=(SELECT int_num FROM regtest_arrow_index_temp.target_num);
@@ -89,7 +89,7 @@ SELECT count(*)
 RESET pg_strom.enabled;
 
 -- ORDER BY float
-\! $PG2ARROW_CMD -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY float_num' -o $ARROW_TEST_DATA_DIR/test_arrow_index.data --stat=float_num
+\! $PG2ARROW_CMD -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY float_num' -o $ARROW_TEST_DATA_DIR/test_arrow_index.data --stat=float_num > /dev/null 2>&1
 EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
 SELECT * FROM regtest_arrow_index_temp.regtest_arrow
  WHERE float_num=(SELECT float_num FROM regtest_arrow_index_temp.target_num);
@@ -110,7 +110,7 @@ SELECT count(*)
 RESET pg_strom.enabled;
 
 -- ORDER BY half
-\! $PG2ARROW_CMD -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY half_num' -o $ARROW_TEST_DATA_DIR/test_arrow_index.data --stat=half_num
+\! $PG2ARROW_CMD -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY half_num' -o $ARROW_TEST_DATA_DIR/test_arrow_index.data --stat=half_num > /dev/null 2>&1
 EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
 SELECT * FROM regtest_arrow_index_temp.regtest_arrow
  WHERE half_num=(SELECT half_num FROM regtest_arrow_index_temp.target_num);
@@ -131,7 +131,7 @@ SELECT count(*)
 RESET pg_strom.enabled;
 
 -- ORDER BY decimal
-\! $PG2ARROW_CMD -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY decimal_num' -o $ARROW_TEST_DATA_DIR/test_arrow_index.data --stat=decimal_num
+\! $PG2ARROW_CMD -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY decimal_num' -o $ARROW_TEST_DATA_DIR/test_arrow_index.data --stat=decimal_num > /dev/null 2>&1
 EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
 SELECT * FROM regtest_arrow_index_temp.regtest_arrow
  WHERE decimal_num=(SELECT decimal_num FROM regtest_arrow_index_temp.target_num);
@@ -152,7 +152,7 @@ SELECT count(*)
 RESET pg_strom.enabled;
 
 -- ORDER BY time
-\! $PG2ARROW_CMD -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY time_num' -o $ARROW_TEST_DATA_DIR/test_arrow_index.data --stat=time_num
+\! $PG2ARROW_CMD -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY time_num' -o $ARROW_TEST_DATA_DIR/test_arrow_index.data --stat=time_num > /dev/null 2>&1
 EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
 SELECT * FROM regtest_arrow_index_temp.regtest_arrow
  WHERE time_num=(SELECT time_num FROM regtest_arrow_index_temp.target_num);

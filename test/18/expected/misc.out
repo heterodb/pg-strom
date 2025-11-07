@@ -13,13 +13,15 @@ CREATE TABLE t1(c0 money , c1 money);
 INSERT INTO t1(c0, c1) VALUES(1, 1);
 EXPLAIN(costs off, verbose)
 SELECT SUM(t1.c1) FROM t1;
-                   QUERY PLAN                    
--------------------------------------------------
- Custom Scan (GpuPreAgg) on regtest_miscs.t1
-   Output: pgstrom.fsum_cach((pgstrom.psum(c1)))
-   GPU Projection: pgstrom.psum(t1.c1)
-   GPU Group Key: 
-(4 rows)
+                    QUERY PLAN                     
+---------------------------------------------------
+ Aggregate
+   Output: pgstrom.sum_cash((pgstrom.psum(c1)))
+   ->  Custom Scan (GpuPreAgg) on regtest_miscs.t1
+         Output: (pgstrom.psum(c1))
+         GPU Projection: pgstrom.psum(t1.c1)
+         GPU Group Key: 
+(6 rows)
 
 SELECT SUM(t1.c1) FROM t1;
   sum  
@@ -43,8 +45,9 @@ SELECT * FROM t1 LEFT OUTER JOIN t0 ON (t1.c0 = t1.c1);
    GPU Projection: t1.c0, t1.c1, t0.c0
    GPU Right Outer Join Quals [1]: (t1.c0 = t1.c1)
    ->  Seq Scan on regtest_miscs.t1
+         Disabled: true
          Output: t1.c0, t1.c1
-(6 rows)
+(7 rows)
 
 SELECT * FROM t1 LEFT OUTER JOIN t0 ON (t1.c0 = t1.c1);
  c0 | c1 | c0 
@@ -66,10 +69,12 @@ SELECT t2.c0 FROM t1 RIGHT OUTER JOIN t2 ON ((CAST(0.1 AS MONEY)) IN (CAST(0.1 A
    Output: t2.c0
    Join Filter: ((0.1)::money = (0.1)::money)
    ->  Seq Scan on regtest_miscs.t2
+         Disabled: true
          Output: t2.c0
    ->  Materialize
          ->  Seq Scan on regtest_miscs.t1
-(7 rows)
+               Disabled: true
+(9 rows)
 
 SELECT t2.c0 FROM t1 RIGHT OUTER JOIN t2 ON ((CAST(0.1 AS MONEY)) IN (CAST(0.1 AS MONEY)));
  c0 
@@ -92,10 +97,12 @@ SELECT t2 FROM t1 RIGHT OUTER JOIN t2 ON ((CAST(0.1 AS MONEY)) IN (CAST(0.1 AS M
    Output: t2.*
    Join Filter: ((0.1)::money = (0.1)::money)
    ->  Seq Scan on regtest_miscs.t2
+         Disabled: true
          Output: t2.*
    ->  Materialize
          ->  Seq Scan on regtest_miscs.t1
-(7 rows)
+               Disabled: true
+(9 rows)
 
 SELECT t2 FROM t1 RIGHT OUTER JOIN t2 ON ((CAST(0.1 AS MONEY)) IN (CAST(0.1 AS MONEY)));
  t2  
@@ -118,12 +125,14 @@ SELECT t1.c0 FROM t1 RIGHT OUTER JOIN t2 ON ((CAST(0.1 AS MONEY)) NOT IN (CAST(0
    Output: t1.c0
    Join Filter: ((0.1)::money <> (0.1)::money)
    ->  Seq Scan on regtest_miscs.t2
+         Disabled: true
          Output: t2.c0
    ->  Materialize
          Output: t1.c0
          ->  Seq Scan on regtest_miscs.t1
+               Disabled: true
                Output: t1.c0
-(9 rows)
+(11 rows)
 
 SELECT t1.c0 FROM t1 RIGHT OUTER JOIN t2 ON ((CAST(0.1 AS MONEY)) NOT IN (CAST(0.1 AS MONEY)));
  c0 
@@ -142,21 +151,24 @@ EXPLAIN(costs off, verbose)
 SELECT SUM(t1.c0) FROM t1 LEFT OUTER JOIN t0 ON ((t0.c0)IS DISTINCT FROM(CAST(1.0E1 AS MONEY))) WHERE (t0.c1) IS NULL;
                                QUERY PLAN                                
 -------------------------------------------------------------------------
- Custom Scan (GpuPreAgg) on regtest_miscs.t1
-   Output: pgstrom.fsum_cach((pgstrom.psum(t1.c0)))
-   GPU Projection: pgstrom.psum(t1.c0)
-   GPU Left Outer Join Quals [1]: [(t0.c1 IS NULL)]
-   GPU Group Key: 
-   ->  Custom Scan (GpuScan) on regtest_miscs.t0
-         Output: t0.c1
-         GPU Projection: t0.c1
+ Aggregate
+   Output: pgstrom.sum_cash((pgstrom.psum(t1.c0)))
+   ->  Custom Scan (GpuPreAgg) on regtest_miscs.t0
+         Output: (pgstrom.psum(t1.c0))
+         GPU Projection: pgstrom.psum(t1.c0)
          GPU Scan Quals: (t0.c0 IS DISTINCT FROM ('10'::numeric)::money)
-(9 rows)
+         GPU Right Outer Join Quals [1]: [(t0.c1 IS NULL)]
+         GPU Group Key: 
+         ->  Seq Scan on regtest_miscs.t1
+               Disabled: true
+               Output: t1.c0
+(11 rows)
 
 SELECT SUM(t1.c0) FROM t1 LEFT OUTER JOIN t0 ON ((t0.c0)IS DISTINCT FROM(CAST(1.0E1 AS MONEY))) WHERE (t0.c1) IS NULL;
  sum 
 -----
-(0 rows)
+    
+(1 row)
 
 -- #631
 DROP TABLE IF EXISTS t0;
@@ -179,18 +191,18 @@ WITH MYWITH AS (SELECT 1 AS f1
     INNER JOIN  (SELECT "c1" AS f5 FROM t1) AS t2  
     ON (( ((f5)  IN (f6))) AND ((1 > ((f6)::bigint >> 5)) IS FALSE)))
 SELECT * FROM MYWITH;
-                           QUERY PLAN                            
------------------------------------------------------------------
- Custom Scan (GpuJoin) on regtest_miscs.t1
+                        QUERY PLAN                         
+-----------------------------------------------------------
+ Custom Scan (GpuJoin) on regtest_miscs.t0
    Output: 1
    GPU Projection: 
+   GPU Scan Quals: ((1 > ((t0.c2)::bigint >> 5)) IS FALSE)
    GPU Join Quals [1]: ((t0.c2)::double precision = t1.c1)
-   GPU Outer Hash [1]: t1.c1
-   GPU Inner Hash [1]: (t0.c2)::double precision
-   ->  Custom Scan (GpuScan) on regtest_miscs.t0
-         Output: t0.c2
-         GPU Projection: t0.c2
-         GPU Scan Quals: ((1 > ((t0.c2)::bigint >> 5)) IS FALSE)
+   GPU Outer Hash [1]: (t0.c2)::double precision
+   GPU Inner Hash [1]: t1.c1
+   ->  Seq Scan on regtest_miscs.t1
+         Disabled: true
+         Output: t1.c1
 (10 rows)
 
 WITH MYWITH AS (SELECT 1 AS f1
@@ -399,14 +411,14 @@ EXPLAIN(costs off, verbose)
 SELECT t1.c0 FROM t2, t1 WHERE (t2.c0) BETWEEN SYMMETRIC (t1.c0) AND ((0.9)::MONEY);
                                                         QUERY PLAN                                                        
 --------------------------------------------------------------------------------------------------------------------------
- Custom Scan (GpuJoin) on regtest_miscs.t1
+ Custom Scan (GpuJoin) on regtest_miscs.t2
    Output: t1.c0
    GPU Projection: t1.c0
+   GPU Scan Quals: ((t2.c0 <= (0.9)::money) OR (t2.c0 >= (0.9)::money))
    GPU Join Quals [1]: (((t2.c0 >= t1.c0) AND (t2.c0 <= (0.9)::money)) OR ((t2.c0 >= (0.9)::money) AND (t2.c0 <= t1.c0)))
-   ->  Custom Scan (GpuScan) on regtest_miscs.t2
-         Output: t2.c0
-         GPU Projection: t2.c0
-         GPU Scan Quals: ((t2.c0 <= (0.9)::money) OR (t2.c0 >= (0.9)::money))
+   ->  Seq Scan on regtest_miscs.t1
+         Disabled: true
+         Output: t1.c0
 (8 rows)
 
 SELECT t1.c0 FROM t2, t1 WHERE (t2.c0) BETWEEN SYMMETRIC (t1.c0) AND ((0.9)::MONEY);
@@ -425,16 +437,16 @@ INSERT INTO t1(c0) VALUES((0.1)::MONEY);
 INSERT INTO t0(c0) VALUES((0.1)::MONEY);
 EXPLAIN(costs off, verbose)
 SELECT * FROM t1, t0 WHERE (t0.c0) BETWEEN (t1.c0) AND (CAST(0.8 AS MONEY));
-                   QUERY PLAN                    
--------------------------------------------------
- Custom Scan (GpuJoin) on regtest_miscs.t1
+                QUERY PLAN                 
+-------------------------------------------
+ Custom Scan (GpuJoin) on regtest_miscs.t0
    Output: t1.c0, t0.c0
    GPU Projection: t1.c0, t0.c0
+   GPU Scan Quals: (t0.c0 <= (0.8)::money)
    GPU Join Quals [1]: (t0.c0 >= t1.c0)
-   ->  Custom Scan (GpuScan) on regtest_miscs.t0
-         Output: t0.c0
-         GPU Projection: t0.c0
-         GPU Scan Quals: (t0.c0 <= (0.8)::money)
+   ->  Seq Scan on regtest_miscs.t1
+         Disabled: true
+         Output: t1.c0
 (8 rows)
 
 SELECT * FROM t1, t0 WHERE (t0.c0) BETWEEN (t1.c0) AND (CAST(0.8 AS MONEY));
@@ -459,8 +471,9 @@ SELECT * FROM t0,t1 WHERE ((t0.c0)::INT IS NOT DISTINCT FROM (t0.c0)) OR (t1.c0)
    GPU Projection: t0.c0, t1.c0
    GPU Join Quals [1]: ((NOT (((t0.c0)::integer)::double precision IS DISTINCT FROM t0.c0)) OR t1.c0)
    ->  Seq Scan on regtest_miscs.t0
+         Disabled: true
          Output: t0.c0
-(6 rows)
+(7 rows)
 
 SELECT * FROM t0,t1 WHERE ((t0.c0)::INT IS NOT DISTINCT FROM (t0.c0)) OR (t1.c0);
  c0 | c0 
@@ -492,11 +505,12 @@ SELECT * FROM t0 RIGHT OUTER JOIN (SELECT * FROM t1, t0 ORDER BY t0.c0 DESC, t1.
                ->  Materialize
                      Output: t1.c0
                      ->  Seq Scan on regtest_miscs.t1
+                           Disabled: true
                            Output: t1.c0
    ->  Result
          Output: c0
          One-Time Filter: false
-(18 rows)
+(19 rows)
 
 SELECT * FROM t0 RIGHT OUTER JOIN (SELECT * FROM t1, t0 ORDER BY t0.c0 DESC, t1.c0 DESC) AS sub0 ON FALSE;
  c0 | c0 | c0 
@@ -522,11 +536,16 @@ SELECT t1.c1, t0.c2 FROM t1 FULL OUTER JOIN t0 ON (t0.c2) IN (t1.c2) WHERE ((t0.
    GPU Outer Hash [1]: t1.c2
    GPU Inner Hash [1]: t0.c2
    ->  Seq Scan on regtest_miscs.t0
+         Disabled: true
          Output: t0.c2, t0.c0
-(8 rows)
+(9 rows)
 
 SELECT t1.c1, t0.c2 FROM t1 FULL OUTER JOIN t0 ON (t0.c2) IN (t1.c2) WHERE ((t0.c0) IN ((0.1)::MONEY)) ISNULL;
-ERROR:  gpu_service.c:4025  failed on cuStreamSynchronize: CUDA_ERROR_ASSERT
+ c1 | c2 
+----+----
+    | 
+(1 row)
+
 -- #683
 DROP TABLE IF EXISTS t2;
 DROP TABLE IF EXISTS t3;
@@ -535,11 +554,27 @@ CREATE TABLE t3(LIKE t2);
 INSERT INTO t3(c0) VALUES(33092);
 EXPLAIN(costs off, verbose)
 SELECT DISTINCT ON (t3.c0 + 1) t3.c0 FROM t3 FULL OUTER JOIN t2 ON (t2.c0) IN (t3.c0);
-ERROR:  CustomScan(dummy): incompatible tlist is supplied
-<>
-({VAR :varno 1 :varattno 1 :vartype 20 :vartypmod -1 :varcollid 0 :varnullingrels (b 3) :varlevelsup 0 :varnosyn 1 :varattnosyn 1 :location -1} {OPEXPR :opno 688 :opfuncid 1274 :opresulttype 20 :opretset false :opcollid 0 :inputcollid 0 :args ({VAR :varno 1 :varattno 1 :vartype 20 :vartypmod -1 :varcollid 0 :varnullingrels (b 3) :varlevelsup 0 :varnosyn 1 :varattnosyn 1 :location -1} {CONST :consttype 23 :consttypmod -1 :constcollid 0 :constlen 4 :constbyval true :constisnull false :location -1 :constvalue 4 [ 1 0 0 0 0 0 0 0 ]}) :location -1})
+                       QUERY PLAN                       
+--------------------------------------------------------
+ HashAggregate
+   Output: t3.c0, ((t3.c0 + 1))
+   Group Key: ((t3.c0 + 1))
+   ->  Custom Scan (GpuPreAgg) on regtest_miscs.t3
+         Output: t3.c0, ((t3.c0 + 1))
+         GPU Projection: t3.c0, (t3.c0 + 1)
+         GPU Full Outer Join Quals [1]: (t2.c0 = t3.c0)
+         GPU Outer Hash [1]: t3.c0
+         GPU Inner Hash [1]: t2.c0
+         GPU Group Key: (t3.c0 + 1)
+         ->  Seq Scan on regtest_miscs.t2
+               Disabled: true
+               Output: t2.c0
+(13 rows)
+
 SELECT DISTINCT ON (t3.c0 + 1) t3.c0 FROM t3 FULL OUTER JOIN t2 ON (t2.c0) IN (t3.c0);
-ERROR:  CustomScan(dummy): incompatible tlist is supplied
-<>
-({VAR :varno 1 :varattno 1 :vartype 20 :vartypmod -1 :varcollid 0 :varnullingrels (b 3) :varlevelsup 0 :varnosyn 1 :varattnosyn 1 :location -1} {OPEXPR :opno 688 :opfuncid 1274 :opresulttype 20 :opretset false :opcollid 0 :inputcollid 0 :args ({VAR :varno 1 :varattno 1 :vartype 20 :vartypmod -1 :varcollid 0 :varnullingrels (b 3) :varlevelsup 0 :varnosyn 1 :varattnosyn 1 :location -1} {CONST :consttype 23 :consttypmod -1 :constcollid 0 :constlen 4 :constbyval true :constisnull false :location -1 :constvalue 4 [ 1 0 0 0 0 0 0 0 ]}) :location -1})
+  c0   
+-------
+ 33092
+(1 row)
+
 DROP SCHEMA regtest_miscs CASCADE;
