@@ -3261,6 +3261,21 @@ __readParquetMinMaxStats(ArrowFieldNode *field,
 			max_datum = std::to_string(__stat->max());
 			break;
 		}
+		case parquet::Type::BYTE_ARRAY: {
+			auto __stat = std::dynamic_pointer_cast<const parquet::ByteArrayStatistics>(stats);
+			auto cdescr = __stat->descr();
+
+			assert(cdescr->physical_type() == stats->physical_type());
+			if (cdescr->converted_type() == parquet::ConvertedType::type::UTF8 ||
+				(cdescr->logical_type() && cdescr->logical_type()->is_string()))
+			{
+				auto	__min = __stat->min();
+				auto	__max = __stat->max();
+				min_datum = std::string(reinterpret_cast<const char*>(__min.ptr), __min.len);
+				max_datum = std::string(reinterpret_cast<const char*>(__max.ptr), __max.len);
+			}
+			break;
+		}
 		case parquet::Type::FIXED_LEN_BYTE_ARRAY: {
 			auto __stat = std::dynamic_pointer_cast<const parquet::FLBAStatistics>(stats);
 			auto cdescr = __stat->descr();

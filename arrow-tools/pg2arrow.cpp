@@ -2623,7 +2623,6 @@ static std::shared_ptr<parquet::WriterProperties>
 parquet_my_writer_props(void)
 {
 	parquet::WriterProperties::Builder builder;
-	auto	props = parquet::WriterProperties::Builder().build();
 
 	/* created-by pg2arrow */
 	builder.created_by(std::string("pg2arrow"));
@@ -2642,6 +2641,7 @@ parquet_my_writer_props(void)
 	}
 	// MEMO: Parquet enables min/max/null-count statistics in the default,
 	// so we don't need to touch something special ...(like enable_statistics())
+	builder.enable_statistics();
 	return builder.build();
 }
 
