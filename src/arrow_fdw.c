@@ -17,16 +17,19 @@
 /*
  * min/max statistics datum
  */
+#define MINMAX_STAT_BYTESZ	32
 typedef struct
 {
 	bool		isnull;
 	union {
 		Datum	datum;
 		NumericData	numeric;	/* if NUMERICOID */
+		char	string[MINMAX_STAT_BYTESZ];		/* if TEXTOID */
 	} min;
 	union {
 		Datum	datum;
 		NumericData numeric;	/* if NUMERICOID */
+		char	string[MINMAX_STAT_BYTESZ];		/* if TEXTOID */
 	} max;
 } MinMaxStatDatum;
 
@@ -908,17 +911,10 @@ applyArrowStatsBinary(RecordBatchState *rb_state, arrowStatsBinary *arrow_bstats
 static void
 __assignArrowStatsBinaryOne(MinMaxStatDatum *stats,
 							ArrowField *field,
-							ArrowKeyValue *kv)
+							const char *__min_token,
+							const char *__max_token)
 {
-	char   *__min_token = (char *)alloca(strlen(kv->value) + 10);
-	char   *__max_token;
 	char   *end1, *end2;
-
-	strcpy(__min_token, kv->value);
-	__max_token = strchr(__min_token, ',');
-	if (!__max_token)
-		return;
-	*__max_token++ = '\0';
 
 	switch (field->type.node.tag)
 	{
@@ -1101,6 +1097,22 @@ __assignArrowStatsBinaryOne(MinMaxStatDatum *stats,
 			}
 			break;
 		}
+		case ArrowNodeTag__Utf8:
+		case ArrowNodeTag__LargeUtf8: {
+			size_t	min_sz = strlen(__min_token);
+			size_t	max_sz = strlen(__max_token);
+
+			if (min_sz >= MINMAX_STAT_BYTESZ)
+				min_sz = MINMAX_STAT_BYTESZ - 1;
+			memcpy(stats->min.string+1, __min_token, min_sz);
+			SET_VARSIZE_SHORT(stats->min.string, min_sz+1);
+			if (max_sz >= MINMAX_STAT_BYTESZ)
+				max_sz = MINMAX_STAT_BYTESZ - 1;
+			memcpy(stats->max.string+1, __max_token, max_sz);
+			SET_VARSIZE_SHORT(stats->max.string, max_sz);
+			stats->isnull = false;
+			break;
+		}
 		default:
 			/* not supported */
 			stats->isnull = true;
@@ -1115,6 +1127,10 @@ assignArrowStatsBinary(RecordBatchState *rb_state,
 					   int num_custom_metadata,
 					   ArrowKeyValue *custom_metadata)
 {
+	char   *__min_token = NULL;
+	char   *__max_token = NULL;
+	size_t	bufsz = 0;
+
 	for (int i=0; i < num_custom_metadata; i++)
 	{
 		ArrowKeyValue *kv = &custom_metadata[i];
@@ -1130,10 +1146,26 @@ assignArrowStatsBinary(RecordBatchState *rb_state,
 
 				if (strcmp(field_name, field->name) == 0)
 				{
-					__assignArrowStatsBinaryOne(&rb_field->stat_datum, field, kv);
-					if (!rb_field->stat_datum.isnull)
-						*p_stat_attrs = bms_add_member(*p_stat_attrs, j);
-					break;
+					size_t	len = strlen(kv->value);
+
+					if (len >= bufsz)
+					{
+						bufsz = len * 2 + 100;
+						__min_token = alloca(bufsz);
+					}
+					strcpy(__min_token, kv->value);
+					__max_token = strchr(__min_token, ',');
+					if (__max_token)
+					{
+						*__max_token++ = '\0';
+						__assignArrowStatsBinaryOne(&rb_field->stat_datum,
+													field,
+													__min_token,
+													__max_token);
+						if (!rb_field->stat_datum.isnull)
+							*p_stat_attrs = bms_add_member(*p_stat_attrs, j);
+						break;
+					}
 				}
 			}
 		}
@@ -1177,6 +1209,7 @@ __buildArrowStatsOper(arrowStatsHint *as_hint,
 		var = lsecond(op->args);
 		arg = linitial(op->args);
 	}
+
 	/*
 	 * Is it VAR <OPER> ARG form?
 	 *
@@ -1213,6 +1246,13 @@ __buildArrowStatsOper(arrowStatsHint *as_hint,
 	if (strategy == BTLessStrategyNumber ||
 		strategy == BTLessEqualStrategyNumber)
 	{
+		/* NOTE: min/max statistics of string data is not collation aware; it is
+		 * generated based on simple byte comparison. Thus, it is not reliable to
+		 * use as a hint for '<' or '<=' operator.
+		 */
+		if (var->vartype == TEXTOID)
+			return false;
+
 		/* if (VAR < ARG) --> (Min >= ARG), can be skipped */
 		/* if (VAR <= ARG) --> (Min > ARG), can be skipped */
 		opcode = get_negator(opcode);
@@ -1236,6 +1276,13 @@ __buildArrowStatsOper(arrowStatsHint *as_hint,
 	else if (strategy == BTGreaterEqualStrategyNumber ||
 			 strategy == BTGreaterStrategyNumber)
 	{
+		/* NOTE: min/max statistics of string data is not collation aware; it is
+		 * generated based on simple byte comparison. Thus, it is not reliable to
+		 * use as a hint for '>' or '>=' operator.
+		 */
+		if (var->vartype == TEXTOID)
+			return false;
+
 		/* if (VAR > ARG) --> (Max <= ARG), can be skipped */
 		/* if (VAR >= ARG) --> (Max < ARG), can be skipped */
 		opcode = get_negator(opcode);
@@ -1258,6 +1305,20 @@ __buildArrowStatsOper(arrowStatsHint *as_hint,
 	}
 	else if (strategy == BTEqualStrategyNumber)
 	{
+		Oid		collation_oid = op->inputcollid;
+
+		/* NOTE: min/max statistics of string data is built based on UTF-8 encoding,
+		 * and generated based on simple byte comparison. Thus, we can use this
+		 * statistics for string data only when database encoding is UTF-8, and
+		 * operator determines larger/smaller relationship based on simple bytes
+		 * comparison.
+		 */
+		if (var->vartype == TEXTOID)
+		{
+			if (GetDatabaseEncoding() != PG_UTF8)
+				return false;
+			collation_oid = C_COLLATION_OID;
+		}
 		/* (VAR = ARG) --> (Min > ARG) || (Max < ARG), can be skipped */
 		opcode = get_opfamily_member(opfamily, var->vartype,
 									 exprType((Node *)arg),
@@ -1273,7 +1334,7 @@ __buildArrowStatsOper(arrowStatsHint *as_hint,
 											 0),
 							 (Expr *)copyObject(arg),
 							 op->opcollid,
-							 op->inputcollid);
+							 collation_oid);
 		set_opfuncid((OpExpr *)expr);
 		as_hint->eval_quals = lappend(as_hint->eval_quals, expr);
 
@@ -1291,7 +1352,7 @@ __buildArrowStatsOper(arrowStatsHint *as_hint,
 											 0),
 							 (Expr *)copyObject(arg),
 							 op->opcollid,
-							 op->inputcollid);
+							 collation_oid);
 		set_opfuncid((OpExpr *)expr);
 		as_hint->eval_quals = lappend(as_hint->eval_quals, expr);
 	}
@@ -1671,6 +1732,13 @@ execCheckArrowStatsHint(arrowStatsHint *stats_hint,
 					= PointerGetDatum(&rb_field->stat_datum.min.numeric);
 				max_values->tts_values[anum-1]
 					= PointerGetDatum(&rb_field->stat_datum.max.numeric);
+			}
+			else if (rb_field->atttypid == TEXTOID)
+			{
+				min_values->tts_values[anum-1]
+					= PointerGetDatum(rb_field->stat_datum.min.string);
+				max_values->tts_values[anum-1]
+					= PointerGetDatum(rb_field->stat_datum.max.string);
 			}
 			else
 			{
@@ -2258,6 +2326,18 @@ __buildRecordBatchFieldState(setupRecordBatchContext *con,
 		 */
 		Assert(con->buffer_curr == NULL &&
 			   con->buffer_tail == NULL);
+
+		/*
+		 * Parquet embeds min/max statistics in FieldNode. If available, it
+		 * shall be assigned on the RecordBatchFieldState.
+		 */
+		if (fnode->stat_min_value && fnode->stat_max_value)
+		{
+			__assignArrowStatsBinaryOne(&rb_field->stat_datum,
+										field,
+										fnode->stat_min_value,
+										fnode->stat_max_value);
+		}
 	}
 	else
 	{
@@ -2324,7 +2404,8 @@ __buildRecordBatchStateOne(ArrowSchema *schema,
 						   ArrowFileState *af_state,
 						   int rb_index,
 						   ArrowBlock *block,
-						   ArrowRecordBatch *rbatch)
+						   ArrowRecordBatch *rbatch,
+						   Bitmapset **p_stat_attrs)
 {
 	setupRecordBatchContext con;
 	RecordBatchState *rb_state;
@@ -2353,6 +2434,8 @@ __buildRecordBatchStateOne(ArrowSchema *schema,
 		ArrowField	   *field = &schema->fields[j];
 
 		__buildRecordBatchFieldState(&con, rb_field, field, 0);
+		if (!rb_field->stat_datum.isnull)
+			*p_stat_attrs = bms_add_member(*p_stat_attrs, j);
 	}
 	if (con.buffer_curr != con.buffer_tail ||
 		con.fnode_curr  != con.fnode_tail)
@@ -2412,7 +2495,8 @@ __setupArrowFileStateByFile(ArrowFileState *af_state,
 		RecordBatchState   *rb_state;
 
 		rb_state = __buildRecordBatchStateOne(&af_info->footer.schema,
-											  af_state, i, block, rbatch);
+											  af_state, i, block, rbatch,
+											  p_stat_attrs);
 		if (arrow_bstats)
 			applyArrowStatsBinary(rb_state, arrow_bstats);		/* stats v1 */
 		else

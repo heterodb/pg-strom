@@ -914,8 +914,83 @@ public:
 class pgsqlTextHandler final : public pgsqlBinaryVarlenaHandler
 {
 public:
+	static constexpr size_t	STATS_VALUE_LEN = 60;
+	bool	stats_is_valid;
+	char	stats_min_value[STATS_VALUE_LEN+1];
+	char	stats_max_value[STATS_VALUE_LEN+1];
+	int		stats_min_len;
+	int		stats_max_len;
+	void	enableStats(void)
+	{
+		this->stats_enabled = true;
+	}
+	void	updateStats(const char *addr, int sz)
+	{
+		int		__len, rv;
+
+		if (!addr)
+			return;
+		if (!stats_is_valid)
+		{
+			__len = Min(sz, STATS_VALUE_LEN);
+			memcpy(stats_min_value, addr, __len);
+			memcpy(stats_max_value, addr, __len);
+			stats_min_value[__len] = '\0';
+			stats_max_value[__len] = '\0';
+			stats_min_len = __len;
+			stats_max_len = __len;
+			stats_is_valid = true;
+		}
+		else
+		{
+			__len = Min(sz, stats_min_len);
+			rv = memcmp(addr, stats_min_value, __len);
+			if (rv < 0 || (rv == 0 && stats_min_len < sz))
+			{
+				__len = Min(sz, STATS_VALUE_LEN);
+				memcpy(stats_min_value, addr, __len);
+				stats_min_value[__len] = '\0';
+			}
+			__len = Min(sz, stats_max_len);
+			rv = memcmp(addr, stats_max_value, __len);
+			if (rv > 0 || (rv == 0 && stats_max_len < sz))
+			{
+				__len = Min(sz, STATS_VALUE_LEN);
+				memcpy(stats_max_value, addr, __len);
+				stats_max_value[__len] = '\0';
+			}
+		}
+	}
+	bool	appendStats(std::shared_ptr<arrow::KeyValueMetadata> custom_metadata)
+	{
+		bool	retval = stats_is_valid;
+
+		if (stats_is_valid)
+		{
+			/* NOTE: we cannot ',' character to use it for delimiter. */
+			char   *pos;
+
+			pos = strchr(stats_min_value, ',');
+			if (pos)
+				*pos = '\0';
+			pos = strchr(stats_max_value, ',');
+			if (pos)
+			{
+				pos[0] = (*pos + 1);
+				pos[1] = '\0';
+			}
+			custom_metadata->Append(std::string("min_max_stats.") + this->attname,
+									std::string(stats_min_value) +
+									std::string(",") +
+									std::string(stats_max_value));
+			stats_is_valid = false;
+		}
+		return retval;
+	}
 	std::string_view fetchBinary(const char *addr, int sz)
 	{
+		if (this->stats_enabled)
+			updateStats(addr, sz);
 		return std::string_view(addr, sz);
 	}
 	PGSQL_BINARY_PUT_VALUE_TEMPLATE(String)
@@ -2623,7 +2698,6 @@ static std::shared_ptr<parquet::WriterProperties>
 parquet_my_writer_props(void)
 {
 	parquet::WriterProperties::Builder builder;
-	auto	props = parquet::WriterProperties::Builder().build();
 
 	/* created-by pg2arrow */
 	builder.created_by(std::string("pg2arrow"));
