@@ -60,7 +60,7 @@ UPDATE regtest_data
        comp.d = pgstrom.random_float(2, -100000.0, 100000.0),
        comp.e = pgstrom.random_timestamp(2);
 
-\! $PG2ARROW_CMD --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_cpu_temp.regtest_data' -o $ARROW_TEST_DATA_DIR/test_arrow_cpu_1.data
+\! $PG2ARROW_CMD --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_cpu_temp.regtest_data' -o $ARROW_TEST_DATA_DIR/test_arrow_cpu_1.data > /dev/null 2>&1
 
 \set test_arrow_cpu_1_path `echo -n $ARROW_TEST_DATA_DIR/test_arrow_cpu_1.data`
 
@@ -86,7 +86,7 @@ INSERT INTO timezone_data (
                                         '2020-02-13 12:00:00')
     FROM generate_series(1,1500) x);
 
-\! $PG2ARROW_CMD -c 'SELECT * FROM regtest_arrow_cpu_temp.timezone_data' -o $ARROW_TEST_DATA_DIR/test_arrow_cpu_2.data
+\! $PG2ARROW_CMD -c 'SELECT * FROM regtest_arrow_cpu_temp.timezone_data' -o $ARROW_TEST_DATA_DIR/test_arrow_cpu_2.data > /dev/null 2>&1
 
 \set timezone_arrow_file_path `echo -n $ARROW_TEST_DATA_DIR/test_arrow_cpu_2.data`
 
