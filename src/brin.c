@@ -627,7 +627,6 @@ __BrinIndexExecBuildResults(pgstromTaskState *pts)
 {
 	/* see bringetbitmap() */
 	pgstromSharedState *ps_state = pts->ps_state;
-	EState		   *estate = pts->css.ss.ps.state;
 	BrinIndexState *br_state = pts->br_state;
 	BrinIndexResults *br_results = br_state->brinResults;
 	BrinDesc	   *bdesc = br_state->brinDesc;
