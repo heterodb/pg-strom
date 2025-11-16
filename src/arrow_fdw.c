@@ -5454,15 +5454,58 @@ ArrowShutdownForeignScan(ForeignScanState *node)
 	pgstromArrowFdwShutdown(node->fdw_state);
 }
 
+#if 1
+/*
+ * fixup_danger_expression_for_explain
+ *
+ * NOTE: pgstromArrowFdwExplain() called via ExplainForeignScan() of FDW
+ * does not carry 'ancestors' information, so extension cannot deparse
+ * some kind of expressions, like Param which refers upper node.
+ * It eventually causes assertion failed, so we have to fixup them.
+ *
+ * NOTE: we want this API design is revised in the future PostgreSQL version...
+ *       details are described at #974
+ */
+static Node *
+fixup_danger_expression_for_explain(Node *node, void *data)
+{
+	if (!node)
+		return node;
+	if (IsA(node, Param))
+	{
+		Param  *param = (Param *)node;
+		char	buf[100];
+		int		bufsz;
+
+		bufsz = sprintf(buf, "****Param(%s, ID: %d)",
+						param->paramkind == PARAM_EXTERN  ? "PARAM_EXTERN" :
+						param->paramkind == PARAM_EXEC    ? "PARAM_EXEC" :
+						param->paramkind == PARAM_SUBLINK ? "PARAM_SUBLINK" :
+						param->paramkind == PARAM_MULTIEXPR ? "PARAM_MULTIEXPR" : "???",
+						param->paramid + 1);
+		SET_VARSIZE(buf, bufsz);
+		return (Node *)makeConst(TEXTOID,	/* consttype */
+								 -1,		/* consttypmod */
+								 InvalidOid,/* constcollid */
+								 -1,		/* constlen */
+								 PointerGetDatum(pmemdup(buf, bufsz)),
+								 false,		/* constisnull */
+								 false);	/* constbyval */
+	}
+	return expression_tree_mutator(node, fixup_danger_expression_for_explain, data);
+}
+#endif
+
 /*
  * ArrowExplainForeignScan
  */
 void
-pgstromArrowFdwExplain(ArrowFdwState *arrow_state,
-					   Relation frel,
+pgstromArrowFdwExplain(ScanState *ss,	/* Foreign or Custom */
+					   ArrowFdwState *arrow_state,
 					   ExplainState *es,
 					   List *dcontext)
 {
+	Relation	frel = ss->ss_currentRelation;
 	TupleDesc	tupdesc = RelationGetDescr(frel);
 	size_t	   *chunk_sz;
 	ListCell   *lc1, *lc2;
@@ -5503,6 +5546,14 @@ pgstromArrowFdwExplain(ArrowFdwState *arrow_state,
 			Node   *qual = lfirst(lc1);
 			char   *temp;
 
+			/*
+			 * FIXME: deparse_context by ForeignScanState does not carry
+			 * 'ancestors' (probably, wrong API design...), so we cannot
+			 * deparse expressions for human readable form.
+			 * So, we replace Param expression for safety.
+			 */
+			if (IsA(ss, ForeignScanState))
+				qual = fixup_danger_expression_for_explain(qual, ss);
 			temp = deparse_expression(qual, dcontext, es->verbose, false);
 			if (buf.len > 0)
 				appendStringInfoString(&buf, ", ");
@@ -5618,13 +5669,12 @@ pgstromArrowFdwExplain(ArrowFdwState *arrow_state,
 static void
 ArrowExplainForeignScan(ForeignScanState *node, ExplainState *es)
 {
-	Relation		frel = node->ss.ss_currentRelation;
 	List		   *dcontext;
 
 	dcontext = set_deparse_context_plan(es->deparse_cxt,
 										node->ss.ps.plan,
 										NULL);
-	pgstromArrowFdwExplain(node->fdw_state, frel, es, dcontext);
+	pgstromArrowFdwExplain(&node->ss, node->fdw_state, es, dcontext);
 }
 
 /*

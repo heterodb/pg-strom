@@ -1000,8 +1000,8 @@ extern void		pgstromArrowFdwInitDSM(ArrowFdwState *arrow_state,
 extern void		pgstromArrowFdwAttachDSM(ArrowFdwState *arrow_state,
 										 pgstromSharedState *ps_state);
 extern void		pgstromArrowFdwShutdown(ArrowFdwState *arrow_state);
-extern void		pgstromArrowFdwExplain(ArrowFdwState *arrow_state,
-									   Relation frel,
+extern void		pgstromArrowFdwExplain(ScanState *ss,
+									   ArrowFdwState *arrow_state,
 									   ExplainState *es,
 									   List *dcontext);
 extern bool		kds_arrow_fetch_tuple(TupleTableSlot *slot,

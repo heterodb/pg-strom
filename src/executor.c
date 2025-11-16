@@ -2989,8 +2989,8 @@ pgstromExplainTaskState(CustomScanState *node,
 	 */
 	if (pts->arrow_state)
 	{
-		pgstromArrowFdwExplain(pts->arrow_state,
-							   pts->css.ss.ss_currentRelation,
+		pgstromArrowFdwExplain(&pts->css.ss,
+							   pts->arrow_state,
 							   es, dcontext);
 		pgstromGpuDirectExplain(pts, es, dcontext);
 	}
