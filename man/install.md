@@ -308,12 +308,12 @@ NVME-SSDからの直接データ読み出し（GPU-Direct SQL）を使用する�
 本節では、DOCA(OFED)モジュールの導入方法を説明します。
 
 !!! Info
-    なお、DOCA(OFEF)モジュールのうちLinux kernel driver部分はかつてMOFED (Mellanox Open Fabric Enterprise Driver)と呼ばれ、現在でも
+    なお、DOCA(OFED)モジュールのうちLinux kernel driver部分はかつてMOFED (Mellanox Open Fabric Enterprise Driver)と呼ばれ、現在でも
     [こちら](https://network.nvidia.com/products/infiniband-drivers/linux/mlnx_ofed/)からダウンロードする事ができます。
     しかし、既に長期保守（Long Term Support）のモードに入っており、RHEL10など新しい環境へドライバが提供される見通しがないため、
     PG-Stromのインストール手順としてはDOCA(OFED)パッケージの利用を推奨します。
 
-なお、DOCA(OFEF)モジュールの公式インストール手順は[こちら](https://docs.nvidia.com/dgx/dgx-rhel8-install-guide/installing-dofed-steps.html)となります。
+なお、DOCA(OFED)モジュールの公式インストール手順は[こちら](https://docs.nvidia.com/dgx/dgx-rhel8-install-guide/installing-dofed-steps.html)となります。
 }
 @en{
 To use direct data from NVME-SSD to GPU (GPU-Direct SQL), you need to replace the operating system default inbox driver with the NVME drive distributed by DOCA (OFED) module.
@@ -325,7 +325,7 @@ This section introduces the steps to install the DOCA (OFED) module.
    However, it has already entered Long Term Support mode, and there is no prospect of the driver being provided for newer environments
    such as RHEL10. So, we recommend using the DOCA (OFED) package for the PG-Strom installation procedure.
 
-The official installation instructions for the DOCA (OFEF) module can be found [here](https://docs.nvidia.com/dgx/dgx-rhel8-install-guide/installing-dofed-steps.html).
+The official installation instructions for the DOCA (OFED) module can be found [here](https://docs.nvidia.com/dgx/dgx-rhel8-install-guide/installing-dofed-steps.html).
 }
 
 @ja:***リポジトリ定義の追加***
@@ -549,26 +549,12 @@ The example below shows the steps to install CUDA Toolkit 13 on RHEL10 environme
 @ja{
 CUDA Toolkitのインストールに続いて、ドライバをインストールのためのコマンドが２種類表示されています。
 ここでは**オープンソース版のnvidia-driver**を使用してください。オープンソース版のみがGPUDirect Storage機能をサポートしており、PG-StromのGPU-Direct SQLは本機能を利用しています。
-
-!!! Tips
-    **Volta以前のGPUの利用について**
-    
-    オープンソース版nvidiaドライバは、Volta世代以前のGPUには対応していません。
-    したがって、VoltaまたはPascal世代のGPUでPG-Stromを利用する場合は、プロプラエタリ版のドライバであってもGPUDirect Storageに対応しているCUDA 12.2 Update 1を利用する必要があります。
-    CUDA 12.2 Update 1のパッケージは[こちら](https://developer.nvidia.com/cuda-12-2-1-download-archive?target_os=Linux&target_arch=x86_64&Distribution=RHEL&target_version=8&target_type=rpm_local)から入手する事ができます。
 }
 
 @en{
 Next to the installation of the CUDA Toolkit, two types of commands are introduced to install the nvidia driver.
 
 Please use the open source version of nvidia-driver here. Only the open source version supports the GPUDirect Storage feature, and PG-Strom's GPU-Direct SQL utilizes this feature.
-
-!!! Tips
-    **Use of Volta or former GPUs**
-    
-    The open source edition of the nvidia driver does not support Volta generation GPUs or former.
-    Therefore, if you want to use PG-Strom with Volta or Pascal generation GPUs, you need to use CUDA 12.2 Update 1, whose proprietary driver supports GPUDirect Storage.
-    The CUDA 12.2 Update 1 package can be obtained [here](https://developer.nvidia.com/cuda-12-2-1-download-archive?target_os=Linux&target_arch=x86_64&Distribution=RHEL&target_version=8&target_type=rpm_local).
 }
 
 @ja{
@@ -1054,11 +1040,13 @@ Below is the steps to install PostgreSQL v18 for RHEL10.
 
 @ja{
 !!! Note
-    Red Hat Enterprise Linuxの場合、パッケージ名`postgresql`がディストリビューション標準のものと競合してしまい、PGDG提供のパッケージをインストールする事ができません。そのため、`dnf -y module disable postgresql` コマンドを用いてディストリビューション標準の`postgresql`モジュールを無効化します。
+    Red Hat Enterprise Linux 8.xまたは9.xの場合、パッケージ名`postgresql`がディストリビューション標準のものと競合してしまい、PGDG提供のパッケージをインストールする事ができません。そのため、`dnf -y module disable postgresql` コマンドを用いてディストリビューション標準の`postgresql`モジュールを無効化します。
+    AppStream機能が改良されたたため、Red Hat Enterprise Linux 10系列においてこの操作は不要です。
 }
 @en{
 !!! Note
-    On the Red Hat Enterprise Linux, the package name `postgresql` conflicts to the default one at the distribution, thus, unable to install the packages from PGDG. So, disable the `postgresql` module by the distribution, using `dnf -y module disable postgresql`.
+    On the Red Hat Enterprise Linux 8.x or 9.x, the package name `postgresql` conflicts to the default one at the distribution, thus, unable to install the packages from PGDG. So, disable the `postgresql` module by the distribution, using `dnf -y module disable postgresql`.
+    The AppStream feature was improved, Red Hat Enterprise Linux 10.x does not need this operation.
 }
 @ja:##libarrow/libparquetのインストール
 @en:##libarrow/libparquet Installation

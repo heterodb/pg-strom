@@ -361,7 +361,7 @@ This section introduces the steps to install the DOCA (OFED) module.</p>
    and can still be downloaded from <a href="https://network.nvidia.com/products/infiniband-drivers/linux/mlnx_ofed/">here</a>. 
    However, it has already entered Long Term Support mode, and there is no prospect of the driver being provided for newer environments
    such as RHEL10. So, we recommend using the DOCA (OFED) package for the PG-Strom installation procedure.</p>
-<p>The official installation instructions for the DOCA (OFEF) module can be found <a href="https://docs.nvidia.com/dgx/dgx-rhel8-install-guide/installing-dofed-steps.html">here</a>.</p>
+<p>The official installation instructions for the DOCA (OFED) module can be found <a href="https://docs.nvidia.com/dgx/dgx-rhel8-install-guide/installing-dofed-steps.html">here</a>.</p>
 <p><strong><em>Add repository definition</em></strong></p>
 <p>Add the DOCA repository definition as follows.
 For RHEL 8/9 series, the <code>${releasever_major}</code> and <code>${releasever_minor}</code> macros are not defined, so write the OS version directly.</p>
@@ -476,13 +476,6 @@ The example below shows the steps to install CUDA Toolkit 13 on RHEL10 environme
 </code></pre>
 <p>Next to the installation of the CUDA Toolkit, two types of commands are introduced to install the nvidia driver.</p>
 <p>Please use the open source version of nvidia-driver here. Only the open source version supports the GPUDirect Storage feature, and PG-Strom's GPU-Direct SQL utilizes this feature.</p>
-<div class="admonition tips">
-<p class="admonition-title">Tips</p>
-<p><strong>Use of Volta or former GPUs</strong></p>
-<p>The open source edition of the nvidia driver does not support Volta generation GPUs or former.
-Therefore, if you want to use PG-Strom with Volta or Pascal generation GPUs, you need to use CUDA 12.2 Update 1, whose proprietary driver supports GPUDirect Storage.
-The CUDA 12.2 Update 1 package can be obtained <a href="https://developer.nvidia.com/cuda-12-2-1-download-archive?target_os=Linux&amp;target_arch=x86_64&amp;Distribution=RHEL&amp;target_version=8&amp;target_type=rpm_local">here</a>.</p>
-</div>
 <p>Next, install the driver module <code>nvidia-gds</code> for the GPU-Direct Storage (GDS).
 Please specify the same version name as the CUDA Toolkit version after the package name.</p>
 <pre><code>-- For RHEL9
@@ -733,7 +726,8 @@ Like the configuration of EPEL, you can install a small package to set up yum re
 </code></pre>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
-<p>On the Red Hat Enterprise Linux, the package name <code>postgresql</code> conflicts to the default one at the distribution, thus, unable to install the packages from PGDG. So, disable the <code>postgresql</code> module by the distribution, using <code>dnf -y module disable postgresql</code>.</p>
+<p>On the Red Hat Enterprise Linux 8.x or 9.x, the package name <code>postgresql</code> conflicts to the default one at the distribution, thus, unable to install the packages from PGDG. So, disable the <code>postgresql</code> module by the distribution, using <code>dnf -y module disable postgresql</code>.
+The AppStream feature was improved, Red Hat Enterprise Linux 10.x does not need this operation.</p>
 </div>
 <h2 id="libarrowlibparquet-installation">libarrow/libparquet Installation</h2>
 <p>PG-Strom v6.1 and later requires <code>libarrow</code> and <code>libparquet</code> for building and installation.</p>

@@ -356,12 +356,12 @@ Linuxカーネルモジュールは、Linuxカーネルのバージョンアッ�
 本節では、DOCA(OFED)モジュールの導入方法を説明します。</p>
 <div class="admonition info">
 <p class="admonition-title">Info</p>
-<p>なお、DOCA(OFEF)モジュールのうちLinux kernel driver部分はかつてMOFED (Mellanox Open Fabric Enterprise Driver)と呼ばれ、現在でも
+<p>なお、DOCA(OFED)モジュールのうちLinux kernel driver部分はかつてMOFED (Mellanox Open Fabric Enterprise Driver)と呼ばれ、現在でも
 <a href="https://network.nvidia.com/products/infiniband-drivers/linux/mlnx_ofed/">こちら</a>からダウンロードする事ができます。
 しかし、既に長期保守（Long Term Support）のモードに入っており、RHEL10など新しい環境へドライバが提供される見通しがないため、
 PG-Stromのインストール手順としてはDOCA(OFED)パッケージの利用を推奨します。</p>
 </div>
-<p>なお、DOCA(OFEF)モジュールの公式インストール手順は<a href="https://docs.nvidia.com/dgx/dgx-rhel8-install-guide/installing-dofed-steps.html">こちら</a>となります。</p>
+<p>なお、DOCA(OFED)モジュールの公式インストール手順は<a href="https://docs.nvidia.com/dgx/dgx-rhel8-install-guide/installing-dofed-steps.html">こちら</a>となります。</p>
 <p><strong><em>リポジトリ定義の追加</em></strong></p>
 <p>以下のようにDOCAのリポジトリ定義を追加します。
 RHEL8/9系列の場合、<code>${releasever_major}</code>および<code>${releasever_minor}</code>マクロが使用できないため、OSのバージョンを直接記入します。</p>
@@ -477,13 +477,6 @@ alias:          pci:v0000106Bd00002005sv*sd*bc*sc*i*
 </code></pre>
 <p>CUDA Toolkitのインストールに続いて、ドライバをインストールのためのコマンドが２種類表示されています。
 ここでは<strong>オープンソース版のnvidia-driver</strong>を使用してください。オープンソース版のみがGPUDirect Storage機能をサポートしており、PG-StromのGPU-Direct SQLは本機能を利用しています。</p>
-<div class="admonition tips">
-<p class="admonition-title">Tips</p>
-<p><strong>Volta以前のGPUの利用について</strong></p>
-<p>オープンソース版nvidiaドライバは、Volta世代以前のGPUには対応していません。
-したがって、VoltaまたはPascal世代のGPUでPG-Stromを利用する場合は、プロプラエタリ版のドライバであってもGPUDirect Storageに対応しているCUDA 12.2 Update 1を利用する必要があります。
-CUDA 12.2 Update 1のパッケージは<a href="https://developer.nvidia.com/cuda-12-2-1-download-archive?target_os=Linux&amp;target_arch=x86_64&amp;Distribution=RHEL&amp;target_version=8&amp;target_type=rpm_local">こちら</a>から入手する事ができます。</p>
-</div>
 <p>続いて、GPU-Direct Storage(GDS)を利用するためのドライバモジュール<code>nvidia-gds</code>をインストールします。
 パッケージ名に続いてCUDA Toolkitのバージョンと同一のバージョン名を指定してください。</p>
 <pre><code>-- For RHEL9
@@ -733,7 +726,8 @@ EPELの設定のように、yumリポジトリの設定を行うだけの小さ�
 </code></pre>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
-<p>Red Hat Enterprise Linuxの場合、パッケージ名<code>postgresql</code>がディストリビューション標準のものと競合してしまい、PGDG提供のパッケージをインストールする事ができません。そのため、<code>dnf -y module disable postgresql</code> コマンドを用いてディストリビューション標準の<code>postgresql</code>モジュールを無効化します。</p>
+<p>Red Hat Enterprise Linux 8.xまたは9.xの場合、パッケージ名<code>postgresql</code>がディストリビューション標準のものと競合してしまい、PGDG提供のパッケージをインストールする事ができません。そのため、<code>dnf -y module disable postgresql</code> コマンドを用いてディストリビューション標準の<code>postgresql</code>モジュールを無効化します。
+AppStream機能が改良されたたため、Red Hat Enterprise Linux 10系列においてこの操作は不要です。</p>
 </div>
 <h2 id="libarrowlibparquet">libarrow/libparquetのインストール</h2>
 <p>PG-Strom v6.1以降では、ビルドとインストールに<code>libarrow</code>と<code>libparquet</code>が必要です。</p>
