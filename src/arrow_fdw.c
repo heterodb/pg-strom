@@ -65,8 +65,9 @@ typedef struct RecordBatchState
 	size_t		rb_length;	/* length of the entire RecordBatch */
 	int64		rb_nitems;	/* number of items */
 	/* virtual column per record-batch */
-	Datum		virtual_datum;
-	bool		virtual_isnull;
+	int			virtual_nitems;
+	Datum	   *virtual_values;
+	bool	   *virtual_isnull;
 	/* per column information */
 	int			nfields;
 	RecordBatchFieldState fields[FLEXIBLE_ARRAY_MEMBER];
@@ -80,8 +81,17 @@ typedef struct virtualColumnDef
 	char		buf[FLEXIBLE_ARRAY_MEMBER];
 } virtualColumnDef;
 
+/*
+ * MEMO: virtual columns have special field-index on the ArrowFileState.
+ * if __FIELD_INDEX_SPECIAL__VIRTUAL_PER_FILE, virtual columns are immutable in this file,
+ * and the value is stored in the ArrowFileState.
+ * if a negative value less then __FIELD_INDEX_SPECIAL__VIRTUAL_PER_FILE, virtual columns
+ * are per-record-batch basis, and stored in the RecordBatchState. Its virtual_values[]
+ * index can be calculated by __FIELD_INDEX_SPECIAL__VIRTUAL_PER_RECORD_BATCH.
+ */
 #define __FIELD_INDEX_SPECIAL__VIRTUAL_PER_FILE				(-1)
-#define __FIELD_INDEX_SPECIAL__VIRTUAL_PER_RECORD_BATCH		(-2)
+#define __FIELD_INDEX_SPECIAL__VIRTUAL_PER_RECORD_BATCH(k)	(-(k)-2)
+
 typedef struct ArrowFileState
 {
 	const char *filename;
@@ -1758,17 +1768,25 @@ execCheckArrowStatsHint(arrowStatsHint *stats_hint,
 			min_values->tts_values[anum-1] = virtual_datum;
 			max_values->tts_values[anum-1] = virtual_datum;
 		}
-		else if (field_index == __FIELD_INDEX_SPECIAL__VIRTUAL_PER_RECORD_BATCH)
+		else if (field_index < __FIELD_INDEX_SPECIAL__VIRTUAL_PER_FILE)
 		{
-			bool	virtual_isnull = rb_state->virtual_isnull;
-			Datum	virtual_datum  = rb_state->virtual_datum;
+			int		k = __FIELD_INDEX_SPECIAL__VIRTUAL_PER_RECORD_BATCH(field_index);
+			if (k < rb_state->virtual_nitems)
+			{
+				bool	virtual_isnull = rb_state->virtual_isnull[k];
+				Datum	virtual_datum  = rb_state->virtual_values[k];
 
-			if (virtual_isnull)
-				return false;	/* unable to determine */
-			min_values->tts_isnull[anum-1] = virtual_isnull;
-			max_values->tts_isnull[anum-1] = virtual_isnull;
-			min_values->tts_values[anum-1] = virtual_datum;
-			max_values->tts_values[anum-1] = virtual_datum;
+				if (virtual_isnull)
+					return false;	/* unable to determine */
+				min_values->tts_isnull[anum-1] = virtual_isnull;
+				max_values->tts_isnull[anum-1] = virtual_isnull;
+				min_values->tts_values[anum-1] = virtual_datum;
+				max_values->tts_values[anum-1] = virtual_datum;
+			}
+			else
+			{
+				elog(ERROR, "Bug? unexpected virtual-field-index (%d)", field_index);
+			}
 		}
 		else
 		{
@@ -3094,16 +3112,32 @@ BuildArrowFileState(Relation frel,
 			ListCell   *cell;
 			char	   *buffer = pstrdup(vsource);
 			char	   *tok, *pos;
+			int			vindex = -1;
 
 			tok = strtok_r(buffer, ",", &pos);
 			foreach (cell, af_state->rb_list)
 			{
 				RecordBatchState *__rb_state = lfirst(cell);
+				int		__vindex = __rb_state->virtual_nitems++;
 
+				if (vindex < 0)
+					vindex = __vindex;
+				else
+					assert(vindex == __vindex);
+				if (!__rb_state->virtual_values)
+					__rb_state->virtual_values = palloc(sizeof(Datum) * 4);
+				else
+					__rb_state->virtual_values = repalloc(__rb_state->virtual_values,
+														  sizeof(Datum) * __rb_state->virtual_nitems);
+				if (!__rb_state->virtual_isnull)
+					__rb_state->virtual_isnull = palloc(sizeof(bool) * 4);
+				else
+					__rb_state->virtual_isnull = repalloc(__rb_state->virtual_isnull,
+														  sizeof(bool) * __rb_state->virtual_nitems);
 				if (!tok)
 				{
-					__rb_state->virtual_isnull = true;
-					__rb_state->virtual_datum = 0;
+					__rb_state->virtual_isnull[vindex] = true;
+					__rb_state->virtual_values[vindex] = 0;
 				}
 				else
 				{
@@ -3112,12 +3146,15 @@ BuildArrowFileState(Relation frel,
 														   tok,
 														   frel,
 														   filename);
-					__rb_state->virtual_datum = datum;
-					__rb_state->virtual_isnull = false;
+					__rb_state->virtual_values[vindex] = datum;
+					__rb_state->virtual_isnull[vindex] = false;
 					tok = strtok_r(NULL, ",", &pos);
 				}
 			}
-			af_state->attrs[j].field_index = __FIELD_INDEX_SPECIAL__VIRTUAL_PER_RECORD_BATCH;
+			if (vindex < 0)
+				af_state->attrs[j].field_index = __FIELD_INDEX_SPECIAL__VIRTUAL_PER_FILE;
+			else
+				af_state->attrs[j].field_index = -(vindex + 2);	/* Per Record-Batch Virtual Column */
 			af_state->attrs[j].virtual_isnull = true;
 			af_state->attrs[j].virtual_datum = 0;
 			/* see the comment above */
@@ -3913,12 +3950,15 @@ __arrowFdwSetupKDSHead(Relation relation,
 			kds = (kern_data_store *)(chunk_buffer->data + head_off);
 			kds->colmeta[j].field_index = -1;		/* no physical field */
 		}
-		else if (field_index == __FIELD_INDEX_SPECIAL__VIRTUAL_PER_RECORD_BATCH)
+		else if (field_index < __FIELD_INDEX_SPECIAL__VIRTUAL_PER_FILE)
 		{
+			int		k = __FIELD_INDEX_SPECIAL__VIRTUAL_PER_RECORD_BATCH(field_index);
+
+			assert(k >= 0 && k < rb_state->virtual_nitems);
 			__arrowKdsAssignVirtualColumns(kds,
 										   &kds->colmeta[j],
-										   rb_state->virtual_isnull,
-										   rb_state->virtual_datum,
+										   rb_state->virtual_isnull[k],
+										   rb_state->virtual_values[k],
 										   chunk_buffer);
 			/* see the comment above */
 			kds = (kern_data_store *)(chunk_buffer->data + head_off);
