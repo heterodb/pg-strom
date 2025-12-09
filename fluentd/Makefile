@@ -16,8 +16,7 @@ TGZ_NAME=$(TAR_NAME).gz
 
 __RUBY_SCRIPTS=out_arrow_file.rb
 RUBY_SCRIPTS=$(addprefix lib/fluent/plugin/,$(__RUBY_SCRIPTS))
-__EXT_SOURCE=arrow_write.c arrow_nodes.c \
-             arrow_defs.h arrow_ipc.h float2.h
+__EXT_SOURCE=float2.h
 EXT_SOURCE=$(addprefix ../src/,$(__EXT_SOURCE)) arrow_ruby.cpp
 EXT_DIR=ext/arrow_file_write
 EXT_CONF=$(EXT_DIR)/extconf.rb
