@@ -134,7 +134,6 @@ static __thread gpuContext		*GpuWorkerCurrentContext = NULL;
 #define MY_STREAM_PER_THREAD	CU_STREAM_PER_THREAD
 #define MY_MEMLOCATION_PER_THREAD (GpuWorkerCurrentContext->cuda_mlocation)
 static CUmemLocation		host_mlocation = {CU_DEVICE_CPU, CU_MEM_LOCATION_TYPE_HOST};
-static CUmemLocation		invalid_mlocation = {-1,CU_MEM_LOCATION_TYPE_INVALID};
 static volatile int			gpuserv_bgworker_got_signal = 0;
 static gpuContext		   *gpuserv_gpucontext_array;
 static dlist_head			gpuserv_gpucontext_list;
@@ -2059,17 +2058,40 @@ __setupGpuJoinPinnedInnerBufferReconstruct(gpuClient *gclient,
 		gq_src->gpus[i].m_kds_final = 0UL;
 		gq_src->gpus[i].m_kds_final_length = 0UL;
 	}
-	/* assign read-only attribute; note that CU_MEM_ADVISE_SET_READ_MOSTLY ignores
-	 * CUmemLocation argument. */
+	/* assign read-only attribute */
 	rc = cuMemAdvise(m_kds_in, kds_head->length,
 					 CU_MEM_ADVISE_SET_READ_MOSTLY,
-					 invalid_mlocation);
+					 MY_MEMLOCATION_PER_THREAD);
 	if (rc != CUDA_SUCCESS)
 	{
 		gpuClientELog(gclient, "failed on cuMemAdvise(SET_READ_MOSTLY): %s",
 					  cuStrError(rc));
-		return false;
+		goto error;
 	}
+#if 1
+	/* confirmation */
+	else
+	{
+		int32_t		mem_attr;
+
+		rc = cuMemRangeGetAttribute(&mem_attr, sizeof(int32_t),
+									CU_MEM_RANGE_ATTRIBUTE_READ_MOSTLY,
+									m_kds_in, kds_head->length);
+		if (rc != CUDA_SUCCESS)
+		{
+			gpuClientELog(gclient, "failed on cuMemRangeGetAttribute(SET_READ_MOSTLY): %s",
+						  cuStrError(rc));
+			goto error;
+		}
+		if (mem_attr == 0)
+		{
+			gpuClientELog(gclient, "cuMemAdvise didn't change memory policy at %p-%p",
+						  (char *)m_kds_in,
+						  (char *)m_kds_in + kds_head->length);
+			goto error;
+		}
+	}
+#endif
 	gpuContextSwitchTo(gcontext_saved);
 	gettimeofday(&tv2, NULL);
 	m_kmrels->chunks[depth-1].kds_in = (kern_data_store *)m_kds_in;
@@ -2243,6 +2265,7 @@ __setupGpuQueryJoinInnerBuffer(gpuClient *gclient,
 	struct stat	stat_buf;
 	char		namebuf[100];
 	size_t		mmap_sz = 0;
+	size_t		ro_size;
 	struct timeval tv1, tv2;
 
 	if (session->join_inner_handle == 0)
@@ -2331,15 +2354,46 @@ __setupGpuQueryJoinInnerBuffer(gpuClient *gclient,
 	 * Note that CU_MEM_ADVISE_SET_READ_MOSTLY ignores the CUmemLocation.
 	 */
 	assert(h_kmrels->ojmap_sz < h_kmrels->length);
-	rc = cuMemAdvise((CUdeviceptr)m_kmrels,
-					 h_kmrels->length - h_kmrels->ojmap_sz,
+	ro_size = h_kmrels->length - h_kmrels->ojmap_sz;
+	rc = cuMemAdvise((CUdeviceptr)m_kmrels, ro_size,
 					 CU_MEM_ADVISE_SET_READ_MOSTLY,
-					 invalid_mlocation);
+					 MY_MEMLOCATION_PER_THREAD);
 	if (rc != CUDA_SUCCESS)
-		__gsInfo("failed on cuMemAdvise (%p-%p; CU_MEM_ADVISE_SET_READ_MOSTLY): %s",
-				 (char *)m_kmrels,
-				 (char *)m_kmrels + (h_kmrels->length - h_kmrels->ojmap_sz),
-				 cuStrError(rc));
+	{
+		gpuClientELog(gclient, "failed on cuMemAdvise (%p-%p; CU_MEM_ADVISE_SET_READ_MOSTLY): %s",
+					  (char *)m_kmrels,
+					  (char *)m_kmrels + ro_size,
+					  cuStrError(rc));
+		goto error;
+	}
+#if 1
+	/*
+	 * confirmation: because cuMemAdvise() of CUDA v13 returned success status
+	 * even if memory policy was not changed when CUmemLocation is not valie
+	 * (although CU_MEM_ADVISE_SET_READ_MOSTLY ignores CUmemLocation!!).
+	 */
+	else
+	{
+		int32_t	mem_attr;
+
+		rc = cuMemRangeGetAttribute(&mem_attr, sizeof(int32_t),
+									CU_MEM_RANGE_ATTRIBUTE_READ_MOSTLY,
+									(CUdeviceptr)m_kmrels, ro_size);
+		if (rc != CUDA_SUCCESS)
+		{
+			gpuClientELog(gclient, "failed on cuMemRangeGetAttribute: %s",
+						  cuStrError(rc));
+			goto error;
+		}
+		if (mem_attr == 0)
+		{
+			gpuClientELog(gclient, "cuMemAdvise didn't change memory policy at %p-%p",
+						  (char *)m_kmrels,
+						  (char *)m_kmrels + ro_size);
+			goto error;
+		}
+	}
+#endif
 	/* OK */
 	close(fdesc);
 	gettimeofday(&tv2, NULL);
@@ -3806,7 +3860,7 @@ again:
 				rc = cuMemAdvise((CUdeviceptr)kds_in,
 								 kds_in->length,
 								 CU_MEM_ADVISE_SET_READ_MOSTLY,
-								 invalid_mlocation);
+								 MY_MEMLOCATION_PER_THREAD);
 				if (rc != CUDA_SUCCESS)
 				{
 					pthreadRWLockUnlock(&gq_buf->m_kds_rwlock);
@@ -3814,6 +3868,33 @@ again:
 								  cuStrError(rc));
 					return -1;
 				}
+#if 1
+				/* confirmation */
+				else
+				{
+					int32_t		mem_attr;
+
+					rc = cuMemRangeGetAttribute(&mem_attr, sizeof(int32_t),
+												CU_MEM_RANGE_ATTRIBUTE_READ_MOSTLY,
+												(CUdeviceptr)kds_in,
+												kds_in->length);
+					if (rc != CUDA_SUCCESS)
+					{
+						pthreadRWLockUnlock(&gq_buf->m_kds_rwlock);
+						gpuClientELog(gclient, "failed on cuMemRangeGetAttribute(SET_READ_MOSTLY): %s",
+									  cuStrError(rc));
+						return -1;
+					}
+					if (mem_attr == 0)
+					{
+						pthreadRWLockUnlock(&gq_buf->m_kds_rwlock);
+						gpuClientELog(gclient, "cuMemAdvise didn't change memory policy at %p-%p",
+									  (char *)kds_in,
+									  (char *)kds_in + kds_in->length);
+						return -1;
+					}
+				}
+#endif
 			}
 		}
 		__gsInfo("GPU-Service: repeat-id changed %u -> %u\n",
@@ -5777,7 +5858,9 @@ gpuservHandleGpuTaskFinal(gpuContext *gcontext,
 	if (SESSION_SUPPORTS_CPU_FALLBACK(gclient->h_session))
 	{
 		kern_multirels *d_kmrels = (kern_multirels *)gq_buf->m_kmrels;
-
+		/* sanity checks */
+		assert((gclient->xpu_task_flags & (DEVTASK__SELECT_INTO_DIRECT |
+										   DEVTASK__MERGE_FINAL_BUFFER)) == 0);
 		/* Merge RIGHT-OUTER-JOIN Map to the shared host buffer */
 		if (h_kmrels && d_kmrels)
 		{
@@ -5837,9 +5920,18 @@ gpuservHandleGpuTaskFinal(gpuContext *gcontext,
 	}
 
 	/*
-	 * Is the GpuPreAgg final buffer written back?
+	 * Is the GPU-PreAgg final buffer written back?
+	 *
+	 * If CPU-Fallback is enabled, it always write back the final buffer, and
+	 * runs CPU-based Agg node.
+	 * In addition, no-group aggregation always has CPU-based Agg-node to handle
+	 * empty result set. So, it must be written back.
+	 *
+	 * TODO: more simple conditions are needed.
 	 */
-	if (SESSION_SUPPORTS_CPU_FALLBACK(gclient->h_session))
+	if (SESSION_SUPPORTS_CPU_FALLBACK(gclient->h_session) ||
+		(gclient->xpu_task_flags & (DEVTASK__PREAGG |
+									DEVTASK__MERGE_FINAL_BUFFER)) == DEVTASK__PREAGG)
 	{
 		for (int __dindex=0; __dindex < numGpuDevAttrs; __dindex++)
 		{

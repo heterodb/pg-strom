@@ -17,16 +17,19 @@
 /*
  * min/max statistics datum
  */
+#define MINMAX_STAT_BYTESZ	32
 typedef struct
 {
 	bool		isnull;
 	union {
 		Datum	datum;
 		NumericData	numeric;	/* if NUMERICOID */
+		char	string[MINMAX_STAT_BYTESZ];		/* if TEXTOID */
 	} min;
 	union {
 		Datum	datum;
 		NumericData numeric;	/* if NUMERICOID */
+		char	string[MINMAX_STAT_BYTESZ];		/* if TEXTOID */
 	} max;
 } MinMaxStatDatum;
 
@@ -62,8 +65,9 @@ typedef struct RecordBatchState
 	size_t		rb_length;	/* length of the entire RecordBatch */
 	int64		rb_nitems;	/* number of items */
 	/* virtual column per record-batch */
-	Datum		virtual_datum;
-	bool		virtual_isnull;
+	int			virtual_nitems;
+	Datum	   *virtual_values;
+	bool	   *virtual_isnull;
 	/* per column information */
 	int			nfields;
 	RecordBatchFieldState fields[FLEXIBLE_ARRAY_MEMBER];
@@ -77,8 +81,17 @@ typedef struct virtualColumnDef
 	char		buf[FLEXIBLE_ARRAY_MEMBER];
 } virtualColumnDef;
 
+/*
+ * MEMO: virtual columns have special field-index on the ArrowFileState.
+ * if __FIELD_INDEX_SPECIAL__VIRTUAL_PER_FILE, virtual columns are immutable in this file,
+ * and the value is stored in the ArrowFileState.
+ * if a negative value less then __FIELD_INDEX_SPECIAL__VIRTUAL_PER_FILE, virtual columns
+ * are per-record-batch basis, and stored in the RecordBatchState. Its virtual_values[]
+ * index can be calculated by __FIELD_INDEX_SPECIAL__VIRTUAL_PER_RECORD_BATCH.
+ */
 #define __FIELD_INDEX_SPECIAL__VIRTUAL_PER_FILE				(-1)
-#define __FIELD_INDEX_SPECIAL__VIRTUAL_PER_RECORD_BATCH		(-2)
+#define __FIELD_INDEX_SPECIAL__VIRTUAL_PER_RECORD_BATCH(k)	(-(k)-2)
+
 typedef struct ArrowFileState
 {
 	const char *filename;
@@ -117,7 +130,7 @@ struct ArrowFdwState
 	pg_atomic_uint32	__rbatch_nload_local;	/* if single process */
 	pg_atomic_uint32   *rbatch_nskip;
 	pg_atomic_uint32	__rbatch_nskip_local;	/* if single process */
-	StringInfoData		chunk_buffer;	/* buffer to load record-batch */
+	LargeStringInfoData	chunk_buffer;	/* buffer to load record-batch */
 	File				curr_filp;		/* current arrow file to read */
 	kern_data_store	   *curr_kds;		/* current chunk to read */
 	uint32_t			curr_index;		/* current index on the chunk */
@@ -908,24 +921,14 @@ applyArrowStatsBinary(RecordBatchState *rb_state, arrowStatsBinary *arrow_bstats
 static void
 __assignArrowStatsBinaryOne(MinMaxStatDatum *stats,
 							ArrowField *field,
-							ArrowKeyValue *kv)
+							const char *__min_token,
+							const char *__max_token)
 {
-	char   *__min_token = (char *)alloca(strlen(kv->value) + 10);
-	char   *__max_token;
 	char   *end1, *end2;
-
-	strcpy(__min_token, kv->value);
-	__max_token = strchr(__min_token, ',');
-	if (!__max_token)
-		return;
-	*__max_token++ = '\0';
 
 	switch (field->type.node.tag)
 	{
-		case ArrowNodeTag__Int:
-		case ArrowNodeTag__Date:
-		case ArrowNodeTag__Time:
-		case ArrowNodeTag__Timestamp: {
+		case ArrowNodeTag__Int: {
 			int64_t	__min = strtol(__min_token, &end1, 10);
 			int64_t	__max = strtol(__max_token, &end2, 10);
 
@@ -999,6 +1002,127 @@ __assignArrowStatsBinaryOne(MinMaxStatDatum *stats,
 			}
 			PG_END_TRY();
 			break;
+		case ArrowNodeTag__Date: {
+			int64_t	__min = strtol(__min_token, &end1, 10);
+			int64_t	__max = strtol(__max_token, &end2, 10);
+
+			if (*end1 != '\0' && *end2 != '\0')
+				stats->isnull = true;
+			else
+			{
+				int64_t		__drift = (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE);
+
+				switch (field->type.Date.unit)
+				{
+					case ArrowDateUnit__Day:
+						stats->isnull = false;
+						stats->min.datum = __min - __drift;
+						stats->max.datum = __max - __drift;
+						break;
+					case ArrowDateUnit__MilliSecond:
+						stats->isnull = false;
+						stats->min.datum = __min / (SECS_PER_DAY * 1000) - __drift;
+						stats->max.datum = __max / (SECS_PER_DAY * 1000) - __drift;
+						break;
+					default:
+						stats->isnull = true;
+						break;
+				}
+			}
+			break;
+		}
+		case ArrowNodeTag__Time: {
+			int64_t	__min = strtol(__min_token, &end1, 10);
+			int64_t	__max = strtol(__max_token, &end2, 10);
+
+			if (*end1 != '\0' && *end2 != '\0')
+				stats->isnull = true;
+			else
+			{
+				switch (field->type.Time.unit)
+				{
+					case ArrowTimeUnit__Second:
+						stats->isnull = false;
+						stats->min.datum = __min * 1000000L;
+						stats->max.datum = __max * 1000000L;
+                        break;
+                    case ArrowTimeUnit__MilliSecond:
+						stats->isnull = false;
+						stats->min.datum = __min * 1000L;
+						stats->max.datum = __max * 1000L;
+                        break;
+                    case ArrowTimeUnit__MicroSecond:
+						stats->isnull = false;
+						stats->min.datum = __min;
+						stats->max.datum = __max;
+                        break;
+                    case ArrowTimeUnit__NanoSecond:
+						stats->isnull = false;
+						stats->min.datum = __min / 1000L;
+						stats->max.datum = __max / 1000L;
+						break;
+					default:
+						stats->isnull = true;
+						break;
+				}
+			}
+			break;
+		}
+		case ArrowNodeTag__Timestamp: {
+			int64_t	__min = strtol(__min_token, &end1, 10);
+			int64_t	__max = strtol(__max_token, &end2, 10);
+
+			if (*end1 != '\0' && *end2 != '\0')
+				stats->isnull = true;
+			else
+			{
+				int64_t		__drift = (POSTGRES_EPOCH_JDATE -
+									   UNIX_EPOCH_JDATE) * USECS_PER_DAY;
+				switch (field->type.Timestamp.unit)
+				{
+					case ArrowTimeUnit__Second:
+						stats->isnull = false;
+						stats->min.datum = __min * 1000000L - __drift;
+						stats->max.datum = __max * 1000000L - __drift;
+						break;
+					case ArrowTimeUnit__MilliSecond:
+						stats->isnull = false;
+						stats->min.datum = __min * 1000L - __drift;
+						stats->max.datum = __max * 1000L - __drift;
+						break;
+					case ArrowTimeUnit__MicroSecond:
+						stats->isnull = false;
+						stats->min.datum = __min - __drift;
+						stats->max.datum = __max - __drift;
+						break;
+					case ArrowTimeUnit__NanoSecond:
+						stats->isnull = false;
+						stats->min.datum = __min / 1000L - __drift;
+						stats->max.datum = __max / 1000L - __drift;
+						break;
+					default:
+						stats->isnull = true;
+						break;
+				}
+			}
+			break;
+		}
+		case ArrowNodeTag__Utf8:
+		case ArrowNodeTag__LargeUtf8: {
+			size_t	min_sz = strlen(__min_token);
+			size_t	max_sz = strlen(__max_token);
+
+			if (min_sz >= MINMAX_STAT_BYTESZ)
+				min_sz = MINMAX_STAT_BYTESZ - 1;
+			memcpy(stats->min.string+1, __min_token, min_sz);
+			SET_VARSIZE_SHORT(stats->min.string, min_sz+1);
+			if (max_sz >= MINMAX_STAT_BYTESZ)
+				max_sz = MINMAX_STAT_BYTESZ - 1;
+			memcpy(stats->max.string+1, __max_token, max_sz);
+			SET_VARSIZE_SHORT(stats->max.string, max_sz);
+			stats->isnull = false;
+			break;
+		}
 		default:
 			/* not supported */
 			stats->isnull = true;
@@ -1013,6 +1137,10 @@ assignArrowStatsBinary(RecordBatchState *rb_state,
 					   int num_custom_metadata,
 					   ArrowKeyValue *custom_metadata)
 {
+	char   *__min_token = NULL;
+	char   *__max_token = NULL;
+	size_t	bufsz = 0;
+
 	for (int i=0; i < num_custom_metadata; i++)
 	{
 		ArrowKeyValue *kv = &custom_metadata[i];
@@ -1028,10 +1156,26 @@ assignArrowStatsBinary(RecordBatchState *rb_state,
 
 				if (strcmp(field_name, field->name) == 0)
 				{
-					__assignArrowStatsBinaryOne(&rb_field->stat_datum, field, kv);
-					if (!rb_field->stat_datum.isnull)
-						*p_stat_attrs = bms_add_member(*p_stat_attrs, j);
-					break;
+					size_t	len = strlen(kv->value);
+
+					if (len >= bufsz)
+					{
+						bufsz = len * 2 + 100;
+						__min_token = alloca(bufsz);
+					}
+					strcpy(__min_token, kv->value);
+					__max_token = strchr(__min_token, ',');
+					if (__max_token)
+					{
+						*__max_token++ = '\0';
+						__assignArrowStatsBinaryOne(&rb_field->stat_datum,
+													field,
+													__min_token,
+													__max_token);
+						if (!rb_field->stat_datum.isnull)
+							*p_stat_attrs = bms_add_member(*p_stat_attrs, j);
+						break;
+					}
 				}
 			}
 		}
@@ -1075,6 +1219,7 @@ __buildArrowStatsOper(arrowStatsHint *as_hint,
 		var = lsecond(op->args);
 		arg = linitial(op->args);
 	}
+
 	/*
 	 * Is it VAR <OPER> ARG form?
 	 *
@@ -1111,6 +1256,13 @@ __buildArrowStatsOper(arrowStatsHint *as_hint,
 	if (strategy == BTLessStrategyNumber ||
 		strategy == BTLessEqualStrategyNumber)
 	{
+		/* NOTE: min/max statistics of string data is not collation aware; it is
+		 * generated based on simple byte comparison. Thus, it is not reliable to
+		 * use as a hint for '<' or '<=' operator.
+		 */
+		if (var->vartype == TEXTOID)
+			return false;
+
 		/* if (VAR < ARG) --> (Min >= ARG), can be skipped */
 		/* if (VAR <= ARG) --> (Min > ARG), can be skipped */
 		opcode = get_negator(opcode);
@@ -1134,6 +1286,13 @@ __buildArrowStatsOper(arrowStatsHint *as_hint,
 	else if (strategy == BTGreaterEqualStrategyNumber ||
 			 strategy == BTGreaterStrategyNumber)
 	{
+		/* NOTE: min/max statistics of string data is not collation aware; it is
+		 * generated based on simple byte comparison. Thus, it is not reliable to
+		 * use as a hint for '>' or '>=' operator.
+		 */
+		if (var->vartype == TEXTOID)
+			return false;
+
 		/* if (VAR > ARG) --> (Max <= ARG), can be skipped */
 		/* if (VAR >= ARG) --> (Max < ARG), can be skipped */
 		opcode = get_negator(opcode);
@@ -1156,6 +1315,20 @@ __buildArrowStatsOper(arrowStatsHint *as_hint,
 	}
 	else if (strategy == BTEqualStrategyNumber)
 	{
+		Oid		collation_oid = op->inputcollid;
+
+		/* NOTE: min/max statistics of string data is built based on UTF-8 encoding,
+		 * and generated based on simple byte comparison. Thus, we can use this
+		 * statistics for string data only when database encoding is UTF-8, and
+		 * operator determines larger/smaller relationship based on simple bytes
+		 * comparison.
+		 */
+		if (var->vartype == TEXTOID)
+		{
+			if (GetDatabaseEncoding() != PG_UTF8)
+				return false;
+			collation_oid = C_COLLATION_OID;
+		}
 		/* (VAR = ARG) --> (Min > ARG) || (Max < ARG), can be skipped */
 		opcode = get_opfamily_member(opfamily, var->vartype,
 									 exprType((Node *)arg),
@@ -1171,7 +1344,7 @@ __buildArrowStatsOper(arrowStatsHint *as_hint,
 											 0),
 							 (Expr *)copyObject(arg),
 							 op->opcollid,
-							 op->inputcollid);
+							 collation_oid);
 		set_opfuncid((OpExpr *)expr);
 		as_hint->eval_quals = lappend(as_hint->eval_quals, expr);
 
@@ -1189,7 +1362,7 @@ __buildArrowStatsOper(arrowStatsHint *as_hint,
 											 0),
 							 (Expr *)copyObject(arg),
 							 op->opcollid,
-							 op->inputcollid);
+							 collation_oid);
 		set_opfuncid((OpExpr *)expr);
 		as_hint->eval_quals = lappend(as_hint->eval_quals, expr);
 	}
@@ -1570,6 +1743,13 @@ execCheckArrowStatsHint(arrowStatsHint *stats_hint,
 				max_values->tts_values[anum-1]
 					= PointerGetDatum(&rb_field->stat_datum.max.numeric);
 			}
+			else if (rb_field->atttypid == TEXTOID)
+			{
+				min_values->tts_values[anum-1]
+					= PointerGetDatum(rb_field->stat_datum.min.string);
+				max_values->tts_values[anum-1]
+					= PointerGetDatum(rb_field->stat_datum.max.string);
+			}
 			else
 			{
 				min_values->tts_values[anum-1] = rb_field->stat_datum.min.datum;
@@ -1588,17 +1768,25 @@ execCheckArrowStatsHint(arrowStatsHint *stats_hint,
 			min_values->tts_values[anum-1] = virtual_datum;
 			max_values->tts_values[anum-1] = virtual_datum;
 		}
-		else if (field_index == __FIELD_INDEX_SPECIAL__VIRTUAL_PER_RECORD_BATCH)
+		else if (field_index < __FIELD_INDEX_SPECIAL__VIRTUAL_PER_FILE)
 		{
-			bool	virtual_isnull = rb_state->virtual_isnull;
-			Datum	virtual_datum  = rb_state->virtual_datum;
+			int		k = __FIELD_INDEX_SPECIAL__VIRTUAL_PER_RECORD_BATCH(field_index);
+			if (k < rb_state->virtual_nitems)
+			{
+				bool	virtual_isnull = rb_state->virtual_isnull[k];
+				Datum	virtual_datum  = rb_state->virtual_values[k];
 
-			if (virtual_isnull)
-				return false;	/* unable to determine */
-			min_values->tts_isnull[anum-1] = virtual_isnull;
-			max_values->tts_isnull[anum-1] = virtual_isnull;
-			min_values->tts_values[anum-1] = virtual_datum;
-			max_values->tts_values[anum-1] = virtual_datum;
+				if (virtual_isnull)
+					return false;	/* unable to determine */
+				min_values->tts_isnull[anum-1] = virtual_isnull;
+				max_values->tts_isnull[anum-1] = virtual_isnull;
+				min_values->tts_values[anum-1] = virtual_datum;
+				max_values->tts_values[anum-1] = virtual_datum;
+			}
+			else
+			{
+				elog(ERROR, "Bug? unexpected virtual-field-index (%d)", field_index);
+			}
 		}
 		else
 		{
@@ -1766,7 +1954,7 @@ __lookupCompositePGType(int nattrs, Oid *type_oids, Oid hint_oid)
 			htup = systable_getnext(sscan);
 			if (!HeapTupleIsValid(htup))
 				break;
-			comp_oid = ((Form_pg_type) GETSTRUCT(htup))->oid;
+			comp_oid = ((Form_pg_class) GETSTRUCT(htup))->reltype;
 		}
 
 		if (pg_type_aclcheck(comp_oid,
@@ -2156,6 +2344,18 @@ __buildRecordBatchFieldState(setupRecordBatchContext *con,
 		 */
 		Assert(con->buffer_curr == NULL &&
 			   con->buffer_tail == NULL);
+
+		/*
+		 * Parquet embeds min/max statistics in FieldNode. If available, it
+		 * shall be assigned on the RecordBatchFieldState.
+		 */
+		if (fnode->stat_min_value && fnode->stat_max_value)
+		{
+			__assignArrowStatsBinaryOne(&rb_field->stat_datum,
+										field,
+										fnode->stat_min_value,
+										fnode->stat_max_value);
+		}
 	}
 	else
 	{
@@ -2222,7 +2422,8 @@ __buildRecordBatchStateOne(ArrowSchema *schema,
 						   ArrowFileState *af_state,
 						   int rb_index,
 						   ArrowBlock *block,
-						   ArrowRecordBatch *rbatch)
+						   ArrowRecordBatch *rbatch,
+						   Bitmapset **p_stat_attrs)
 {
 	setupRecordBatchContext con;
 	RecordBatchState *rb_state;
@@ -2251,6 +2452,8 @@ __buildRecordBatchStateOne(ArrowSchema *schema,
 		ArrowField	   *field = &schema->fields[j];
 
 		__buildRecordBatchFieldState(&con, rb_field, field, 0);
+		if (!rb_field->stat_datum.isnull)
+			*p_stat_attrs = bms_add_member(*p_stat_attrs, j);
 	}
 	if (con.buffer_curr != con.buffer_tail ||
 		con.fnode_curr  != con.fnode_tail)
@@ -2310,7 +2513,8 @@ __setupArrowFileStateByFile(ArrowFileState *af_state,
 		RecordBatchState   *rb_state;
 
 		rb_state = __buildRecordBatchStateOne(&af_info->footer.schema,
-											  af_state, i, block, rbatch);
+											  af_state, i, block, rbatch,
+											  p_stat_attrs);
 		if (arrow_bstats)
 			applyArrowStatsBinary(rb_state, arrow_bstats);		/* stats v1 */
 		else
@@ -2908,16 +3112,32 @@ BuildArrowFileState(Relation frel,
 			ListCell   *cell;
 			char	   *buffer = pstrdup(vsource);
 			char	   *tok, *pos;
+			int			vindex = -1;
 
 			tok = strtok_r(buffer, ",", &pos);
 			foreach (cell, af_state->rb_list)
 			{
 				RecordBatchState *__rb_state = lfirst(cell);
+				int		__vindex = __rb_state->virtual_nitems++;
 
+				if (vindex < 0)
+					vindex = __vindex;
+				else
+					assert(vindex == __vindex);
+				if (!__rb_state->virtual_values)
+					__rb_state->virtual_values = palloc(sizeof(Datum) * 4);
+				else
+					__rb_state->virtual_values = repalloc(__rb_state->virtual_values,
+														  sizeof(Datum) * __rb_state->virtual_nitems);
+				if (!__rb_state->virtual_isnull)
+					__rb_state->virtual_isnull = palloc(sizeof(bool) * 4);
+				else
+					__rb_state->virtual_isnull = repalloc(__rb_state->virtual_isnull,
+														  sizeof(bool) * __rb_state->virtual_nitems);
 				if (!tok)
 				{
-					__rb_state->virtual_isnull = true;
-					__rb_state->virtual_datum = 0;
+					__rb_state->virtual_isnull[vindex] = true;
+					__rb_state->virtual_values[vindex] = 0;
 				}
 				else
 				{
@@ -2926,12 +3146,15 @@ BuildArrowFileState(Relation frel,
 														   tok,
 														   frel,
 														   filename);
-					__rb_state->virtual_datum = datum;
-					__rb_state->virtual_isnull = false;
+					__rb_state->virtual_values[vindex] = datum;
+					__rb_state->virtual_isnull[vindex] = false;
 					tok = strtok_r(NULL, ",", &pos);
 				}
 			}
-			af_state->attrs[j].field_index = __FIELD_INDEX_SPECIAL__VIRTUAL_PER_RECORD_BATCH;
+			if (vindex < 0)
+				af_state->attrs[j].field_index = __FIELD_INDEX_SPECIAL__VIRTUAL_PER_FILE;
+			else
+				af_state->attrs[j].field_index = -(vindex + 2);	/* Per Record-Batch Virtual Column */
 			af_state->attrs[j].virtual_isnull = true;
 			af_state->attrs[j].virtual_datum = 0;
 			/* see the comment above */
@@ -3626,7 +3849,7 @@ __arrowKdsAssignVirtualColumns(kern_data_store *kds,
 							   kern_colmeta *cmeta,
 							   bool virtual_isnull,
 							   Datum virtual_datum,
-							   StringInfo chunk_buffer)
+							   LargeStringInfo chunk_buffer)
 {
 	if (virtual_isnull)
 	{
@@ -3639,27 +3862,27 @@ __arrowKdsAssignVirtualColumns(kern_data_store *kds,
 								 chunk_buffer->len - (char *)kds);
 		if (cmeta->attbyval)
 		{
-			appendBinaryStringInfo(chunk_buffer,
-								   (char *)&virtual_datum,
-								   cmeta->attlen);
+			appendBinaryLargeStringInfo(chunk_buffer,
+										(char *)&virtual_datum,
+										cmeta->attlen);
 		}
 		else if (cmeta->attlen > 0)
 		{
-			appendBinaryStringInfo(chunk_buffer,
-								   DatumGetPointer(virtual_datum),
-								   cmeta->attlen);
+			appendBinaryLargeStringInfo(chunk_buffer,
+										DatumGetPointer(virtual_datum),
+										cmeta->attlen);
 		}
 		else if (cmeta->attlen == -1)
 		{
-			appendBinaryStringInfo(chunk_buffer,
-								   DatumGetPointer(virtual_datum),
-								   VARSIZE_ANY(virtual_datum));
+			appendBinaryLargeStringInfo(chunk_buffer,
+										DatumGetPointer(virtual_datum),
+										VARSIZE_ANY(virtual_datum));
 		}
 		else
 		{
 			elog(ERROR, "unknown type length: %d", cmeta->attlen);
 		}
-		__appendZeroStringInfo(chunk_buffer, 0);
+		appendZeroLargeStringInfo(chunk_buffer, 0);
 	}
 }
 
@@ -3667,12 +3890,13 @@ static kern_data_store *
 __arrowFdwSetupKDSHead(Relation relation,
 					   Bitmapset *referenced,
 					   RecordBatchState *rb_state,
-					   StringInfo chunk_buffer)
+					   LargeStringInfo chunk_buffer)
 {
 	ArrowFileState *af_state = rb_state->af_state;
 	TupleDesc	tupdesc = RelationGetDescr(relation);
 	size_t		head_off = chunk_buffer->len;
 	char		kds_format = KDS_FORMAT_ARROW;
+	bool		all_fields = bms_is_member(-FirstLowInvalidHeapAttributeNumber, referenced);
 	kern_data_store *kds;
 
 	/*
@@ -3686,7 +3910,7 @@ __arrowFdwSetupKDSHead(Relation relation,
 		kds_format = KDS_FORMAT_PARQUET;
 
 	/* setup KDS and I/O-vector */
-	enlargeStringInfo(chunk_buffer, estimate_kern_data_store(tupdesc));
+	enlargeLargeStringInfo(chunk_buffer, estimate_kern_data_store(tupdesc));
 	kds = (kern_data_store *)(chunk_buffer->data + head_off);
 	setup_kern_data_store(kds, tupdesc, 0, kds_format);
 	kds->nitems = rb_state->rb_nitems;
@@ -3706,7 +3930,7 @@ __arrowFdwSetupKDSHead(Relation relation,
 			__arrowKdsAssignAttrOptions(kds,
 										&kds->colmeta[j],
 										&rb_state->fields[field_index]);
-			if (bms_is_member(k+1, referenced))
+			if (all_fields || bms_is_member(k+1, referenced))
 				kds->colmeta[j].field_index = field_index;
 			else
 				kds->colmeta[j].field_index = -1;	/* not referenced */
@@ -3726,12 +3950,15 @@ __arrowFdwSetupKDSHead(Relation relation,
 			kds = (kern_data_store *)(chunk_buffer->data + head_off);
 			kds->colmeta[j].field_index = -1;		/* no physical field */
 		}
-		else if (field_index == __FIELD_INDEX_SPECIAL__VIRTUAL_PER_RECORD_BATCH)
+		else if (field_index < __FIELD_INDEX_SPECIAL__VIRTUAL_PER_FILE)
 		{
+			int		k = __FIELD_INDEX_SPECIAL__VIRTUAL_PER_RECORD_BATCH(field_index);
+
+			assert(k >= 0 && k < rb_state->virtual_nitems);
 			__arrowKdsAssignVirtualColumns(kds,
 										   &kds->colmeta[j],
-										   rb_state->virtual_isnull,
-										   rb_state->virtual_datum,
+										   rb_state->virtual_isnull[k],
+										   rb_state->virtual_values[k],
 										   chunk_buffer);
 			/* see the comment above */
 			kds = (kern_data_store *)(chunk_buffer->data + head_off);
@@ -3752,7 +3979,7 @@ static inline strom_io_vector *
 arrowFdwLoadRecordBatch(Relation relation,
 						Bitmapset *referenced,
 						RecordBatchState *rb_state,
-						StringInfo chunk_buffer)
+						LargeStringInfo chunk_buffer)
 {
 	kern_data_store *kds = __arrowFdwSetupKDSHead(relation,
 												  referenced,
@@ -3765,7 +3992,7 @@ static kern_data_store *
 arrowFdwFillupRecordBatch(Relation relation,
 						  Bitmapset *referenced,
 						  RecordBatchState *rb_state,
-						  StringInfo chunk_buffer)
+						  LargeStringInfo chunk_buffer)
 {
 	ArrowFileState	*af_state = rb_state->af_state;
 	kern_data_store	*kds;
@@ -3773,13 +4000,13 @@ arrowFdwFillupRecordBatch(Relation relation,
 	char	   *base;
 	File		filp;
 
-	resetStringInfo(chunk_buffer);
+	resetLargeStringInfo(chunk_buffer);
 	iovec = arrowFdwLoadRecordBatch(relation,
 									referenced,
 									rb_state,
 									chunk_buffer);
 	kds = (kern_data_store *)chunk_buffer->data;
-	enlargeStringInfo(chunk_buffer, kds->length);
+	enlargeLargeStringInfo(chunk_buffer, kds->length);
 	kds = (kern_data_store *)chunk_buffer->data;
 	filp = PathNameOpenFile(af_state->filename, O_RDONLY | PG_BINARY);
 	base = (char *)kds + KDS_HEAD_LENGTH(kds) + kds->arrow_virtual_usage;
@@ -3837,12 +4064,12 @@ arrowFdwFillupRecordBatch(Relation relation,
 static void *
 __parquetFillupAllocBuffer(void *__priv, size_t sz)
 {
-	StringInfo	buf = __priv;
+	LargeStringInfo buf = __priv;
 	void	   *result;
 
 	PG_TRY();
 	{
-		enlargeStringInfo(buf, sz);
+		enlargeLargeStringInfo(buf, sz);
 		result = buf->data + buf->len;
 	}
 	PG_CATCH();
@@ -3860,21 +4087,21 @@ static kern_data_store *
 parquetFillupRowGroup(Relation relation,
 					  Bitmapset *referenced,
 					  RecordBatchState *rb_state,
-					  StringInfo chunk_buffer)
+					  LargeStringInfo chunk_buffer)
 {
 	kern_data_store *kds_head;
 	kern_data_store *kds;
 	const char		*error_message = NULL;
 
 	/* prepare the KDS buffer */
-	resetStringInfo(chunk_buffer);
+	resetLargeStringInfo(chunk_buffer);
 	__arrowFdwSetupKDSHead(relation, referenced, rb_state, chunk_buffer);
 	kds_head = alloca(chunk_buffer->len);
 	memcpy(kds_head, chunk_buffer->data, chunk_buffer->len);
 	Assert(kds_head->format == KDS_FORMAT_PARQUET);
 
 	/* read a row-group of the Parquet file */
-	resetStringInfo(chunk_buffer);
+	resetLargeStringInfo(chunk_buffer);
 	kds = parquetReadOneRowGroup(rb_state->af_state->filename,
 								 kds_head,
 								 __parquetFillupAllocBuffer, chunk_buffer,
@@ -4111,10 +4338,8 @@ ArrowGetForeignPaths(PlannerInfo *root,
 			compute_parallel_worker(baserel,
 									baserel->pages, -1.0,
 									max_parallel_workers_per_gather);
-//FIXME: Just a workaround to add inner_path of GpuJoin in parallel mode.
-//       We should add non-parallel inner_path
-//		if (num_workers == 0)
-//			return;
+		if (num_workers == 0)
+			return;
 
 		fpath = create_foreignscan_path(root,
 										baserel,
@@ -4129,6 +4354,7 @@ ArrowGetForeignPaths(PlannerInfo *root,
 										NIL,	/* no restrict-info of Join push-down */
 										NIL);	/* no particular private */
 		fpath->path.parallel_aware = true;
+		fpath->path.parallel_workers = num_workers;
 		cost_arrow_fdw_seqscan(&fpath->path,
 							   root,
 							   baserel,
@@ -4887,7 +5113,7 @@ __arrowFdwExecInit(ScanState *ss,
 	arrow_state->rbatch_index = &arrow_state->__rbatch_index_local;
 	arrow_state->rbatch_nload = &arrow_state->__rbatch_nload_local;
 	arrow_state->rbatch_nskip = &arrow_state->__rbatch_nskip_local;
-	initStringInfo(&arrow_state->chunk_buffer);
+	initLargeStringInfo(&arrow_state->chunk_buffer);
 	arrow_state->curr_filp  = -1;
 	arrow_state->curr_kds   = NULL;
 	arrow_state->curr_index = 0;
@@ -5017,7 +5243,7 @@ pgstromScanChunkArrowFdw(pgstromTaskState *pts,
 						 struct iovec *xcmd_iov, int *xcmd_iovcnt)
 {
 	ArrowFdwState  *arrow_state = pts->arrow_state;
-	StringInfo		chunk_buffer = &arrow_state->chunk_buffer;
+	LargeStringInfo	chunk_buffer = &arrow_state->chunk_buffer;
 	RecordBatchState *rb_state;
 	ArrowFileState *af_state;
 	XpuCommand *xcmd;
@@ -5038,10 +5264,10 @@ pgstromScanChunkArrowFdw(pgstromTaskState *pts,
 	af_state = rb_state->af_state;
 
 	/* XpuCommand header */
-	resetStringInfo(chunk_buffer);
-	appendBinaryStringInfo(chunk_buffer,
-						   pts->xcmd_buf.data,
-						   pts->xcmd_buf.len);
+	resetLargeStringInfo(chunk_buffer);
+	appendBinaryLargeStringInfo(chunk_buffer,
+								pts->xcmd_buf.data,
+								pts->xcmd_buf.len);
 	/* kds_src (arrow or parquet) */
 	kds_src_offset = chunk_buffer->len;
 	kds_src = __arrowFdwSetupKDSHead(pts->css.ss.ss_currentRelation,
@@ -5055,8 +5281,8 @@ pgstromScanChunkArrowFdw(pgstromTaskState *pts,
 													   arrow_state->referenced,
 													   kds_src);
 		size_t		iovec_sz = offsetof(strom_io_vector, ioc[iovec->nr_chunks]);
-		kds_src_iovec = __appendBinaryStringInfo(chunk_buffer,
-												 iovec, iovec_sz);
+		kds_src_iovec = appendBinaryLargeStringInfo(chunk_buffer,
+													iovec, iovec_sz);
 	}
 	else
 	{
@@ -5065,10 +5291,9 @@ pgstromScanChunkArrowFdw(pgstromTaskState *pts,
 	/* arrow/parquet filename */
 	kds_src_pathname = chunk_buffer->len;
 	if (!pts->ds_entry)
-		appendStringInfoString(chunk_buffer, af_state->filename);
+		appendStringLargeStringInfo(chunk_buffer, af_state->filename);
 	else
-		appendStringInfoString(chunk_buffer, af_state->dpu_path);
-	appendStringInfoChar(chunk_buffer, '\0');
+		appendStringLargeStringInfo(chunk_buffer, af_state->dpu_path);
 
 	/* assign offset of XpuCommand */
 	xcmd = (XpuCommand *)chunk_buffer->data;
@@ -5269,15 +5494,58 @@ ArrowShutdownForeignScan(ForeignScanState *node)
 	pgstromArrowFdwShutdown(node->fdw_state);
 }
 
+#if 1
+/*
+ * fixup_danger_expression_for_explain
+ *
+ * NOTE: pgstromArrowFdwExplain() called via ExplainForeignScan() of FDW
+ * does not carry 'ancestors' information, so extension cannot deparse
+ * some kind of expressions, like Param which refers upper node.
+ * It eventually causes assertion failed, so we have to fixup them.
+ *
+ * NOTE: we want this API design is revised in the future PostgreSQL version...
+ *       details are described at #974
+ */
+static Node *
+fixup_danger_expression_for_explain(Node *node, void *data)
+{
+	if (!node)
+		return node;
+	if (IsA(node, Param))
+	{
+		Param  *param = (Param *)node;
+		char	buf[100];
+		int		bufsz;
+
+		bufsz = sprintf(buf, "****Param(%s, ID: %d)",
+						param->paramkind == PARAM_EXTERN  ? "PARAM_EXTERN" :
+						param->paramkind == PARAM_EXEC    ? "PARAM_EXEC" :
+						param->paramkind == PARAM_SUBLINK ? "PARAM_SUBLINK" :
+						param->paramkind == PARAM_MULTIEXPR ? "PARAM_MULTIEXPR" : "???",
+						param->paramid + 1);
+		SET_VARSIZE(buf, bufsz);
+		return (Node *)makeConst(TEXTOID,	/* consttype */
+								 -1,		/* consttypmod */
+								 InvalidOid,/* constcollid */
+								 -1,		/* constlen */
+								 PointerGetDatum(pmemdup(buf, bufsz)),
+								 false,		/* constisnull */
+								 false);	/* constbyval */
+	}
+	return expression_tree_mutator(node, fixup_danger_expression_for_explain, data);
+}
+#endif
+
 /*
  * ArrowExplainForeignScan
  */
 void
-pgstromArrowFdwExplain(ArrowFdwState *arrow_state,
-					   Relation frel,
+pgstromArrowFdwExplain(ScanState *ss,	/* Foreign or Custom */
+					   ArrowFdwState *arrow_state,
 					   ExplainState *es,
 					   List *dcontext)
 {
+	Relation	frel = ss->ss_currentRelation;
 	TupleDesc	tupdesc = RelationGetDescr(frel);
 	size_t	   *chunk_sz;
 	ListCell   *lc1, *lc2;
@@ -5318,6 +5586,14 @@ pgstromArrowFdwExplain(ArrowFdwState *arrow_state,
 			Node   *qual = lfirst(lc1);
 			char   *temp;
 
+			/*
+			 * FIXME: deparse_context by ForeignScanState does not carry
+			 * 'ancestors' (probably, wrong API design...), so we cannot
+			 * deparse expressions for human readable form.
+			 * So, we replace Param expression for safety.
+			 */
+			if (IsA(ss, ForeignScanState))
+				qual = fixup_danger_expression_for_explain(qual, ss);
 			temp = deparse_expression(qual, dcontext, es->verbose, false);
 			if (buf.len > 0)
 				appendStringInfoString(&buf, ", ");
@@ -5433,13 +5709,12 @@ pgstromArrowFdwExplain(ArrowFdwState *arrow_state,
 static void
 ArrowExplainForeignScan(ForeignScanState *node, ExplainState *es)
 {
-	Relation		frel = node->ss.ss_currentRelation;
 	List		   *dcontext;
 
 	dcontext = set_deparse_context_plan(es->deparse_cxt,
 										node->ss.ps.plan,
 										NULL);
-	pgstromArrowFdwExplain(node->fdw_state, frel, es, dcontext);
+	pgstromArrowFdwExplain(&node->ss, node->fdw_state, es, dcontext);
 }
 
 /*
@@ -5454,7 +5729,7 @@ RecordBatchAcquireSampleRows(Relation relation,
 	TupleDesc		tupdesc = RelationGetDescr(relation);
 	kern_data_store *kds;
 	Bitmapset	   *referenced = NULL;
-	StringInfoData	buffer;
+	LargeStringInfoData buffer;
 	Datum		   *values;
 	bool		   *isnull;
 	int				count;
@@ -5462,7 +5737,7 @@ RecordBatchAcquireSampleRows(Relation relation,
 
 	/* ANALYZE needs to fetch all the attributes */
 	referenced = bms_make_singleton(-FirstLowInvalidHeapAttributeNumber);
-	initStringInfo(&buffer);
+	initLargeStringInfo(&buffer);
 	/* Load an example KDS buffer */
 	if (ArrowMetadataVersionIsParquet(rb_state->af_state->version))
 		kds = parquetFillupRowGroup(relation, referenced, rb_state, &buffer);

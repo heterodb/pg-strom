@@ -39,7 +39,7 @@
 /*
  * Error Reporting
  */
-#ifdef PGSTROM_DEBUG_BUILD
+#ifdef __PGSTROM_MODULE__
 extern "C" {
 #include "postgres.h"
 }
@@ -50,51 +50,52 @@ extern "C" {
 #define Elog(fmt,...)								\
 	do {											\
 		char   *ebuf = (char *)alloca(320);			\
-		snprintf(ebuf, 320, "[ERROR %s:%d] " fmt,	\
+		snprintf(ebuf, 320, "(%s:%d) " fmt,			\
 				 __FILE__,__LINE__, ##__VA_ARGS__);	\
 		throw std::runtime_error(ebuf);				\
 	} while(0)
+static inline void
+ErrorReport(const char *emsg)
+{
+#ifdef __PGSTROM_MODULE__
+	elog(ERROR, "%s", emsg);
+#else
+	fprintf(stderr, "(ERROR %s\n", emsg+1);
+	exit(1);
+#endif
+}
 
 /*
  * Memory Allocation
  */
-#ifdef PGSTROM_DEBUG_BUILD
+#ifdef __PGSTROM_MODULE__
 extern "C" {
 #include "utils/palloc.h"
 }
-inline void *__palloc(size_t sz)
+static inline void *__palloc(size_t sz)
 {
-	void   *ptr = palloc_extended(sz, MCXT_ALLOC_NO_OOM);
+	void   *ptr = palloc_extended(sz, MCXT_ALLOC_HUGE | MCXT_ALLOC_NO_OOM);
 	if (!ptr)
 		Elog("out of memory (sz=%lu)", sz);
 	return ptr;
 }
 
-inline void *__palloc0(size_t sz)
+static inline void *__palloc0(size_t sz)
 {
-	void   *ptr = palloc_extended(sz, MCXT_ALLOC_NO_OOM | MCXT_ALLOC_ZERO);
-	if (!ptr)
-		Elog("out of memory (sz=%lu)", sz);
-	return ptr;
-}
-
-inline void *__repalloc(void *ptr, size_t sz)
-{
-	ptr = repalloc_extended(ptr, sz, MCXT_ALLOC_NO_OOM);
+	void   *ptr = palloc_extended(sz, MCXT_ALLOC_HUGE | MCXT_ALLOC_NO_OOM | MCXT_ALLOC_ZERO);
 	if (!ptr)
 		Elog("out of memory (sz=%lu)", sz);
 	return ptr;
 }
 #else
-inline void *__palloc(size_t sz)
+static inline void *__palloc(size_t sz)
 {
 	void   *ptr = malloc(sz);
 	if (!ptr)
 		Elog("out of memory (sz=%lu)", sz);
 	return ptr;
 }
-
-inline void *__palloc0(size_t sz)
+static inline void *__palloc0(size_t sz)
 {
 	void   *ptr = malloc(sz);
 	if (!ptr)
@@ -102,16 +103,8 @@ inline void *__palloc0(size_t sz)
 	memset(ptr, 0, sz);
 	return ptr;
 }
-
-inline void *__repalloc(void *ptr, size_t sz)
-{
-	ptr = realloc(ptr, sz);
-	if (!ptr)
-		Elog("out of memory (sz=%lu)", sz);
-	return ptr;
-}
 #endif
-inline char *__pstrdup(const char *str)
+static inline char *__pstrdup(const char *str)
 {
 	size_t	sz = strlen(str);
 	char   *result = (char *)__palloc(sz+1);
@@ -119,7 +112,7 @@ inline char *__pstrdup(const char *str)
 	result[sz] = '\0';
 	return result;
 }
-inline char *__pstrdup(const flatbuffers::String *str)
+static inline char *__pstrdup(const flatbuffers::String *str)
 {
 	size_t	sz = str->size();
 	char   *result = (char *)__palloc(sz+1);
@@ -1011,14 +1004,7 @@ dumpArrowNode(const ArrowNode *node)
 	}
 	/* error report */
 	if (emsg)
-	{
-#ifdef PGSTROM_DEBUG_BUILD
-		elog(ERROR, "%s", emsg);
-#else
-		fputs(emsg, stderr);
-		exit(1);
-#endif
-	}
+		ErrorReport(emsg);
 	return result;
 }
 
@@ -1079,14 +1065,7 @@ dumpArrowFileInfo(const ArrowFileInfo *af_info)
 	}
 	/* error report */
 	if (emsg)
-	{
-#ifdef PGSTROM_DEBUG_BUILD
-		elog(ERROR, "%s", emsg);
-#else
-		fputs(emsg, stderr);
-		exit(1);
-#endif
-	}
+		ErrorReport(emsg);
 	return result;
 }
 #undef __SPACES
@@ -1517,14 +1496,7 @@ copyArrowNode(ArrowNode *dest, const ArrowNode *src)
 	}
 	/* error report */
 	if (emsg)
-	{
-#ifdef PGSTROM_DEBUG_BUILD
-		elog(ERROR, "%s", emsg);
-#else
-		fputs(emsg, stderr);
-		exit(1);
-#endif
-	}
+		ErrorReport(emsg);
 }
 
 // ============================================================
@@ -2020,14 +1992,7 @@ equalArrowNode(const ArrowNode *a, const ArrowNode *b)
 	}
 	/* error report */
 	if (emsg)
-	{
-#ifdef PGSTROM_DEBUG_BUILD
-		elog(ERROR, "%s", emsg);
-#else
-		fputs(emsg, stderr);
-		exit(1);
-#endif
-	}
+		ErrorReport(emsg);
 	return rv;
 }
 
@@ -3296,6 +3261,21 @@ __readParquetMinMaxStats(ArrowFieldNode *field,
 			max_datum = std::to_string(__stat->max());
 			break;
 		}
+		case parquet::Type::BYTE_ARRAY: {
+			auto __stat = std::dynamic_pointer_cast<const parquet::ByteArrayStatistics>(stats);
+			auto cdescr = __stat->descr();
+
+			assert(cdescr->physical_type() == stats->physical_type());
+			if (cdescr->converted_type() == parquet::ConvertedType::type::UTF8 ||
+				(cdescr->logical_type() && cdescr->logical_type()->is_string()))
+			{
+				auto	__min = __stat->min();
+				auto	__max = __stat->max();
+				min_datum = std::string(reinterpret_cast<const char*>(__min.ptr), __min.len);
+				max_datum = std::string(reinterpret_cast<const char*>(__max.ptr), __max.len);
+			}
+			break;
+		}
 		case parquet::Type::FIXED_LEN_BYTE_ARRAY: {
 			auto __stat = std::dynamic_pointer_cast<const parquet::FLBAStatistics>(stats);
 			auto cdescr = __stat->descr();
@@ -3552,7 +3532,7 @@ __readArrowFileInfo(int fdesc, ArrowFileInfo *af_info)
 	auto rfilp = rv.ValueOrDie();
 	/* Quick check of the file format. */
 	if (rfilp->ReadAt(0, 6, magic) != 6)
-		Elog("failed on arrow::io::ReadableFile::ReadAt");
+		Elog("failed on arrow::io::ReadableFile::ReadAt('%s')", af_info->filename);
 	if (std::memcmp(magic, ARROW_SIGNATURE, ARROW_SIGNATURE_SZ) == 0)
 		__readArrowFileMetadata(rfilp, af_info);
 #if HAS_PARQUET
@@ -3593,13 +3573,6 @@ readArrowFileInfo(const char *filename, ArrowFileInfo *af_info)
 	}
 	/* error report */
 	if (emsg)
-	{
-#ifdef PGSTROM_DEBUG_BUILD
-		elog(ERROR, "%s", emsg);
-#else
-		fputs(emsg, stderr);
-		exit(1);
-#endif
-	}
+		ErrorReport(emsg);
 	return 0;	/* success */
 }

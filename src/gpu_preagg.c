@@ -339,7 +339,7 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	{"max(timestamp)",
 	 "s:max_ts(bytea)",
 	 "s:pmax(timestamp)",
-	 "s:fmax_ts(timestamp)",
+	 "s:fmax_ts(bytea)",
 	 KAGG_ACTION__PMAX_INT64,
 	 KAGG_FINAL__FMINMAX_TIMESTAMP,
 	 false,
@@ -348,7 +348,7 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	{"max(timestamptz)",
 	 "s:max_tstz(bytea)",
 	 "s:pmax(timestamptz)",
-	 "s:fmax_tstz(timestamp)",
+	 "s:fmax_tstz(bytea)",
 	 KAGG_ACTION__PMAX_INT64,
 	 KAGG_FINAL__FMINMAX_TIMESTAMPTZ,
 	 false,
@@ -1838,39 +1838,45 @@ __replace_expression_by_altfunc_common(Node *node, void *__priv,
 static Node *
 replace_expression_by_agg_altfuncs(Node *node, void *__priv)
 {
+	xpugroupby_build_path_context *con = __priv;
+	ListCell   *lc;
+
 	if (!node)
 		return NULL;
 	if (IsA(node, Aggref))
 	{
-		xpugroupby_build_path_context *con = __priv;
 		Node   *aggfn = make_alternative_aggref(con, (Aggref *)node, true);
 
-		if (!aggfn)
+		if (aggfn)
+			con->has_aggfuncs = true;
+		else
+		{
+			elog(DEBUG2, "no alternative (agg) function for: %s",
+				 nodeToString(node));
 			con->device_executable = false;
+		}
 		return aggfn;
 	}
-	return __replace_expression_by_altfunc_common(node, __priv, replace_expression_by_agg_altfuncs);
+	/* check whether it is grouping-key expression */
+	foreach (lc, con->groupby_keys)
+	{
+		Node   *groupby_key = lfirst(lc);
+
+		if (equal(groupby_key, node))
+			return copyObject(node);
+	}
+	/* if not a grouping key, it must be an expression that eventually contains grouping key */
+	if (IsA(node, Var))
+	{
+		con->device_executable = false;
+		return NULL;
+	}
+	return __replace_expression_by_altfunc_common(node, __priv,
+												  replace_expression_by_agg_altfuncs);
 }
 
 static Node *
 replace_expression_by_proj_altfuncs(Node *node, void *__priv)
-{
-	if (!node)
-		return NULL;
-	if (IsA(node, Aggref))
-	{
-		xpugroupby_build_path_context *con = __priv;
-		Node   *aggfn = make_alternative_aggref(con, (Aggref *)node, false);
-
-		if (!aggfn)
-			con->device_executable = false;
-		return aggfn;
-	}
-	return __replace_expression_by_altfunc_common(node, __priv, replace_expression_by_proj_altfuncs);
-}
-
-static Node *
-xpugroupby_build_path_target_expression(Node *node, void *__priv)
 {
 	xpugroupby_build_path_context *con = __priv;
 	ListCell   *lc;
@@ -1879,48 +1885,34 @@ xpugroupby_build_path_target_expression(Node *node, void *__priv)
 		return NULL;
 	if (IsA(node, Aggref))
 	{
-		Aggref *aggref = (Aggref *)node;
-		Node   *altfn_agg	= make_alternative_aggref(con, aggref, true);
-		Node   *altfn_proj	= make_alternative_aggref(con, aggref, false);
+		Node   *aggfn = make_alternative_aggref(con, (Aggref *)node, false);
 
-		if (!altfn_agg || !altfn_proj)
+		if (aggfn)
+			con->has_aggfuncs = true;
+		else
 		{
-			elog(DEBUG2, "No alternative aggregation: %s",
+			elog(DEBUG2, "no alternative (proj) function for: %s",
 				 nodeToString(node));
-			return NULL;
+			con->device_executable = false;
 		}
-		if (exprType((Node *)aggref) != exprType(altfn_agg) ||
-			exprType((Node *)aggref) != exprType(altfn_proj))
-		{
-			elog(ERROR, "Bug? XpuGroupBy catalog is not consistent: %s --> agg:[%s] proj:[%s]",
-				 nodeToString(aggref),
-				 nodeToString(altfn_agg),
-				 nodeToString(altfn_proj));
-		}
-		add_new_column_to_pathtarget(con->target_agg_final, (Expr *)altfn_agg);
-		con->has_aggfuncs = true;
-		return altfn_proj;
+		return aggfn;
 	}
 	/* check whether it is grouping-key expression */
 	foreach (lc, con->groupby_keys)
 	{
 		Node   *groupby_key = lfirst(lc);
-		Node   *newnode;
 
 		if (equal(groupby_key, node))
-		{
-			newnode = copyObject(node);
-			add_new_column_to_pathtarget(con->target_agg_final, (Expr *)newnode);
-			return newnode;
-		}
+			return copyObject(node);
 	}
-	/* variables must be grouping-key */
+	/* if not a grouping key, it must be an expression that eventually contains grouping key */
 	if (IsA(node, Var))
 	{
 		con->device_executable = false;
 		return NULL;
 	}
-	return expression_tree_mutator(node, xpugroupby_build_path_target_expression, __priv);
+	return __replace_expression_by_altfunc_common(node, __priv,
+												  replace_expression_by_proj_altfuncs);
 }
 
 static bool
@@ -2013,6 +2005,8 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 	foreach (cell, target_upper->exprs)
 	{
 		Node   *expr = lfirst(cell);
+		Node   *agg_expr = expr;	/* for Agg(CPU) + GPU-PreAgg (traditional) */
+		Node   *proj_expr = expr;	/* for Projection + GPU-PreAgg (merged in device) */
 		Index	sortgroupref = 0;
 
 		/*
@@ -2030,14 +2024,17 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 				goto found;
 			}
 		}
-		expr = xpugroupby_build_path_target_expression(expr, con);
-		if (!con->device_executable)
+		agg_expr = replace_expression_by_agg_altfuncs(expr, con);
+		proj_expr = replace_expression_by_proj_altfuncs(expr, con);
+		if (!agg_expr || !proj_expr || !con->device_executable)
 		{
-			elog(DEBUG2, "unexpected expression on the upper-tlist: %s", nodeToString(expr));
+			elog(DEBUG2, "unexpected expression on the upper-tlist: %s",
+				 nodeToString(expr));
 			return false;
 		}
 	found:
-		add_column_to_pathtarget(con->target_proj_final, (Expr *)expr, sortgroupref);
+		add_column_to_pathtarget(con->target_agg_final, (Expr *)agg_expr, sortgroupref);
+		add_column_to_pathtarget(con->target_proj_final, (Expr *)proj_expr, sortgroupref);
 	}
 
 	/*
@@ -2093,21 +2090,6 @@ try_add_final_groupby_paths(xpugroupby_build_path_context *con, Path *part_path)
 {
 	Query	   *parse = con->root->parse;
 	Path	   *__path;
-	bool		needs_projection = true;
-
-	if (list_length(con->target_agg_final->exprs) == list_length(con->target_proj_final->exprs))
-	{
-		ListCell   *lc1, *lc2;
-
-		forboth (lc1, con->target_agg_final->exprs,
-				 lc2, con->target_proj_final->exprs)
-		{
-			if (!equal(lfirst(lc1), lfirst(lc2)))
-				break;
-		}
-		if (!lc1 && !lc2)
-			needs_projection = false;
-	}
 
 	if (parse->groupClause)
 	{
@@ -2122,11 +2104,6 @@ try_add_final_groupby_paths(xpugroupby_build_path_context *con, Path *part_path)
 										 con->havingAggQuals,
 										 &con->final_agg_clause_costs,
 										 con->num_groups);
-		if (needs_projection)
-			__path = (Path *)create_projection_path(con->root,
-													con->group_rel,
-													__path,
-													con->target_proj_final);
 		if (con->has_aggfuncs)
 			__path = pgstrom_create_dummy_path(con->root, __path);
 		add_path(con->group_rel, __path);
@@ -2144,11 +2121,6 @@ try_add_final_groupby_paths(xpugroupby_build_path_context *con, Path *part_path)
 										 con->havingAggQuals,
 										 &con->final_agg_clause_costs,
 										 con->num_groups);
-		if (needs_projection)
-			__path = (Path *)create_projection_path(con->root,
-													con->group_rel,
-													__path,
-													con->target_proj_final);
 		Assert(!con->has_aggfuncs);
 		add_path(con->group_rel, __path);
 	}
@@ -2164,11 +2136,6 @@ try_add_final_groupby_paths(xpugroupby_build_path_context *con, Path *part_path)
 										 con->havingAggQuals,
 										 &con->final_agg_clause_costs,
 										 con->num_groups);
-		if (needs_projection)
-			__path = (Path *)create_projection_path(con->root,
-													con->group_rel,
-													__path,
-													con->target_proj_final);
 		if (con->has_aggfuncs)
 			__path = pgstrom_create_dummy_path(con->root, __path);
 		add_path(con->group_rel, __path);
@@ -2546,9 +2513,18 @@ __try_add_xpupreagg_normal_path(PlannerInfo *root,
 	/* build GpuPreAgg path */
 	cpath = __buildXpuPreAggCustomPath(&con);
 
-	/* Agg(CPU) [+ Gather] + GpuPreAgg, if CPU fallback may happen */
-	/* Elsewhere, no Agg(CPU) is needed */
+	/* Agg(CPU) [+ Gather] + GpuPreAgg,
+	 * If CPU fallback may happen, because a part of results are kept in
+	 * CPU-side, thus GPU-Service cannot generate final aggregation result
+	 * by itself, or
+	 * If no-grouping aggregation, because it must generate an empty result
+	 * when input set is empty. The no-grouping aggregation is a relatively
+	 * lightweight operation because CPU processes up to one tuple, so we
+	 * can ignore this overhead.
+	 * Elsewhere, no CPU-based Agg-node is needed.
+	 */
 	if (pgstrom_cpu_fallback_elevel < ERROR ||
+		parse->groupClause == NIL ||
 		(xpu_task_flags & DEVKIND__ANY) != DEVKIND__NVIDIA_GPU)
 	{
 		Path   *__path = &cpath->path;

@@ -8,6 +8,7 @@ include Makefile.common
 __PGSTROM_TGZ := pg_strom-$(PGSTROM_VERSION)
 PGSTROM_TAR   := $(__PGSTROM_TGZ).tar
 PGSTROM_TGZ   := $(__PGSTROM_TGZ).tar.gz
+PGSTROM_TGZ_FULLPATH := $(shell realpath $(PGSTROM_TGZ))
 
 SWDC ?= $(shell test -d ../swdc/.git && realpath ../swdc || echo /dev/null)
 __SWDC_URL = git@github.com:heterodb/swdc.git
@@ -19,6 +20,12 @@ __SPECDIR = $(shell rpmbuild -E %{_specdir})
 __RPMDIR = $(shell rpmbuild -E %{_rpmdir})/$(__ARCH)
 __SRPMDIR = $(shell rpmbuild -E %{_srcrpmdir})
 __SPECFILE = $(__SPECDIR)/pg_strom.spec
+__RPMFILES = $(shell rpmspec --rpms -q $(__SPECFILE) | grep -vE 'debug(info|source)')
+__RPMDEBUGS = $(shell rpmspec --rpms -q $(__SPECFILE) | grep -E 'debug(info|source)')
+__SRPMFILE = $(shell rpmspec --srpm -q $(__SPECFILE) | sed s/\.$(__ARCH)/.src/g)
+__SWDC_RPMS_DIR=docs/yum/$(__DIST)-$(__ARCH)
+__SWDC_DEBUG_DIR=docs/yum/$(__DIST)-debuginfo
+__SWDC_SRPM_DIR=docs/yum/$(__DIST)-source
 
 rpm: rpm-pg_strom
 
@@ -28,39 +35,30 @@ __precheck_swdc:
 	(cd $(SWDC);	\
 	 test "`git remote get-url origin`" = "$(__SWDC_URL)" || exit 1; \
 	 git pull || exit 1)
+	pinentry -h >&/dev/null || (echo "dnf install pinentry"; exit 1)
 
 swdc: __precheck_swdc rpm-pg_strom
-	(PGSTROM_TGZ_FULLPATH="`realpath $(PGSTROM_TGZ)`";	\
-	 cd $(SWDC);						\
-	 RPMS="`rpmspec -q --rpms $(__SPECFILE) | grep -v debuginfo`"; \
-	 DEST=docs/yum/$(__DIST)-$(__ARCH);		 	\
-	 mkdir -p $${DEST};					\
-	 for f in $$RPMS; do					\
-	   __file="$${f}.rpm";					\
-	   rpmsign --addsign "$(__RPMDIR)/$${__file}" &&	\
-	   install -m 644 "$(__RPMDIR)/$${__file}" $${DEST} &&	\
-	   git add "$${DEST}/$${__file}";			\
-	 done;							\
-	 RPMS="`rpmspec -q --rpms $(__SPECFILE) | grep debuginfo`";\
-	 DEST=docs/yum/$(__DIST)-debuginfo;			\
-	 mkdir -p $${DEST};					\
-	 for f in $$RPMS; do					\
-	   __file="$${f}.rpm";					\
-	   rpmsign --addsign "$(__RPMDIR)/$${__file}" &&	\
-	   install -m 644 "$(__RPMDIR)/$${__file}" $${DEST} &&	\
-	   git add "$${DEST}/$${__file}";			\
-	 done;							\
-	 RPMS="`rpmspec -q --srpm $(__SPECFILE)`";		\
-	 DEST=docs/yum/$(__DIST)-source;			\
-	 mkdir -p $${DEST};					\
-	 for f in $$RPMS; do					\
-	   __file="`echo $${f} | sed 's/$(__ARCH)/src.rpm/g'`" && \
-	   rpmsign --addsign "$(__SRPMDIR)/$${__file}" &&	\
-	   install -m 644 "$(__SRPMDIR)/$${__file}" $${DEST} &&	\
-	   git add "$${DEST}/$${__file}";			\
-	 done;							\
-	 install -m 644 $${PGSTROM_TGZ_FULLPATH} ./docs/tgz &&	\
-	   git add ./docs/tgz/$(PGSTROM_TGZ);			\
+	(cd $(SWDC);						\
+	mkdir -p $(__SWDC_RPMS_DIR);				\
+	for __file in $(addsuffix .rpm,$(__RPMFILES)); do	\
+	  rpmsign --addsign $(__RPMDIR)/$${__file} &&		\
+	  install -m 644 $(__RPMDIR)/$${__file} $(__SWDC_RPMS_DIR) && \
+	  git add $(__SWDC_RPMS_DIR)/$${__file};			\
+	done;							\
+	mkdir -p $(__SWDC_DEBUG_DIR);				\
+	for __file in $(addsuffix .rpm,$(__RPMDEBUGS)); do	\
+	  rpmsign --addsign $(__RPMDIR)/$${__file} &&		\
+	  install -m 644 $(__RPMDIR)/$${__file} $(__SWDC_DEBUG_DIR) && \
+	  git add $(__SWDC_DEBUG_DIR)/$${__file};	\
+	done;							\
+	mkdir -p $(__SWDC_SRPM_DIR);				\
+	for __file in $(addsuffix .rpm,$(__SRPMFILE)); do	\
+	  rpmsign --addsign $(__SRPMDIR)/$${__file} &&		\
+	  install -m 644 $(__SRPMDIR)/$${__file} $(__SWDC_SRPM_DIR) && \
+	  git add $(__SWDC_SRPM_DIR)/$${__file};		\
+	done;							\
+	install -m 644 $(PGSTROM_TGZ_FULLPATH) docs/tgz &&	\
+	git add docs/tgz/$(PGSTROM_TGZ);			\
 	./update-index.sh)
 
 tarball:
@@ -90,7 +88,9 @@ rpm-pg_strom: tarball
 		    -e "s/@@STROM_RELEASE@@/$(RELEASE)/g"		\
 		    -e "s/@@STROM_TARBALL@@/$(__PGSTROM_TGZ)/g"		\
 		    -e "s/@@PGSTROM_GITHASH@@/$(GITHASH)/g" > $(__SPECFILE)
-	rpmbuild -ba $(__SPECFILE)
+	# rpmbuild in RHEL10 checks 'rpath', so suggest to ignore our rpath
+	# configuration with symbolic link (/usr/local/cuda)
+	env QA_RPATHS=7 rpmbuild -ba $(__SPECFILE)
 
 rpm-mysql2arrow: tarball
 	cp -f $(PGSTROM_TGZ) $(__SOURCEDIR) || exit 1
@@ -103,7 +103,7 @@ rpm-mysql2arrow: tarball
 	git show --format=raw $(GITHASH):files/pg_strom.spec.in |	\
 		awk 'BEGIN {flag=0;} /^%changelog$$/{flag=1; next;} { if (flag>0) print; }' >> \
 		$(__SPECDIR)/mysql2arrow.spec
-	rpmbuild -ba $(__SPECDIR)/mysql2arrow.spec
+	env QA_RPATHS=7 rpmbuild -ba $(__SPECDIR)/mysql2arrow.spec
 
 rpm-pcap2arrow: tarball
 	cp -f $(PGSTROM_TGZ) $(__SOURCEDIR) || exit 1
@@ -116,7 +116,7 @@ rpm-pcap2arrow: tarball
 	git show --format=raw $(GITHASH):files/pg_strom.spec.in |	\
 		awk 'BEGIN {flag=0;} /^%changelog$$/{flag=1; next;} { if (flag>0) print; }' >> \
 		$(__SPECDIR)/mysql2arrow.spec
-	rpmbuild -ba $(__SPECDIR)/pcap2arrow.spec
+	env QA_RPATHS=7 rpmbuild -ba $(__SPECDIR)/pcap2arrow.spec
 
 deb:
 	@which fakeroot >&/dev/null || (echo "Run, sudo dnf install fakeroot"; exit 1)
