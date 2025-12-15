@@ -945,7 +945,7 @@ public:
 		{
 			__len = Min(sz, stats_min_len);
 			rv = memcmp(addr, stats_min_value, __len);
-			if (rv < 0 || (rv == 0 && stats_min_len < sz))
+			if (rv < 0 || (rv == 0 && stats_min_len > sz))
 			{
 				__len = Min(sz, STATS_VALUE_LEN);
 				memcpy(stats_min_value, addr, __len);
