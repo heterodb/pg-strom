@@ -857,6 +857,10 @@ extern bool		gpuServiceGoingTerminate(void);
 extern void		gpuservBgWorkerMain(Datum arg);
 extern void		pgstrom_init_gpu_service(void);
 
+extern void		pgstrom_inc_perf_counter(int num);
+extern void		pgstrom_add_perf_counter(int num, const struct timeval *tv_base);
+extern void		pgstrom_print_perf_counter(void);
+
 /*
  * gpu_cache.c
  */
