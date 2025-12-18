@@ -2147,6 +2147,8 @@ pgstromExecEndTaskState(CustomScanState *node)
 	}
 	foreach (lc, pts->css.custom_ps)
 		ExecEndNode((PlanState *) lfirst(lc));
+	/* for performance investigation */
+	pgstrom_print_perf_counter();
 }
 
 /*
