@@ -92,6 +92,7 @@ public:
 		chunk_nitems = 0;
 		parquet_mode = false;
 		default_compression = arrow::Compression::type::ZSTD;
+		arrow_schema = nullptr;
 	}
 	~arrowFileWrite()
 	{
@@ -136,6 +137,12 @@ static struct {
 };
 
 class arrowFileWriteColumn {
+protected:
+	void	__ResetBase(void)
+	{
+		arrow_builder->Reset();
+		arrow_array = nullptr;
+	}
 public:
 	std::string		attname;
 	std::string		typname;
@@ -163,9 +170,7 @@ public:
 	virtual void	putValue(VALUE datum) = 0;
 	virtual void	Reset(void)
 	{
-		arrow_builder->Reset();
-		if (arrow_array)
-			arrow_array = nullptr;
+		__ResetBase();
 	}
 	virtual uint64_t	Finish(void)
 	{
@@ -200,15 +205,15 @@ public:
 };
 
 #define ARROW_FILE_WRITE_FIELD_TEMPLATE(NAME,BUILDER_TYPE,ARROW_TYPE,C_TYPE) \
-	class arrowFileWrite##NAME##Column : public arrowFileWriteColumn	\
+	class arrowFileWriteColumn##NAME : public arrowFileWriteColumn		\
 	{																	\
 		bool	stats_is_valid;											\
 		C_TYPE	stats_min_value;										\
 		C_TYPE	stats_max_value;										\
 	public:																\
-		arrowFileWrite##NAME##Column(const char *__attname,				\
-									 bool __stats_enabled,				\
-									 arrow::Compression::type __compression) \
+		arrowFileWriteColumn##NAME(const char *__attname,				\
+								   bool __stats_enabled,				\
+								   arrow::Compression::type __compression) \
 		: arrowFileWriteColumn(__attname, #NAME, __stats_enabled, __compression) \
 		{																\
 			arrow_builder = std::make_shared<arrow::BUILDER_TYPE>(arrow::ARROW_TYPE, \
@@ -219,7 +224,7 @@ public:
 		{																\
 			if (!stats_is_valid)										\
 				return;													\
-			custom_metadata->Append(std::string("min_max_stats.") + this->attname, \
+			custom_metadata->Append(std::string("min_max_stats.") + attname, \
 									std::to_string(stats_min_value) +	\
 									std::string(",") +					\
 									std::to_string(stats_max_value));	\
@@ -227,7 +232,7 @@ public:
 		C_TYPE	fetchValue(VALUE datum);								\
 		void	putValue(VALUE datum)									\
 		{																\
-			auto	builder = std::dynamic_pointer_cast<arrow::BUILDER_TYPE>(this->arrow_builder); \
+			auto	builder = std::dynamic_pointer_cast<arrow::BUILDER_TYPE>(arrow_builder); \
 			arrow::Status rv;											\
 																		\
 			if (datum == Qnil)											\
@@ -254,7 +259,7 @@ public:
 		}																\
 		void	Reset(void)												\
 		{																\
-			this->Reset();												\
+			__ResetBase();												\
 			stats_is_valid = false;										\
 		}																\
 	}
@@ -283,7 +288,7 @@ ARROW_FILE_WRITE_FIELD_TEMPLATE(Timestamp_us,  TimestampBuilder, timestamp(arrow
 ARROW_FILE_WRITE_FIELD_TEMPLATE(Timestamp_ns,  TimestampBuilder, timestamp(arrow::TimeUnit::NANO),   int64_t);
 
 bool
-arrowFileWriteBooleanColumn::fetchValue(VALUE datum)
+arrowFileWriteColumnBoolean::fetchValue(VALUE datum)
 {
 	if (datum == Qtrue)
 		return true;
@@ -326,7 +331,7 @@ __fetchIntValue(VALUE datum)
 }
 
 int8_t
-arrowFileWriteInt8Column::fetchValue(VALUE datum)
+arrowFileWriteColumnInt8::fetchValue(VALUE datum)
 {
 	int		ival = NUM2INT(__fetchIntValue(datum));
 	if (ival < SCHAR_MIN || ival > SCHAR_MAX)
@@ -336,25 +341,25 @@ arrowFileWriteInt8Column::fetchValue(VALUE datum)
 }
 
 int16_t
-arrowFileWriteInt16Column::fetchValue(VALUE datum)
+arrowFileWriteColumnInt16::fetchValue(VALUE datum)
 {
 	return NUM2SHORT(__fetchIntValue(datum));
 }
 
 int32_t
-arrowFileWriteInt32Column::fetchValue(VALUE datum)
+arrowFileWriteColumnInt32::fetchValue(VALUE datum)
 {
 	return NUM2INT(__fetchIntValue(datum));
 }
 
 int64_t
-arrowFileWriteInt64Column::fetchValue(VALUE datum)
+arrowFileWriteColumnInt64::fetchValue(VALUE datum)
 {
 	return NUM2LONG(__fetchIntValue(datum));
 }
 
 uint8_t
-arrowFileWriteUInt8Column::fetchValue(VALUE datum)
+arrowFileWriteColumnUInt8::fetchValue(VALUE datum)
 {
 	int		ival = NUM2INT(__fetchIntValue(datum));
 	if (ival < 0 || ival > UCHAR_MAX)
@@ -364,19 +369,19 @@ arrowFileWriteUInt8Column::fetchValue(VALUE datum)
 }
 
 uint16_t
-arrowFileWriteUInt16Column::fetchValue(VALUE datum)
+arrowFileWriteColumnUInt16::fetchValue(VALUE datum)
 {
 	return NUM2USHORT(__fetchIntValue(datum));
 }
 
 uint32_t
-arrowFileWriteUInt32Column::fetchValue(VALUE datum)
+arrowFileWriteColumnUInt32::fetchValue(VALUE datum)
 {
 	return NUM2UINT(__fetchIntValue(datum));
 }
 
 uint64_t
-arrowFileWriteUInt64Column::fetchValue(VALUE datum)
+arrowFileWriteColumnUInt64::fetchValue(VALUE datum)
 {
 	return NUM2ULONG(__fetchIntValue(datum));
 }
@@ -395,24 +400,25 @@ __fetchFloatValue(VALUE datum)
 }
 
 half_t
-arrowFileWriteHalfFloatColumn::fetchValue(VALUE datum)
+arrowFileWriteColumnHalfFloat::fetchValue(VALUE datum)
 {
 	return fp64_to_fp16(__fetchFloatValue(datum));
 }
 
 float
-arrowFileWriteFloatColumn::fetchValue(VALUE datum)
+arrowFileWriteColumnFloat::fetchValue(VALUE datum)
 {
 	return (float)__fetchFloatValue(datum);
 }
 
 double
-arrowFileWriteDoubleColumn::fetchValue(VALUE datum)
+arrowFileWriteColumnDouble::fetchValue(VALUE datum)
 {
 	return __fetchFloatValue(datum);
 }
 
 #define SECS_PER_DAY		86400
+#include <syslog.h>
 
 static inline bool
 __tryFetchEventTime(VALUE datum,
@@ -424,6 +430,7 @@ __tryFetchEventTime(VALUE datum,
 	assert(datum != Qnil);
 	/* Is it Fluent::EventTime? */
 	cname = rb_class2name(CLASS_OF(datum));
+	syslog(4, "EventTime = [%s]", cname);
 	if (strcmp(cname, "EventTime") == 0 &&
 		rb_respond_to(datum, rb_intern("sec")) &&
 		rb_respond_to(datum, rb_intern("nsec")))
@@ -433,6 +440,36 @@ __tryFetchEventTime(VALUE datum,
 		*p_sec = NUM2ULONG(sec);
 		*p_nsec = NUM2ULONG(nsec);
 		return true;
+	}
+	/* Is it Integer (elapsed seconds from Epoch) */
+    if (CLASS_OF(datum) == rb_cInteger)
+	{
+		*p_sec = NUM2ULONG(datum);
+		*p_nsec = 0;
+		return true;
+	}
+	/* Is convertible to UTC? */
+	if (rb_respond_to(datum, rb_intern("getutc")))
+		datum = rb_funcall(datum, rb_intern("getutc"), 0);
+	/* Is it Time? */
+	if (rb_respond_to(datum, rb_intern("tv_sec")) &&
+		rb_respond_to(datum, rb_intern("tv_nsec")))
+	{
+		VALUE	sec = rb_funcall(datum, rb_intern("tv_sec"), 0);
+		VALUE	nsec = rb_funcall(datum, rb_intern("tv_nsec"), 0);
+
+		*p_sec = NUM2ULONG(sec);
+		*p_nsec = NUM2ULONG(nsec);
+		return true;
+	}
+	/* Convertible to Time? (maybe String or Date) */
+	if (rb_respond_to(datum, rb_intern("to_time")))
+		datum = rb_funcall(datum, rb_intern("to_time"), 0);
+	else
+	{
+		/* elsewhere, convert to String, then create a new Time object */
+		datum = rb_funcall(datum, rb_intern("to_s"), 0);
+		datum = rb_funcall(rb_cTime, rb_intern("parse"), 1, datum);
 	}
 	return false;
 }
@@ -465,7 +502,7 @@ __fetchRubyDateTimeValue(arrowBuilder arrow_builder,
 							 arrow::NAME##Type,							\
 							 C_TYPE>(arrow_builder, datum, attname, typname)
 int32_t
-arrowFileWriteDate_secColumn::fetchValue(VALUE datum)
+arrowFileWriteColumnDate_sec::fetchValue(VALUE datum)
 {
 	uint64_t	sec, nsec;
 
@@ -475,7 +512,7 @@ arrowFileWriteDate_secColumn::fetchValue(VALUE datum)
 }
 
 int64_t
-arrowFileWriteDate_msColumn::fetchValue(VALUE datum)
+arrowFileWriteColumnDate_ms::fetchValue(VALUE datum)
 {
 	uint64_t	sec, nsec;
 
@@ -485,7 +522,7 @@ arrowFileWriteDate_msColumn::fetchValue(VALUE datum)
 }
 
 int32_t
-arrowFileWriteTime_secColumn::fetchValue(VALUE datum)
+arrowFileWriteColumnTime_sec::fetchValue(VALUE datum)
 {
 	uint64_t	sec, nsec;
 
@@ -495,7 +532,7 @@ arrowFileWriteTime_secColumn::fetchValue(VALUE datum)
 }
 
 int32_t
-arrowFileWriteTime_msColumn::fetchValue(VALUE datum)
+arrowFileWriteColumnTime_ms::fetchValue(VALUE datum)
 {
 	uint64_t	sec, nsec;
 
@@ -505,7 +542,7 @@ arrowFileWriteTime_msColumn::fetchValue(VALUE datum)
 }
 
 int64_t
-arrowFileWriteTime_usColumn::fetchValue(VALUE datum)
+arrowFileWriteColumnTime_us::fetchValue(VALUE datum)
 {
 	uint64_t	sec, nsec;
 
@@ -515,7 +552,7 @@ arrowFileWriteTime_usColumn::fetchValue(VALUE datum)
 }
 
 int64_t
-arrowFileWriteTime_nsColumn::fetchValue(VALUE datum)
+arrowFileWriteColumnTime_ns::fetchValue(VALUE datum)
 {
 	uint64_t	sec, nsec;
 
@@ -525,7 +562,7 @@ arrowFileWriteTime_nsColumn::fetchValue(VALUE datum)
 }
 
 int64_t
-arrowFileWriteTimestamp_secColumn::fetchValue(VALUE datum)
+arrowFileWriteColumnTimestamp_sec::fetchValue(VALUE datum)
 {
 	uint64_t	sec, nsec;
 
@@ -535,7 +572,7 @@ arrowFileWriteTimestamp_secColumn::fetchValue(VALUE datum)
 }
 
 int64_t
-arrowFileWriteTimestamp_msColumn::fetchValue(VALUE datum)
+arrowFileWriteColumnTimestamp_ms::fetchValue(VALUE datum)
 {
 	uint64_t	sec, nsec;
 
@@ -545,7 +582,7 @@ arrowFileWriteTimestamp_msColumn::fetchValue(VALUE datum)
 }
 
 int64_t
-arrowFileWriteTimestamp_usColumn::fetchValue(VALUE datum)
+arrowFileWriteColumnTimestamp_us::fetchValue(VALUE datum)
 {
 	uint64_t	sec, nsec;
 
@@ -555,7 +592,7 @@ arrowFileWriteTimestamp_usColumn::fetchValue(VALUE datum)
 }
 
 int64_t
-arrowFileWriteTimestamp_nsColumn::fetchValue(VALUE datum)
+arrowFileWriteColumnTimestamp_ns::fetchValue(VALUE datum)
 {
 	uint64_t	sec, nsec;
 
@@ -567,7 +604,7 @@ arrowFileWriteTimestamp_nsColumn::fetchValue(VALUE datum)
 /*
  * Decimal128 type handler
  */
-class arrowFileWriteDecimal128Column : public arrowFileWriteColumn
+class arrowFileWriteColumnDecimal128 : public arrowFileWriteColumn
 {
 	int		dprecision;
 	int		dscale;
@@ -575,37 +612,44 @@ class arrowFileWriteDecimal128Column : public arrowFileWriteColumn
 	arrow::Decimal128 stats_min_value;
 	arrow::Decimal128 stats_max_value;
 public:
-	arrowFileWriteDecimal128Column(const char *__attname,
+	arrowFileWriteColumnDecimal128(const char *__atttype,
+								   const char *__attname,
 								   bool __stats_enabled,
 								   arrow::Compression::type __compression)
 		: arrowFileWriteColumn(__attname, "Decimal128", __stats_enabled, __compression)
 	{
-		const char *extra = strchr(__attname, '(');
+		const char *extra = strchr(__atttype, '(');
 
 		dprecision = 38;	/* default */
 		dscale = 6;			/* default */
 		if (extra)
 		{
-			int		__precision;
-			int		__scale;
-			char   *__dummy;
+			long	ival;
+			char   *end;
 
-			if (sscanf(extra, "(%u,%u)%s",
-					   &__precision,
-					   &__scale,
-					   &__dummy) == 2)
+			ival = strtol(extra+1, &end, 10);
+			while (isspace(*end))
+				end++;
+			if (*end == ',')
 			{
-				dprecision = __precision;
-				dscale = __scale;
+				dscale = ival;
+				ival = strtol(end+1, &end, 10);
+				while (isspace(*end))
+					end++;
+				if (*end != ')')
+					Elog("invalid Decimal128 precision and scale '%s'", __atttype);
+				dprecision = ival;
 			}
-			else if (sscanf(extra, "(%u)%s",
-							&__scale,
-							&__dummy) == 1)
+			else if (*end == ')')
 			{
-				dscale = __scale;
+				dscale = ival;
 			}
 			else
-				Elog("invalid Decimal128 precision and scale '%s'", extra);
+				Elog("invalid Decimal128 precision and scale '%s'", __atttype);
+			while (isspace(*end))
+				end++;
+			if (*end != '\0')
+				Elog("invalid Decimal128 precision and scale '%s'", __atttype);
 		}
 		arrow_builder = std::make_shared<arrow::Decimal128Builder>(arrow::decimal128(dprecision, dscale),
 																   arrow::default_memory_pool());
@@ -615,11 +659,11 @@ public:
 	{
 		if (stats_is_valid)
 		{
-			auto	builder = std::dynamic_pointer_cast<arrow::Decimal128Builder>(this->arrow_builder);
+			auto	builder = std::dynamic_pointer_cast<arrow::Decimal128Builder>(arrow_builder);
 			auto	d_type = std::static_pointer_cast<arrow::Decimal128Type>(builder->type());
 			int		scale = d_type->scale();
 
-			custom_metadata->Append(std::string("min_max_stats.") + this->attname,
+			custom_metadata->Append(std::string("min_max_stats.") + attname,
 									stats_min_value.ToString(scale) +
 									std::string(",") +
 									stats_max_value.ToString(scale));
@@ -673,7 +717,7 @@ public:
 	}
 	void	putValue(VALUE datum)
 	{
-		auto	builder = std::dynamic_pointer_cast<arrow::Decimal128Builder>(this->arrow_builder);
+		auto	builder = std::dynamic_pointer_cast<arrow::Decimal128Builder>(arrow_builder);
 		arrow::Status rv;
 
 		if (datum == Qnil)
@@ -700,12 +744,12 @@ public:
 	}
 	void	Reset(void)
 	{
-		this->Reset();
+		__ResetBase();
 		stats_is_valid = false;
 	}
 };
 
-class arrowFileWriteUtf8Column : public arrowFileWriteColumn
+class arrowFileWriteColumnUtf8 : public arrowFileWriteColumn
 {
 	static constexpr size_t STATS_VALUE_LEN = 60;
 	bool	stats_is_valid;
@@ -749,7 +793,7 @@ class arrowFileWriteUtf8Column : public arrowFileWriteColumn
 		}
 	}
 public:
-	arrowFileWriteUtf8Column(const char *__attname,
+	arrowFileWriteColumnUtf8(const char *__attname,
 							 bool __stats_enabled,
 							 arrow::Compression::type __compression)
 		: arrowFileWriteColumn(__attname, "Utf8", __stats_enabled, __compression)
@@ -759,7 +803,7 @@ public:
 	}
 	void	putValue(VALUE datum)
 	{
-		auto	builder = std::dynamic_pointer_cast<arrow::StringBuilder>(this->arrow_builder);
+		auto	builder = std::dynamic_pointer_cast<arrow::StringBuilder>(arrow_builder);
 		arrow::Status rv;
 
 		if (datum == Qnil)
@@ -793,7 +837,7 @@ public:
 				pos[0] = (*pos + 1);
 				pos[1] = '\0';
 			}
-			custom_metadata->Append(std::string("min_max_stats.") + this->attname,
+			custom_metadata->Append(std::string("min_max_stats.") + attname,
 									std::string(stats_min_value) +
 									std::string(",") +
 									std::string(stats_max_value));
@@ -808,10 +852,10 @@ public:
  * ================================================================ */
 static VALUE	ipaddr_klass = Qnil;
 
-class arrowFileWriteIpAddr4Column : public arrowFileWriteColumn
+class arrowFileWriteColumnIpAddr4 : public arrowFileWriteColumn
 {
 public:
-	arrowFileWriteIpAddr4Column(const char *__attname,
+	arrowFileWriteColumnIpAddr4(const char *__attname,
 								bool __stats_enabled,
 								arrow::Compression::type __compression)
 		: arrowFileWriteColumn(__attname, "IpAddr4", __stats_enabled, __compression)
@@ -821,7 +865,7 @@ public:
 	}
 	void	putValue(VALUE datum)
 	{
-		auto	builder = std::dynamic_pointer_cast<arrow::FixedSizeBinaryBuilder>(this->arrow_builder);
+		auto	builder = std::dynamic_pointer_cast<arrow::FixedSizeBinaryBuilder>(arrow_builder);
 		arrow::Status rv;
 
 		if (datum == Qnil)
@@ -862,10 +906,10 @@ public:
 	}
 };
 
-class arrowFileWriteIpAddr6Column : public arrowFileWriteColumn
+class arrowFileWriteColumnIpAddr6 : public arrowFileWriteColumn
 {
 public:
-	arrowFileWriteIpAddr6Column(const char *__attname,
+	arrowFileWriteColumnIpAddr6(const char *__attname,
 								bool __stats_enabled,
 								arrow::Compression::type __compression)
 		: arrowFileWriteColumn(__attname, "IpAddr6", __stats_enabled, __compression)
@@ -875,7 +919,7 @@ public:
 	}
 	void	putValue(VALUE datum)
 	{
-		auto	builder = std::dynamic_pointer_cast<arrow::FixedSizeBinaryBuilder>(this->arrow_builder);
+		auto	builder = std::dynamic_pointer_cast<arrow::FixedSizeBinaryBuilder>(arrow_builder);
 		arrow::Status rv;
 
 		if (datum == Qnil)
@@ -1069,6 +1113,13 @@ arrowFileWrite::writeArrowFile(void)
 			Elog("failed on arrow::ipc::RecordBatchWriter::WriteRecordBatch: %s",
 				 rv.ToString().c_str());
 	}
+	/* write out arrow footer */
+	{
+		auto	rv = arrow_file_writer->Close();
+		if (!rv.ok())
+			Elog("failed on arrow::ipc::RecordBatchWriter::Close: %s",
+				 rv.ToString().c_str());
+	}
 	/* close the file */
 	{
 		auto	rv = file_out_stream->Close();
@@ -1129,6 +1180,13 @@ arrowFileWrite::writeParquetFile(void)
 		auto	rv = parquet_file_writer->WriteRecordBatch(*rbatch);
 		if (!rv.ok())
 			Elog("failed on parquet::arrow::FileWriter::WriteRecordBatch: %s",
+				 rv.ToString().c_str());
+	}
+	/* write out parquet footer */
+	{
+		auto	rv = parquet_file_writer->Close();
+		if (!rv.ok())
+			Elog("failed on parquet::arrow::FileWriter::Close: %s",
 				 rv.ToString().c_str());
 	}
 	/* close the file */
@@ -1345,42 +1403,121 @@ __arrowFileWriteParseSchemaDefs(arrowFileWrite *fw_state, VALUE __schema_defs)
 			stats_enabled = (fw_state->parquet_mode ? 1 : 0);
 		assert(stats_enabled == 0 || stats_enabled == 1);
 
-		if (strcasecmp(field_name, "bool") == 0)
-			arrow_column = std::make_shared<arrowFileWriteBooleanColumn>(field_name, stats_enabled, compression);
-		else if (strcasecmp(field_name, "int8") == 0)
-			arrow_column = std::make_shared<arrowFileWriteInt8Column>(field_name, stats_enabled, compression);
-		else if (strcasecmp(field_name, "int16") == 0)
-			arrow_column = std::make_shared<arrowFileWriteInt16Column>(field_name, stats_enabled, compression);
-		else if (strcasecmp(field_name, "int32") == 0)
-			arrow_column = std::make_shared<arrowFileWriteInt32Column>(field_name, stats_enabled, compression);
-		else if (strcasecmp(field_name, "int64") == 0)
-			arrow_column = std::make_shared<arrowFileWriteInt64Column>(field_name, stats_enabled, compression);
-		else if (strcasecmp(field_name, "uint8") == 0)
-			arrow_column = std::make_shared<arrowFileWriteUInt8Column>(field_name, stats_enabled, compression);
-		else if (strcasecmp(field_name, "uint16") == 0)
-			arrow_column = std::make_shared<arrowFileWriteUInt16Column>(field_name, stats_enabled, compression);
-		else if (strcasecmp(field_name, "uint32") == 0)
-			arrow_column = std::make_shared<arrowFileWriteUInt32Column>(field_name, stats_enabled, compression);
-		else if (strcasecmp(field_name, "uint64") == 0)
-			arrow_column = std::make_shared<arrowFileWriteUInt64Column>(field_name, stats_enabled, compression);
-		else if (strcasecmp(field_name, "float16") == 0)
-			arrow_column = std::make_shared<arrowFileWriteHalfFloatColumn>(field_name, stats_enabled, compression);
-		else if (strcasecmp(field_name, "float32") == 0)
-			arrow_column = std::make_shared<arrowFileWriteFloatColumn>(field_name, stats_enabled, compression);
-		else if (strcasecmp(field_name, "float64") == 0)
-			arrow_column = std::make_shared<arrowFileWriteDoubleColumn>(field_name, stats_enabled, compression);
-		else if (strcasecmp(field_name, "decimal") == 0 ||
-				 strcasecmp(field_name, "decimal128") == 0 ||
-				 strncasecmp(field_name, "decimal(", 8) == 0 ||		/* with precision, scale */
-				 strncasecmp(field_name, "decimal128(", 11) == 0)	/* with precision, scale */
-			arrow_column = std::make_shared<arrowFileWriteDecimal128Column>(field_name, stats_enabled, compression);
-		else if (strcasecmp(field_name, "text") == 0 ||
-				 strcasecmp(field_name, "utf8") == 0)
-			arrow_column = std::make_shared<arrowFileWriteUtf8Column>(field_name, stats_enabled, compression);
-		else if (strcasecmp(field_name, "ipaddr4") == 0)
-			arrow_column = std::make_shared<arrowFileWriteIpAddr4Column>(field_name, stats_enabled, compression);
-		else if (strcasecmp(field_name, "ipaddr6") == 0)
-			arrow_column = std::make_shared<arrowFileWriteIpAddr6Column>(field_name, stats_enabled, compression);
+		if (strcasecmp(field_type, "bool") == 0)
+			arrow_column = std::make_shared<arrowFileWriteColumnBoolean>(field_name,
+																		 stats_enabled,
+																		 compression);
+		else if (strcasecmp(field_type, "int8") == 0)
+			arrow_column = std::make_shared<arrowFileWriteColumnInt8>(field_name,
+																	  stats_enabled,
+																	  compression);
+		else if (strcasecmp(field_type, "int16") == 0)
+			arrow_column = std::make_shared<arrowFileWriteColumnInt16>(field_name,
+																	   stats_enabled,
+																	   compression);
+		else if (strcasecmp(field_type, "int32") == 0)
+			arrow_column = std::make_shared<arrowFileWriteColumnInt32>(field_name,
+																	   stats_enabled,
+																	   compression);
+		else if (strcasecmp(field_type, "int64") == 0)
+			arrow_column = std::make_shared<arrowFileWriteColumnInt64>(field_name,
+																	   stats_enabled,
+																	   compression);
+		else if (strcasecmp(field_type, "uint8") == 0)
+			arrow_column = std::make_shared<arrowFileWriteColumnUInt8>(field_name,
+																	   stats_enabled,
+																	   compression);
+		else if (strcasecmp(field_type, "uint16") == 0)
+			arrow_column = std::make_shared<arrowFileWriteColumnUInt16>(field_name,
+																		stats_enabled,
+																		compression);
+		else if (strcasecmp(field_type, "uint32") == 0)
+			arrow_column = std::make_shared<arrowFileWriteColumnUInt32>(field_name,
+																		stats_enabled,
+																		compression);
+		else if (strcasecmp(field_type, "uint64") == 0)
+			arrow_column = std::make_shared<arrowFileWriteColumnUInt64>(field_name,
+																		stats_enabled,
+																		compression);
+		else if (strcasecmp(field_type, "float16") == 0)
+			arrow_column = std::make_shared<arrowFileWriteColumnHalfFloat>(field_name,
+																		   stats_enabled,
+																		   compression);
+		else if (strcasecmp(field_type, "float32") == 0)
+			arrow_column = std::make_shared<arrowFileWriteColumnFloat>(field_name,
+																	   stats_enabled,
+																	   compression);
+		else if (strcasecmp(field_type, "float64") == 0)
+			arrow_column = std::make_shared<arrowFileWriteColumnDouble>(field_name,
+																		stats_enabled,
+																		compression);
+		else if (strcasecmp(field_type, "decimal") == 0 ||
+				 strcasecmp(field_type, "decimal128") == 0 ||
+				 strncasecmp(field_type, "decimal(", 8) == 0 ||		/* with precision, scale */
+				 strncasecmp(field_type, "decimal128(", 11) == 0)	/* with precision, scale */
+			arrow_column = std::make_shared<arrowFileWriteColumnDecimal128>(field_type,
+																			field_name,
+																			stats_enabled,
+																			compression);
+		else if (strcasecmp(field_type, "date[day]") == 0 ||
+				 strcasecmp(field_type, "date") == 0)
+			arrow_column = std::make_shared<arrowFileWriteColumnDate_sec>(field_name,
+																		  stats_enabled,
+																		  compression);
+		else if (strcasecmp(field_type, "date[ms]") == 0)
+			arrow_column = std::make_shared<arrowFileWriteColumnDate_ms>(field_name,
+																		 stats_enabled,
+																		 compression);
+		else if (strcasecmp(field_type, "time[sec]") == 0 ||
+				 strcasecmp(field_type, "time") == 0)
+			arrow_column = std::make_shared<arrowFileWriteColumnTime_sec>(field_name,
+																		  stats_enabled,
+																		  compression);
+		else if (strcasecmp(field_type, "time[ms]") == 0)
+			arrow_column = std::make_shared<arrowFileWriteColumnTime_ms>(field_name,
+																		 stats_enabled,
+																		 compression);
+		else if (strcasecmp(field_type, "time[us]") == 0)
+			arrow_column = std::make_shared<arrowFileWriteColumnTime_us>(field_name,
+																		 stats_enabled,
+																		 compression);
+		else if (strcasecmp(field_type, "time[ns]") == 0)
+			arrow_column = std::make_shared<arrowFileWriteColumnTime_ns>(field_name,
+																		 stats_enabled,
+																		 compression);
+		else if (strcasecmp(field_type, "timestamp[sec]") == 0)
+		{
+			arrow_column = std::make_shared<arrowFileWriteColumnTimestamp_sec>(field_name,
+																			   stats_enabled,
+																			   compression);
+			assert(false);
+		}
+		else if (strcasecmp(field_type, "timestamp[ms]") == 0)
+			arrow_column = std::make_shared<arrowFileWriteColumnTimestamp_ms>(field_name,
+																			  stats_enabled,
+																			  compression);
+		else if (strcasecmp(field_type, "timestamp[us]") == 0 ||
+				 strcasecmp(field_type, "timestamp") == 0)			/* default precision */
+			arrow_column = std::make_shared<arrowFileWriteColumnTimestamp_us>(field_name,
+																			  stats_enabled,
+																			  compression);
+		else if (strcasecmp(field_type, "timestamp[ns]") == 0)
+			arrow_column = std::make_shared<arrowFileWriteColumnTimestamp_ns>(field_name,
+																			  stats_enabled,
+																			  compression);
+		else if (strcasecmp(field_type, "text") == 0 ||
+				 strcasecmp(field_type, "utf8") == 0)
+			arrow_column = std::make_shared<arrowFileWriteColumnUtf8>(field_name,
+																	  stats_enabled,
+																	  compression);
+		else if (strcasecmp(field_type, "ipaddr4") == 0)
+			arrow_column = std::make_shared<arrowFileWriteColumnIpAddr4>(field_name,
+																		 stats_enabled,
+																		 compression);
+		else if (strcasecmp(field_type, "ipaddr6") == 0)
+			arrow_column = std::make_shared<arrowFileWriteColumnIpAddr6>(field_name,
+																		 stats_enabled,
+																		 compression);
 		else
 			Elog("ArrowFileWrite: not a supported type '%s' for '%s'", field_type, field_name);
 		fw_state->arrow_columns.push_back(arrow_column);
@@ -1388,16 +1525,17 @@ __arrowFileWriteParseSchemaDefs(arrowFileWrite *fw_state, VALUE __schema_defs)
 }
 
 static VALUE
-arrowFileWrite__initialize(VALUE self,
+arrowFileWrite__initialize(VALUE __self,
 						   VALUE __pathname,
 						   VALUE __schema_defs,
 						   VALUE __params)
 {
-	arrowFileWrite *fw_state = (arrowFileWrite *)self;
 	char   *emsg = NULL;
+	arrowFileWrite *fw_state;
 
 	rb_require("time");
 	rb_require("ipaddr");
+	TypedData_Get_Struct(__self, arrowFileWrite, &arrowFileWriteType, fw_state);
 	try {
 		std::vector<arrowField>	arrow_fields;
 
@@ -1421,18 +1559,19 @@ arrowFileWrite__initialize(VALUE self,
 	/* transform libarrow/libparquet exception to ruby exception */
 	if (emsg)
 		Elog("arrow-write: %s", emsg);
-	return self;
+	return __self;
 }
 
 static VALUE
 arrowFileWrite__processOneRow(RB_BLOCK_CALL_FUNC_ARGLIST(__yield, __self))
 {
-	arrowFileWrite *fw_state = (arrowFileWrite *)__self;
 	VALUE	tag = rb_funcall(__yield, rb_intern("fetch"), 1, INT2NUM(0));
 	VALUE	ts = rb_funcall(__yield, rb_intern("fetch"), 1, INT2NUM(1));
 	VALUE	record = rb_funcall(__yield, rb_intern("fetch"), 1, INT2NUM(2));
+	arrowFileWrite *fw_state;
 
-	for (int j=0; fw_state->arrow_columns.size(); j++)
+	TypedData_Get_Struct(__self, arrowFileWrite, &arrowFileWriteType, fw_state);
+	for (int j=0; j < fw_state->arrow_columns.size(); j++)
 	{
 		auto	column = fw_state->arrow_columns[j];
 		VALUE	datum;
@@ -1454,8 +1593,9 @@ static VALUE
 arrowFileWrite__writeChunk(VALUE __self,
 						   VALUE __chunk)
 {
-	arrowFileWrite *fw_state = (arrowFileWrite *)__self;
+	arrowFileWrite *fw_state;
 
+	TypedData_Get_Struct(__self, arrowFileWrite, &arrowFileWriteType, fw_state);
 	fw_state->ResetBuffers();
 	rb_block_call(__chunk,
 				  rb_intern("each"),
