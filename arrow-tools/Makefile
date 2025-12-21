@@ -16,7 +16,7 @@ HAS_PF_RING = $(shell test -e /usr/include/pfring.h && echo -n yes)
 HAS_LIBARROW = $(shell pkgconf --exists arrow>/dev/null 2>&1 && echo -n yes)
 HAS_PARQUET = $(shell pkgconf --exists parquet>/dev/null 2>&1 && echo -n yes)
 
-ALL_PROGS = arrow2csv-legacy
+ALL_PROGS = arrow2csv-legacy vcf2arrow-legacy
 ifeq ($(HAS_PG_CONFIG),yes)
 ALL_PROGS += pg2arrow-legacy
 ifeq ($(HAS_LIBARROW),yes)
@@ -29,7 +29,6 @@ endif
 ifeq ($(HAS_PF_RING),yes)
 ALL_PROGS += pcap2arrow
 endif
-ALL_PROGS += vcf2arrow
 ifeq ($(HAS_LIBARROW),yes)
 ALL_PROGS += tsv2arrow arrow2csv
 endif
@@ -40,12 +39,12 @@ PG2ARROW_LEGACY_OBJS = __pgsql2arrow.o pgsql_client.o \
 MYSQL2ARROW_LEGACY_OBJS = __mysql2arrow.o mysql_client.o \
                           arrow_nodes.o arrow_write.o
 PCAP2ARROW_OBJS  = pcap2arrow.o arrow_nodes.o arrow_write.o
-VCF2ARROW_OBJS   = vcf2arrow.o arrow_nodes.o arrow_write.o
+VCF2ARROW_LEGACY_OBJS = vcf2arrow_legacy.o arrow_nodes.o arrow_write.o
 TSV2ARROW_OBJS   = tsv2arrow.o
 ARROW2CSV_OBJS   = arrow2csv.o arrow_meta.o
 ARROW2CSV_LEGACY_OBJS = arrow2csv_legacy.o arrow_nodes.o
 CLEAN_OBJS = $(PG2ARROW_OBJS) $(TSV2ARROW_OBJS) $(ARROW2CSV_OBJS) \
-             $(PCAP2ARROW_OBJS) $(VCF2ARROW_OBJS) \
+             $(PCAP2ARROW_OBJS) $(VCF2ARROW_LEGACY_OBJS) \
              $(PG2ARROW_LEGACY_OBJS) $(MYSQL2ARROW_LEGACY_OBJS) \
              $(ARROW2CSV_LEGACY_OBJS) $(ALL_PROGS)
 
@@ -138,14 +137,14 @@ install-pcap2arrow: pcap2arrow
 endif
 
 #
-# VCF2Arrow
+# VCF2Arrow(legacy)
 #
-vcf2arrow: $(VCF2ARROW_OBJS)
-	$(CC) -o $@ $(VCF2ARROW_OBJS)
+vcf2arrow-legacy: $(VCF2ARROW_LEGACY_OBJS)
+	$(CC) -o $@ $(VCF2ARROW_LEGACY_OBJS)
 
-install-vcf2arrow: vcf2arrow
+install-vcf2arrow-legacy: vcf2arrow-legacy
 	mkdir -p $(DESTDIR)$(BINDIR) && \
-	install -m 0755 vcf2arrow $(DESTDIR)$(BINDIR)
+	install -m 0755 vcf2arrow-legacy $(DESTDIR)$(BINDIR)
 
 #
 # Arrow2CSV(legacy)
