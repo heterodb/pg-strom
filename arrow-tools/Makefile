@@ -30,7 +30,7 @@ ifeq ($(HAS_PF_RING),yes)
 ALL_PROGS += pcap2arrow
 endif
 ifeq ($(HAS_LIBARROW),yes)
-ALL_PROGS += tsv2arrow arrow2csv
+ALL_PROGS += vcf2arrow tsv2arrow arrow2csv
 endif
 
 PG2ARROW_OBJS = pg2arrow.o arrow_meta.o
@@ -40,10 +40,11 @@ MYSQL2ARROW_LEGACY_OBJS = __mysql2arrow.o mysql_client.o \
                           arrow_nodes.o arrow_write.o
 PCAP2ARROW_OBJS  = pcap2arrow.o arrow_nodes.o arrow_write.o
 VCF2ARROW_LEGACY_OBJS = vcf2arrow_legacy.o arrow_nodes.o arrow_write.o
+VCF2ARROW_OBJS   = vcf2arrow.o
 TSV2ARROW_OBJS   = tsv2arrow.o
 ARROW2CSV_OBJS   = arrow2csv.o arrow_meta.o
 ARROW2CSV_LEGACY_OBJS = arrow2csv_legacy.o arrow_nodes.o
-CLEAN_OBJS = $(PG2ARROW_OBJS) $(TSV2ARROW_OBJS) $(ARROW2CSV_OBJS) \
+CLEAN_OBJS = $(PG2ARROW_OBJS) $(TSV2ARROW_OBJS) $(ARROW2CSV_OBJS) $(VCF2ARROW_OBJS) \
              $(PCAP2ARROW_OBJS) $(VCF2ARROW_LEGACY_OBJS) \
              $(PG2ARROW_LEGACY_OBJS) $(MYSQL2ARROW_LEGACY_OBJS) \
              $(ARROW2CSV_LEGACY_OBJS) $(ALL_PROGS)
@@ -68,10 +69,12 @@ CPPFLAGS += -DHAS_LIBARROW=1 $(shell pkgconf --cflags arrow)
 ifeq ($(HAS_PARQUET),yes)
 CPPFLAGS += -DHAS_PARQUET=1  $(shell pkgconf --cflags parquet)
 PG2ARROW_LDFLAGS  += $(shell pkgconf --libs parquet)
+VCF2ARROW_LDFLAGS += $(shell pkgconf --libs parquet) -lstdc++
 TSV2ARROW_LDFLAGS += $(shell pkgconf --libs parquet)
 ARROW2CSV_LDFLAGS += $(shell pkgconf --libs parquet)
 else
 PG2ARROW_LDFLAGS  += $(shell pkgconf --libs arrow)
+VCF2ARROW_LDFLAGS += $(shell pkgconf --libs arrow) -lstdc++
 TSV2ARROW_LDFLAGS += $(shell pkgconf --libs arrow)
 ARROW2CSV_LDFLAGS += $(shell pkgconf --libs arrow)
 endif
@@ -145,6 +148,16 @@ vcf2arrow-legacy: $(VCF2ARROW_LEGACY_OBJS)
 install-vcf2arrow-legacy: vcf2arrow-legacy
 	mkdir -p $(DESTDIR)$(BINDIR) && \
 	install -m 0755 vcf2arrow-legacy $(DESTDIR)$(BINDIR)
+
+#
+# VCF2Arrow(legacy)
+#
+vcf2arrow: $(VCF2ARROW_OBJS)
+	$(CC) -o $@ $(VCF2ARROW_OBJS) $(VCF2ARROW_LDFLAGS)
+
+install-vcf2arrow: vcf2arrow
+	mkdir -p $(DESTDIR)$(BINDIR) && \
+	install -m 0755 vcf2arrow $(DESTDIR)$(BINDIR)
 
 #
 # Arrow2CSV(legacy)
