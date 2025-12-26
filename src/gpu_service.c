@@ -122,6 +122,12 @@ typedef struct
 #define MAX_ASYNC_TASKS_BITS	10
 #define MAX_ASYNC_TASKS_MASK	((1UL<<MAX_ASYNC_TASKS_BITS)-1)
 	pg_atomic_uint64	max_async_tasks;
+	/*
+	 * A common debug counter infrastructure
+	 */
+#define MAX_DEBUG_PERF_COUNTER	12
+	pg_atomic_uint32	debug_perf_mask;
+	pg_atomic_uint64	debug_perf_counter[MAX_DEBUG_PERF_COUNTER];
 } gpuServSharedState;
 
 /*
@@ -249,6 +255,58 @@ gpuserv_ready_accept(void)
 {
 	return (gpuserv_shared_state &&
 			gpuserv_shared_state->gpuserv_ready_accept);
+}
+
+/*
+ * pgstrom_inc_perf_counter
+ */
+void
+pgstrom_inc_perf_counter(int num)
+{
+	if (gpuserv_shared_state && num >= 0 && num < MAX_DEBUG_PERF_COUNTER)
+	{
+		pg_atomic_add_fetch_u64(&gpuserv_shared_state->debug_perf_counter[num], 1);
+		pg_atomic_fetch_or_u32(&gpuserv_shared_state->debug_perf_mask, (1U<<num));
+	}
+}
+
+/*
+ * pgstrom_add_perf_counter
+ */
+void
+pgstrom_add_perf_counter(int num, const struct timeval *tv_base)
+{
+	if (gpuserv_shared_state && num >= 0 && num < MAX_DEBUG_PERF_COUNTER)
+	{
+		struct timeval	tv_curr;
+		uint64_t		tval;
+
+		gettimeofday(&tv_curr, NULL);
+		tval = ((uint64_t)(tv_curr.tv_sec  - tv_base->tv_sec) * 1000000L +
+				(uint64_t)(tv_curr.tv_usec - tv_base->tv_usec));
+		pg_atomic_add_fetch_u64(&gpuserv_shared_state->debug_perf_counter[num], tval);
+		pg_atomic_fetch_or_u32(&gpuserv_shared_state->debug_perf_mask, (1U<<num));
+	}
+}
+
+void
+pgstrom_print_perf_counter(void)
+{
+	uint32_t	mask;
+
+	if (gpuserv_shared_state &&
+		(mask = pg_atomic_exchange_u32(&gpuserv_shared_state->debug_perf_mask, 0)) != 0)
+	{
+		for (int i=0; i < MAX_DEBUG_PERF_COUNTER; i++)
+		{
+			if ((mask & (1U<<i)) != 0)
+			{
+				uint64_t	dval = pg_atomic_exchange_u64(&gpuserv_shared_state->debug_perf_counter[i], 0);
+
+				elog(INFO, "debug counter[%d] = %lu", i, dval);
+			}
+		}
+	}
 }
 
 /*

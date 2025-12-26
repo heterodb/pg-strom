@@ -35,68 +35,11 @@ static thread_local	char	__private_error_message[512];
 			 sizeof(__private_error_message),				\
 			 "[error %s:%d] " fmt "\n",						\
 			 __basename(__FILE__),__LINE__, ##__VA_ARGS__)	\
-
 /*
- * parquetMetaDataCache
+ * Debug support
  */
-struct parquetMetaDataCache
-{
-	uint32_t		hash;
-	int				refcnt;
-	__dlist_node<parquetMetaDataCache> chain;
-	struct stat		stat_buf;
-	std::string		filename;
-	std::shared_ptr<parquet::FileMetaData> metadata;
-	/* constructor */
-	parquetMetaDataCache(const char *__filename,
-						 const struct stat *__stat_buf,
-						 uint32_t __hash)
-	{
-		hash = __hash;
-		refcnt = 1;
-		chain.owner = this;
-		memcpy(&stat_buf, __stat_buf, sizeof(struct stat));
-		filename = std::string(__filename);
-		metadata = nullptr;		/* to be set caller */
-	}
-};
-using parquetMetaDataCache	= struct parquetMetaDataCache;
-
-#define PQ_HASH_NSLOTS	797
-static std::mutex		pq_hash_lock[PQ_HASH_NSLOTS];
-static __dlist_node<parquetMetaDataCache> pq_hash_slot[PQ_HASH_NSLOTS];
-
-/*
- * __parquetFileMetaDataHash
- */
-static inline uint32_t
-__parquetLocalFileHash(dev_t st_dev, ino_t st_ino)
-{
-	uint64_t	hkey = ((uint64_t)st_dev << 32 | (uint64_t)st_ino);
-
-	hkey += 0x9e3779b97f4a7c15ULL;
-	hkey = (hkey ^ (hkey >> 30)) * 0xbf58476d1ce4e5b9ULL;
-	hkey = (hkey ^ (hkey >> 27)) * 0x94d049bb133111ebULL;
-	return (int64_t)((hkey ^ (hkey >> 31)) & 0xffffffffU);
-}
-
-/*
- * parquetPutMetaDataCache
- */
-static void
-parquetPutMetaDataCache(parquetMetaDataCache *entry)
-{
-	uint32_t	hindex = entry->hash % PQ_HASH_NSLOTS;
-
-	pq_hash_lock[hindex].lock();
-	assert(entry->refcnt > 0);
-	if (--entry->refcnt == 0)
-	{
-		__dlist_delete(&entry->chain);
-		delete(entry);
-	}
-	pq_hash_lock[hindex].unlock();
-}
+extern "C" void	pgstrom_inc_perf_counter(int num);
+extern "C" void	pgstrom_add_perf_counter(int num, const struct timeval *tv_base);
 
 /*
  * __checkParquetFileColumn
@@ -440,8 +383,9 @@ parquetReadArrowTable(std::shared_ptr<arrow::Table> table,
 											   size_t malloc_size),
 					  void *malloc_private)
 {
-	size_t		kds_length = KDS_HEAD_LENGTH(kds_head) + kds_head->arrow_virtual_usage;
-	size_t		curr_pos = ARROW_ALIGN(kds_length);
+	size_t		kds_length = ARROW_ALIGN(KDS_HEAD_LENGTH(kds_head) +
+										 kds_head->arrow_virtual_usage);
+	size_t		curr_pos = kds_length;
 	kern_data_store *kds;
 
 	/*
@@ -540,10 +484,6 @@ __parquetReadOneRowGroup(const char *filename,
 						 void *malloc_private)
 {
 	uint32_t	row_group_index = kds_head->parquet_row_group;
-	struct stat	stat_buf;
-	uint32_t	hash, hindex;
-	parquetMetaDataCache *entry;
-	std::shared_ptr<parquet::FileMetaData> metadata = nullptr;
     std::unique_ptr<parquet::ParquetFileReader> raw_file_reader = nullptr;
     std::unique_ptr<parquet::arrow::FileReader> parquet_file_reader = nullptr;
 	std::shared_ptr<arrow::Schema> arrow_schema;
@@ -554,73 +494,20 @@ __parquetReadOneRowGroup(const char *filename,
 	 * Open a new Parquet File Reader dedicated for this thread, but
 	 * utilize parquet::FileMetada once parsed by other one.
 	 * As discussed in #937, libarrow/libparquet is not designed for
-	 * thread-safe, and caller must take care mutual controls.
-	 */
-
-	// Lookup the local file metadata cache first
-	if (stat(filename, &stat_buf) != 0)
-	{
-		__Elog("failed on stat('%s'): %m", filename);
-		return NULL;
-	}
-	hash = __parquetLocalFileHash(stat_buf.st_dev,
-								  stat_buf.st_ino);
-	hindex = hash % PQ_HASH_NSLOTS;
-
-	pq_hash_lock[hindex].lock();
-	__dlist_foreach(entry, &pq_hash_slot[hindex])
-	{
-		if (entry->stat_buf.st_dev == stat_buf.st_dev &&
-			entry->stat_buf.st_ino == stat_buf.st_ino)
-		{
-			// confirm the stat_buf.st_mtim is identical to the hashed one.
-			// if changed, it means the parquet file is modified on the storage.
-			if (entry->stat_buf.st_mtim.tv_sec  == stat_buf.st_mtim.tv_sec &&
-				entry->stat_buf.st_mtim.tv_nsec == stat_buf.st_mtim.tv_nsec)
-			{
-				entry->refcnt++;
-				metadata = entry->metadata;
-				pq_hash_lock[hindex].unlock();
-				break;
-			}
-			// Oops, the parquet file was modified on the disk, so should be
-			// invalid by the one who hold this entry.
-			assert(entry->refcnt > 0);
-		}
-	}
-	/*
+	 * thread-safe, so we use Parquet File Reader per thread.
+	 * ----
 	 * Open the Parquet File (with cached metadata)
 	 */
 	raw_file_reader = parquet::ParquetFileReader::OpenFile(std::string(filename),
 														   false,	/* memory_map */
 														   parquet::default_reader_properties(),
-														   metadata);
+														   nullptr);
 	if (!raw_file_reader)
 	{
-		if (entry)
-			parquetPutMetaDataCache(entry);
-		else
-			pq_hash_lock[hindex].unlock();
 		__Elog("failed on parquet::ParquetFileReader::Open('%s')", filename);
 		return NULL;
 	}
 
-	/*
-	 * Add metadata to the metadata cache (if not cached yet)
-	 */
-	if (!entry)
-	{
-		assert(!metadata);
-		entry = new(std::nothrow) parquetMetaDataCache(filename, &stat_buf, hash);
-		if (!entry)
-		{
-			pq_hash_lock[hindex].unlock();
-			__Elog("out of memory");
-			return NULL;
-		}
-		entry->metadata = raw_file_reader->metadata();
-		pq_hash_lock[hindex].unlock();
-	}
 	/*
 	 * Open the Arrow File Reader
 	 */
@@ -629,7 +516,6 @@ __parquetReadOneRowGroup(const char *filename,
 											  &parquet_file_reader);
 	if (!status.ok())
 	{
-		parquetPutMetaDataCache(entry);
 		__Elog("failed on parquet::arrow::FileReader::Make('%s'): %s",
 			   filename, status.ToString().c_str());
 		return NULL;
@@ -638,7 +524,6 @@ __parquetReadOneRowGroup(const char *filename,
 	status = parquet_file_reader->GetSchema(&arrow_schema);
 	if (!status.ok())
 	{
-		parquetPutMetaDataCache(entry);
 		__Elog("failed on parquet::arrow::FileReader::GetSchema(): %s",
 			   status.ToString().c_str());
 		return NULL;
@@ -672,7 +557,6 @@ __parquetReadOneRowGroup(const char *filename,
 				   status.ToString().c_str());
 		}
 	}
-	parquetPutMetaDataCache(entry);
 	return kds;
 }
 
