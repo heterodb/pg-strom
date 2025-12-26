@@ -16,9 +16,9 @@
 #include <arrow/ipc/api.h>
 #include <arrow/ipc/reader.h>
 #include <arrow/util/value_parsing.h>
+#include <ctype.h>
 #include <parquet/arrow/writer.h>
 #include <string>
-#include "float2.h"
 
 #ifndef Elog
 #define Elog(fmt,...)								\
@@ -38,13 +38,91 @@
 #define BITMAPLEN(NITEMS)	(((NITEMS) + 7) / 8)
 #define ARROW_ALIGN(LEN)	(((uintptr_t)(LEN) + 63UL) & ~63UL)
 
+/*
+ * utility functions
+ */
+static inline char *
+__trim(char *token)
+{
+	if (token)
+	{
+		char   *tail = token + strlen(token) - 1;
+
+		while (isspace(*token))
+			token++;
+		while (tail >= token && isspace(*tail))
+			*tail-- = '\0';
+	}
+	return token;
+}
+
+static inline char *
+__strtok_quotable(char *line, char delim, char **savepos)
+{
+	bool	in_quote = false;
+	char   *r_pos;
+	char   *w_pos;
+	char   *head;
+
+	if (line)
+		r_pos = w_pos = line;
+	else if (*savepos != NULL)
+		r_pos = w_pos = *savepos;
+	else
+		return NULL;
+	head = w_pos;
+
+	while (*r_pos != '\0')
+	{
+		if (*r_pos == '"')		/* begin/end quotation */
+		{
+			in_quote = !in_quote;
+			r_pos++;
+		}
+		else if (*r_pos == '\\')	/* escape */
+		{
+			switch (*++r_pos)
+			{
+				case '\\':	*w_pos++ = '\\';	break;
+				case '"':	*w_pos++ = '"';		break;
+				case 'n':	*w_pos++ = '\n';	break;
+                case 'r':	*w_pos++ = '\r';	break;
+                case 't':	*w_pos++ = '\t';	break;
+                case 'f':	*w_pos++ = '\f';	break;
+                case 'b':	*w_pos++ = '\b';	break;
+                default:
+					Elog("unknown escape '\\%c'", *r_pos);
+			}
+			r_pos++;
+		}
+		else if (!in_quote && *r_pos == delim)
+		{
+			/* delimiter */
+			break;
+		}
+		else
+		{
+			/* payload */
+			*w_pos++ = *r_pos++;
+		}
+	}
+	*savepos = (*r_pos == '\0' ? NULL : r_pos+1);
+	*w_pos++ = '\0';
+	return __trim(head);
+}
+
+/*
+ * Definition of arrowFileWriter
+ */
 using	arrowSchema		= std::shared_ptr<arrow::Schema>;
 using	arrowField		= std::shared_ptr<arrow::Field>;
 using	arrowBuilder	= std::shared_ptr<arrow::ArrayBuilder>;
 using	arrowArray		= std::shared_ptr<arrow::Array>;
+using	arrowMetadata	= std::shared_ptr<arrow::KeyValueMetadata>;
 
 class arrowFileWriter
 {
+protected:
 	std::shared_ptr<arrow::io::FileOutputStream>	file_out_stream;
 	std::shared_ptr<arrow::ipc::RecordBatchWriter>	arrow_file_writer;
 	std::unique_ptr<parquet::arrow::FileWriter>		parquet_file_writer;
@@ -54,6 +132,7 @@ public:
 	arrow::Compression::type default_compression;
 	arrowSchema		arrow_schema;
 	std::vector<std::shared_ptr<class arrowFileWriterColumn>> arrow_columns;
+	arrowMetadata	table_metadata;
 	arrowFileWriter(void)
 	{
 		file_out_stream = nullptr;
@@ -63,13 +142,13 @@ public:
 		default_compression = arrow::Compression::type::ZSTD;
 		arrow_schema = nullptr;
 	}
-	arrowSchema	ParseSchemaDefs(const char *schema_defs);
 	bool		Open(const char *__pathname);
 	void		Close();
+	void		ParseSchemaDefs(const char *schema_defs);
 };
 
 /*
- * arrowFileWriterColumn - A common base class for Arrow data types
+ * arrowFileWriterColumn
  *
  * arrowFileWriterColumn
  *  | + arrowFileWriterScalarColumn
@@ -86,10 +165,10 @@ public:
 	std::string		field_name;
 	bool			stats_enabled;
 	arrow::Compression::type compression;	/* valid only if parquet-mode */
-	uint64_t		nitems;
-	uint64_t		nullcount;
 	arrowBuilder	arrow_builder;
 	arrowArray		arrow_array;
+	arrowMetadata	field_metadata;
+	std::vector<std::shared_ptr<class arrowFileWriterColumn>> children;	/* only Struct/List */
 	arrowFileWriterColumn(std::shared_ptr<arrow::DataType> __arrow_type,
 						  const char *__field_name,
 						  bool __stats_enabled,
@@ -101,84 +180,56 @@ public:
 		compression = __compression;
 		arrow_builder = nullptr;
 		arrow_array = nullptr;
-		nitems = 0;
-		nullcount = 0;
 	}
+	virtual size_t	chunkSize() = 0;
 	virtual size_t	putValue(const void *ptr, size_t sz) = 0;
-	virtual size_t	moveValue(arrowFileWriterColumn &buddy, uint64_t index) = 0;
+	virtual size_t	moveValue(std::shared_ptr<class arrowFileWriterColumn> buddy, uint64_t index) = 0;
 	virtual void	Reset(void)
 	{
 		arrow_builder->Reset();
 		arrow_array = nullptr;
-		nitems = 0;
-		nullcount = 0;
 	}
-	virtual size_t	Finish(void)
+	virtual void	Finish(void)
 	{
 		auto	rv = arrow_builder->Finish(&arrow_array);
 		if (!rv.ok())
 			Elog("failed on arrow::ArrayBuilder::Finish: %s",
 				 rv.ToString().c_str());
-		return arrow_array->length();
 	}
 };
 
 /*
- * Simple scalar types
+ * Field for a basic scalar type
  */
 template <typename BUILDER_TYPE,
 		  typename ARRAY_TYPE,
-		  typename CPP_TYPE>
-class arrowFileWriterSimpleColumn : public arrowFileWriterColumn
+          typename CPP_TYPE>
+class arrowFileWriterScalarColumn : public arrowFileWriterColumn
 {
-protected:
-	bool		stats_is_valid;
-	CPP_TYPE	stats_min_value;
-	CPP_TYPE	stats_max_value;
-	virtual void
-	appendStats(std::shared_ptr<arrow::KeyValueMetadata> custom_metadata)
-	{
-		if (!stats_is_valid)
-			return;
-		custom_metadata->Append(std::string("min_max_stats.") + this->field_name,
-								std::to_string(stats_min_value) +
-								std::string(",") +
-								std::to_string(stats_max_value));
-	}
-	virtual void
-	updateStats(CPP_TYPE datum)
-	{
-		if (!this->stats_enabled)
-			return;
-		if (!stats_is_valid)
-		{
-			stats_min_value = datum;
-			stats_max_value = datum;
-			stats_is_valid = true;
-		}
-		else if (datum < stats_min_value)
-			stats_min_value = datum;
-		else if (datum > stats_max_value)
-			stats_max_value = datum;
-	}
-	size_t
-	chunkSize(void)
-	{
-		return (ARROW_ALIGN(this->nullcount > 0 ? BITMAPLEN(this->nitems) : 0) +
-				ARROW_ALIGN(sizeof(CPP_TYPE) * this->nitems));
-	}
 public:
-	arrowFileWriterSimpleColumn(std::shared_ptr<arrow::DataType> __arrow_type,
+	arrowFileWriterScalarColumn(std::shared_ptr<arrow::DataType> __arrow_type,
 								const char *__field_name,
 								bool __stats_enabled,
 								arrow::Compression::type __compression)
-		: arrowFileWriterColumn(__arrow_type, __field_name, __stats_enabled, __compression)
+		: arrowFileWriterColumn(__arrow_type,
+								__field_name,
+								__stats_enabled,
+								__compression)
 	{
 		arrow_builder = std::make_shared<BUILDER_TYPE>(__arrow_type, arrow::default_memory_pool());
-		stats_is_valid = false;
 	}
-	virtual CPP_TYPE
-	fetchValue(const void *ptr, size_t sz);
+	virtual void
+	appendStats(arrowMetadata custom_metadata)
+	{
+		/* do nothing if no statistics support */
+	}
+	virtual void
+	updateStats(CPP_TYPE &datum)
+	{
+		/* do nothing if no statistics support */
+	}
+	virtual CPP_TYPE	fetchValue(const void *ptr, size_t sz) = 0;
+	virtual CPP_TYPE	fetchArrayValue(arrowArray array, int64_t index) = 0;
 	size_t
 	putValue(const void *ptr, size_t sz)
 	{
@@ -186,10 +237,7 @@ public:
 		arrow::Status rv;
 
 		if (!ptr)
-		{
 			rv = builder->AppendNull();
-			nullcount++;
-		}
 		else
 		{
 			CPP_TYPE	datum = fetchValue(ptr, sz);
@@ -201,25 +249,21 @@ public:
 				 field_name.c_str(),
 				 arrow_type->name().c_str(),
 				 rv.ToString().c_str());
-		nitems++;
 		return chunkSize();
 	}
 	size_t
-	moveValue(arrowFileWriterColumn &buddy, uint64_t index)
+	moveValue(std::shared_ptr<class arrowFileWriterColumn> buddy, int64_t index)
 	{
 		auto	builder = std::dynamic_pointer_cast<BUILDER_TYPE>(arrow_builder);
-		auto	array = std::dynamic_pointer_cast<ARRAY_TYPE>(buddy.arrow_array);
+		auto	buddy_array = std::dynamic_pointer_cast<ARRAY_TYPE>(buddy->arrow_array);
 		arrow::Status rv;
 
-		assert(index < array->length());
-		if (array->IsNull(index))
-		{
+		assert(index < buddy_array->length());
+		if (buddy_array->IsNull(index))
 			rv = builder->AppendNull();
-			nullcount++;
-		}
 		else
 		{
-			auto	datum = array->Value(index);
+			CPP_TYPE	datum = fetchArrayValue(buddy_array, index);
 			updateStats(datum);
 			rv = builder->Append(datum);
 		}
@@ -228,8 +272,78 @@ public:
 				 field_name.c_str(),
 				 arrow_type->name().c_str(),
 				 rv.ToString().c_str());
-		nitems++;
 		return chunkSize();
+	}
+};
+
+/*
+ * Simple scalar types
+ */
+template <typename BUILDER_TYPE,
+		  typename ARRAY_TYPE,
+		  typename CPP_TYPE>
+class arrowFileWriterSimpleColumn : public arrowFileWriterScalarColumn<BUILDER_TYPE,
+																	   ARRAY_TYPE,
+																	   CPP_TYPE>
+{
+	bool		stats_is_valid;
+	CPP_TYPE	stats_min_value;
+	CPP_TYPE	stats_max_value;
+public:
+	arrowFileWriterSimpleColumn(std::shared_ptr<arrow::DataType> __arrow_type,
+								const char *__field_name,
+								bool __stats_enabled,
+								arrow::Compression::type __compression)
+		: arrowFileWriterScalarColumn<BUILDER_TYPE,
+									  ARRAY_TYPE,
+									  CPP_TYPE>(__arrow_type,
+												__field_name,
+												__stats_enabled,
+												__compression)
+	{
+		stats_is_valid = false;
+	}
+	void
+	appendStats(arrowMetadata custom_metadata)
+	{
+		if (!stats_is_valid)
+			return;
+		custom_metadata->Append(std::string("min_max_stats.") + this->field_name,
+								std::to_string(stats_min_value) +
+								std::string(",") +
+								std::to_string(stats_max_value));
+	}
+	void
+	updateStats(CPP_TYPE datum)
+	{
+		if (this->stats_enabled)
+		{
+			if (!stats_is_valid)
+			{
+				stats_min_value = datum;
+				stats_max_value = datum;
+				stats_is_valid = true;
+			}
+			else if (datum < stats_min_value)
+				stats_min_value = datum;
+			else if (datum > stats_max_value)
+				stats_max_value = datum;
+		}
+	}
+	size_t
+	chunkSize(void)
+	{
+		auto	builder = std::dynamic_pointer_cast<BUILDER_TYPE>(this->arrow_builder);
+
+		return (ARROW_ALIGN(builder->null_count() > 0 ? BITMAPLEN(builder->length()) : 0) +
+				ARROW_ALIGN(sizeof(CPP_TYPE) * builder->length()));
+	}
+	CPP_TYPE
+	fetchArrayValue(arrowArray buddy_array, int64_t index)
+	{
+		auto	array = std::dynamic_pointer_cast<ARRAY_TYPE>(buddy_array);
+
+		return array->Value(index);
 	}
 	void
 	Reset(void)
@@ -283,9 +397,9 @@ ARROW_FILE_WRITER_SIMPLE_COLUMN_TEMPLATE(UInt8,         UInt8,     uint8_t,  uin
 ARROW_FILE_WRITER_SIMPLE_COLUMN_TEMPLATE(UInt16,        UInt16,    uint16_t, uint16())
 ARROW_FILE_WRITER_SIMPLE_COLUMN_TEMPLATE(UInt32,        UInt32,    uint32_t, uint32())
 ARROW_FILE_WRITER_SIMPLE_COLUMN_TEMPLATE(UInt64,        UInt64,    uint64_t, uint64())
-__ARROW_FILE_WRITER_SIMPLE_COLUMN_TEMPLATE(HalfFloat,   HalfFloat, uint16_t, float16())
-ARROW_FILE_WRITER_SIMPLE_COLUMN_TEMPLATE(Float,         Float,     float,    float32())
-ARROW_FILE_WRITER_SIMPLE_COLUMN_TEMPLATE(Double,        Double,    double,   float64())
+__ARROW_FILE_WRITER_SIMPLE_COLUMN_TEMPLATE(Float16,     HalfFloat, uint16_t, float16())
+ARROW_FILE_WRITER_SIMPLE_COLUMN_TEMPLATE(Float32,       Float,     float,    float32())
+ARROW_FILE_WRITER_SIMPLE_COLUMN_TEMPLATE(Float64,       Double,    double,   float64())
 ARROW_FILE_WRITER_SIMPLE_COLUMN_TEMPLATE(Date_sec,      Date32,    int32_t,  date32())
 ARROW_FILE_WRITER_SIMPLE_COLUMN_TEMPLATE(Date_ms,       Date64,    int64_t,  date64())
 ARROW_FILE_WRITER_SIMPLE_COLUMN_TEMPLATE(Time_sec,      Time32,    int32_t,  time32(arrow::TimeUnit::SECOND))
@@ -298,8 +412,8 @@ ARROW_FILE_WRITER_SIMPLE_COLUMN_TEMPLATE(Timestamp_us,  Timestamp, int64_t,  tim
 ARROW_FILE_WRITER_SIMPLE_COLUMN_TEMPLATE(Timestamp_ns,  Timestamp, int64_t,  timestamp(arrow::TimeUnit::NANO))
 
 /* special handling for float16 */
-half_t
-arrowFileWriterColumnHalfFloat::fetchValue(const void *ptr, size_t sz)
+uint16_t
+arrowFileWriterColumnFloat16::fetchValue(const void *ptr, size_t sz)
 {
 	const char *token = (const char *)ptr;
 	arrow::util::Float16 datum;
@@ -319,18 +433,33 @@ template <typename BUILDER_TYPE,
 		  typename ARRAY_TYPE,
 		  typename ARROW_TYPE,
 		  typename CPP_TYPE>
-class arrowFileWriterDecimalColumn : public arrowFileWriterColumn
+class arrowFileWriterDecimalColumn : public arrowFileWriterScalarColumn<BUILDER_TYPE,
+																		ARRAY_TYPE,
+																		CPP_TYPE>
 {
-protected:
 	bool		stats_is_valid;
 	CPP_TYPE	stats_min_value;
 	CPP_TYPE	stats_max_value;
+public:
+	arrowFileWriterDecimalColumn(std::shared_ptr<arrow::DataType> __arrow_type,
+								 const char *__field_name,
+								 bool __stats_enabled,
+								 arrow::Compression::type __compression)
+		: arrowFileWriterScalarColumn<BUILDER_TYPE,
+									  ARRAY_TYPE,
+									  CPP_TYPE>(__arrow_type,
+												__field_name,
+												__stats_enabled,
+												__compression)
+	{
+		stats_is_valid = false;
+	}
 	void
-	appendStats(std::shared_ptr<arrow::KeyValueMetadata> custom_metadata)
+	appendStats(arrowMetadata custom_metadata)
 	{
 		if (stats_is_valid)
 		{
-			auto	builder = std::dynamic_pointer_cast<BUILDER_TYPE>(arrow_builder);
+			auto	builder = std::dynamic_pointer_cast<BUILDER_TYPE>(this->arrow_builder);
 			auto	d_type = std::dynamic_pointer_cast<ARROW_TYPE>(builder->type());
 
 			custom_metadata->Append(std::string("min_max_stats.") + this->field_name,
@@ -342,88 +471,63 @@ protected:
 	void
 	updateStats(CPP_TYPE datum)
 	{
-		if (!this->stats_enabled)
-			return;
-		if (!stats_is_valid)
+		if (this->stats_enabled)
 		{
-			stats_min_value = datum;
-			stats_max_value = datum;
-			stats_is_valid = true;
+			if (!stats_is_valid)
+			{
+				stats_min_value = datum;
+				stats_max_value = datum;
+				stats_is_valid = true;
+			}
+			else if (datum < stats_min_value)
+				stats_min_value = datum;
+			else if (datum > stats_max_value)
+				stats_max_value = datum;
 		}
-		else if (datum < stats_min_value)
-			stats_min_value = datum;
-		else if (datum > stats_max_value)
-			stats_max_value = datum;
 	}
 	size_t
 	chunkSize(void)
 	{
-		return (ARROW_ALIGN(this->nullcount > 0 ? BITMAPLEN(this->nitems) : 0) +
-				ARROW_ALIGN(sizeof(CPP_TYPE) * this->nitems));
+		auto	builder = std::dynamic_pointer_cast<BUILDER_TYPE>(this->arrow_builder);
+
+		return (ARROW_ALIGN(builder->null_count() > 0 ? BITMAPLEN(builder->length()) : 0) +
+				ARROW_ALIGN(sizeof(CPP_TYPE) * builder->length()));
 	}
-public:
-	arrowFileWriterDecimalColumn(std::shared_ptr<arrow::DataType> __arrow_type,
-								 const char *__field_name,
-								 bool __stats_enabled,
-								 arrow::Compression::type __compression)
-		: arrowFileWriterColumn(__arrow_type, __field_name, __stats_enabled, __compression)
+	CPP_TYPE
+	fetchValue(const void *ptr, size_t sz)
 	{
-		arrow_builder = std::make_shared<BUILDER_TYPE>(__arrow_type, arrow::default_memory_pool());
-		stats_is_valid = false;
-	}
-	virtual CPP_TYPE
-	fetchValue(const void *ptr, size_t sz);
-	size_t
-	putValue(const void *ptr, size_t sz)
-	{
-		auto	builder = std::dynamic_pointer_cast<BUILDER_TYPE>(arrow_builder);
+		auto		builder = std::dynamic_pointer_cast<BUILDER_TYPE>(this->arrow_builder);
+		auto		d_type = std::dynamic_pointer_cast<ARROW_TYPE>(this->arrow_type);
+		const char *token = (const char *)ptr;
+		CPP_TYPE	datum;
+		int			precision, scale;
 		arrow::Status rv;
 
-		if (!ptr)
-		{
-			rv = builder->AppendNull();
-			nullcount++;
-		}
-		else
-		{
-			CPP_TYPE	datum = fetchValue(ptr, sz);
-			updateStats(datum);
-			rv = builder->Append(datum);
-		}
+		rv = CPP_TYPE::FromString(token, &datum, &precision, &scale);
 		if (!rv.ok())
-			Elog("unable to put value to '%s' field (%s): %s",
-				 field_name.c_str(),
-				 arrow_type->name().c_str(),
-				 rv.ToString().c_str());
-		nitems++;
-		return chunkSize();
+			Elog("unable to fetch token [%.*s] for '%s' (%s)",
+				 (int)sz, token,
+				 this->field_name.c_str(),
+				 d_type->name().c_str());
+		while (scale < d_type->scale())
+		{
+			scale++;
+			datum *= 10;
+		}
+		while (scale > d_type->scale())
+		{
+			if (--scale == d_type->scale())
+				datum += 5;
+			datum /= 10;
+		}
+		return datum;
 	}
-	size_t
-	moveValue(arrowFileWriterColumn &buddy, uint64_t index)
+	CPP_TYPE
+	fetchArrayValue(arrowArray buddy_array, int64_t index)
 	{
-		auto	builder = std::dynamic_pointer_cast<BUILDER_TYPE>(arrow_builder);
-		auto	array = std::dynamic_pointer_cast<ARRAY_TYPE>(buddy.arrow_array);
-		arrow::Status rv;
+		auto	array = std::dynamic_pointer_cast<ARRAY_TYPE>(buddy_array);
 
-		assert(index < array->length());
-		if (array->IsNull(index))
-		{
-			rv = builder->AppendNull();
-			nullcount++;
-		}
-		else
-		{
-			auto	datum = *((CPP_TYPE *)array->Value(index));
-			updateStats(datum);
-			rv = builder->Append(datum);
-		}
-		if (!rv.ok())
-			Elog("unable to move value to '%s' field (%s): %s",
-				 field_name.c_str(),
-				 arrow_type->name().c_str(),
-				 rv.ToString().c_str());
-		nitems++;
-		return chunkSize();
+		return *((const CPP_TYPE *)array->Value(index));
 	}
 	void
 	Reset(void)
@@ -456,23 +560,561 @@ public:
 	};
 ARROW_FILE_WRITER_COLUMN_DECIMAL_TEMPLATE(Decimal128, decimal128)
 
-
-
-
-
 /*
+ * Interval field type
+ */
+template <typename BUILDER_TYPE,
+		  typename ARRAY_TYPE,
+		  typename ARROW_TYPE,
+		  typename CPP_TYPE,
+		  arrow::Type::type ARROW_TYPE_ID>
+class __arrowFileWriterIntervalColumn : public arrowFileWriterScalarColumn<BUILDER_TYPE,
+																		   ARRAY_TYPE,
+																		   CPP_TYPE>
+{
+	static std::shared_ptr<arrow::DataType>
+	__build_interval_arrow_type(void)
+	{
+		return (ARROW_TYPE_ID == arrow::Type::INTERVAL_MONTHS ? arrow::month_interval() :
+				ARROW_TYPE_ID == arrow::Type::INTERVAL_DAY_TIME ? arrow::day_time_interval() :
+				ARROW_TYPE_ID == arrow::Type::INTERVAL_MONTH_DAY_NANO ? arrow::month_day_nano_interval() : nullptr);
+	}
+public:
+	__arrowFileWriterIntervalColumn(const char *__field_name,
+									bool __stats_enabled,
+									arrow::Compression::type __compression)
+		: arrowFileWriterScalarColumn<BUILDER_TYPE,
+									  ARRAY_TYPE,
+									  CPP_TYPE>(__build_interval_arrow_type(),
+												__field_name,
+												__stats_enabled,
+												__compression)
+	{}
+    size_t      chunkSize()
+	{
+		auto	builder = std::dynamic_pointer_cast<BUILDER_TYPE>(this->arrow_builder);
 
-STRING
-BINARY
-FIXED_SIZE_BINARY
-INTERVAL_MONTHS
-/// Like STRING, but with 64-bit offsets
-    LARGE_STRING = 34,
+		return (ARROW_ALIGN(builder->null_count() > 0 ? BITMAPLEN(builder->length()) : 0) +
+				ARROW_ALIGN(sizeof(CPP_TYPE) * builder->length()));
+	}
+	CPP_TYPE	fetchValue(const void *ptr, size_t sz)
+	{
+		auto		ts_type = std::dynamic_pointer_cast<ARROW_TYPE>(this->arrow_type);
+		const char *token = (const char *)ptr;
+		CPP_TYPE	datum;
 
-    /// Like BINARY, but with 64-bit offsets
-    LARGE_BINARY = 35,
-*/
+		if (!arrow::internal::ParseValue<ARROW_TYPE>(*ts_type, token, sz, &datum))
+			Elog("unable to fetch token [%.*s] for '%s' (%s)",
+				 (int)sz, token,
+				 this->field_name.c_str(),
+				 this->arrow_type->name().c_str());
+		return datum;
+	}
+	CPP_TYPE	fetchArrayValue(arrowArray buddy_array, int64_t index)
+	{
+		auto	array = std::dynamic_pointer_cast<ARRAY_TYPE>(buddy_array);
 
+		return array->Value(index);
+	}
+};
+using arrowFileWriterIntervalMonth
+	= __arrowFileWriterIntervalColumn<arrow::MonthIntervalBuilder,
+									  arrow::MonthIntervalArray,
+									  arrow::MonthIntervalType,
+									  arrow::MonthIntervalType,
+									  arrow::Type::INTERVAL_MONTHS>;
+using arrowFileWriterIntervalDayTime
+	= __arrowFileWriterIntervalColumn<arrow::DayTimeIntervalBuilder,
+									  arrow::DayTimeIntervalArray,
+									  arrow::DayTimeIntervalType,
+									  arrow::DayTimeIntervalType,
+									  arrow::Type::INTERVAL_DAY_TIME>;
+using arrowFileWriterIntervalMonthDayNano
+	= __arrowFileWriterIntervalColumn<arrow::MonthDayNanoIntervalBuilder,
+									  arrow::MonthDayNanoIntervalArray,
+									  arrow::MonthDayNanoIntervalType,
+									  arrow::MonthDayNanoIntervalType,
+									  arrow::Type::INTERVAL_MONTH_DAY_NANO>;
+/*
+ * variable length type (String, Binary, ...)
+ */
+template <typename BUILDER_TYPE,
+		  typename ARRAY_TYPE,
+		  typename CPP_TYPE,
+		  typename OFFSET_TYPE>
+class arrowFileWriterVariableColumn : public arrowFileWriterScalarColumn<BUILDER_TYPE,
+																		 ARRAY_TYPE,
+																		 CPP_TYPE>
+{
+public:
+	arrowFileWriterVariableColumn(std::shared_ptr<arrow::DataType> __arrow_type,
+								  const char *__field_name,
+								  bool __stats_enabled,
+								  arrow::Compression::type __compression)
+		: arrowFileWriterScalarColumn<BUILDER_TYPE,
+									  ARRAY_TYPE,
+									  CPP_TYPE>(__arrow_type,
+												__field_name,
+												__stats_enabled,
+												__compression)
+	{}
+	size_t
+	chunkSize(void)
+	{
+		auto	builder = std::dynamic_pointer_cast<BUILDER_TYPE>(this->arrow_builder);
 
+		return (ARROW_ALIGN(builder->nullcount() > 0 ? BITMAPLEN(builder->length()) : 0) +
+				ARROW_ALIGN(sizeof(OFFSET_TYPE) * builder->length()) +
+				ARROW_ALIGN(builder->value_data_length()));
+	}
+	CPP_TYPE
+	fetchValue(const void *ptr, size_t sz)
+	{
+		return std::string_view((const char *)ptr, sz);
+	}
+	CPP_TYPE
+	fetchArrayValue(arrowArray buddy_array, int64_t index)
+	{
+		auto	array = std::dynamic_pointer_cast<ARRAY_TYPE>(buddy_array);
+
+		return array->Value(index);
+	}
+};
+
+/* Binary and LargeBinary field */
+template <typename BUILDER_TYPE,
+          typename ARRAY_TYPE,
+          typename OFFSET_TYPE>
+class __arrowFileWriterBinaryColumn : public arrowFileWriterVariableColumn<BUILDER_TYPE,
+																		   ARRAY_TYPE,
+																		   std::string_view,
+																		   OFFSET_TYPE>
+{
+public:
+	__arrowFileWriterBinaryColumn(const char *__field_name,
+								  bool __stats_enabled,
+								  arrow::Compression::type __compression)
+		: arrowFileWriterVariableColumn<BUILDER_TYPE,
+										ARRAY_TYPE,
+										std::string_view,
+										OFFSET_TYPE>(sizeof(OFFSET_TYPE) == sizeof(int32_t)
+													 ? arrow::binary()
+													 : arrow::large_binary(),
+													 __field_name,
+													 __stats_enabled,
+													 __compression)
+	{}
+};
+using arrowFileWriterColumnBinary = __arrowFileWriterBinaryColumn<arrow::BinaryBuilder,
+																  arrow::BinaryArray,
+																  int32_t>;
+using arrowFileWriterColumnLargeBinary = __arrowFileWriterBinaryColumn<arrow::LargeBinaryBuilder,
+																	   arrow::LargeBinaryArray,
+																	   int64_t>;
+/* String and LargeString field */
+template <typename BUILDER_TYPE,
+		  typename ARRAY_TYPE,
+		  typename OFFSET_TYPE>
+class __arrowFileWriterUtf8Column : public arrowFileWriterVariableColumn<BUILDER_TYPE,
+																		 ARRAY_TYPE,
+																		 std::string_view,
+																		 OFFSET_TYPE>
+{
+	static constexpr size_t STATS_VALUE_LEN = 60;
+	bool	stats_is_valid;
+	char	stats_min_value[STATS_VALUE_LEN+1];
+	char	stats_max_value[STATS_VALUE_LEN+1];
+	int		stats_min_len;
+	int		stats_max_len;
+public:
+	__arrowFileWriterUtf8Column(const char *__field_name,
+								bool __stats_enabled,
+								arrow::Compression::type __compression)
+		: arrowFileWriterVariableColumn<BUILDER_TYPE,
+										ARRAY_TYPE,
+										std::string_view,
+										OFFSET_TYPE>(sizeof(OFFSET_TYPE) == sizeof(int32_t)
+													 ? arrow::utf8()
+													 : arrow::large_utf8(),
+													 __field_name,
+													 __stats_enabled,
+													 __compression)
+	{
+		stats_is_valid = false;
+	}
+	virtual void
+	appendStats(arrowMetadata custom_metadata)
+	{
+		/* NOTE: cannot contain ',' to be used for delimiter */
+		if (stats_is_valid)
+		{
+			char   *pos;
+
+			pos = strchr(stats_min_value, ',');
+			if (pos)
+				*pos = '\0';
+			pos = strchr(stats_max_value, ',');
+			if (pos)
+			{
+				*pos++ = (',' + 1);
+				*pos = '\0';
+			}
+			custom_metadata->Append(std::string("min_max_stats.") + this->field_name,
+									std::string(stats_min_value) +
+									std::string(",") +
+									std::string(stats_max_value));
+		}
+	}
+	virtual void
+	updateStats(std::string_view &str)
+	{
+		int		__len, status;
+
+		if (!stats_is_valid)
+		{
+			__len = Min(str.size(), STATS_VALUE_LEN);
+			memcpy(stats_min_value, str.data(), __len);
+			memcpy(stats_max_value, str.data(), __len);
+			stats_min_value[__len] = '\0';
+			stats_max_value[__len] = '\0';
+			stats_min_len = __len;
+			stats_max_len = __len;
+			stats_is_valid = true;
+		}
+		else
+		{
+			__len = Min(str.size(), stats_min_len);
+			status = memcmp(str.data(), stats_min_value, __len);
+			if (status < 0 || (status == 0 && stats_min_len > str.size()))
+			{
+				__len = Min(str.size(), STATS_VALUE_LEN);
+				memcpy(stats_min_value, str.data(), __len);
+				stats_min_value[__len] = '\0';
+			}
+			__len = Min(str.size(), stats_max_len);
+			status = memcmp(str.data(), stats_max_value, __len);
+			if (status > 0 || (status == 0 && stats_max_len < str.size()))
+			{
+				__len = Min(str.size(), STATS_VALUE_LEN);
+				memcpy(stats_max_value, str.data(), __len);
+				stats_max_value[__len] = '\0';
+			}
+		}
+	}
+};
+using arrowFileWriterColumnUtf8 = __arrowFileWriterUtf8Column<arrow::StringBuilder,
+															  arrow::StringArray,
+															  int32_t>;
+using arrowFileWriterColumnLargeUtf8 = __arrowFileWriterUtf8Column<arrow::LargeStringBuilder,
+																   arrow::LargeStringArray,
+																   int64_t>;
+/* FixedSizeBinary fields */
+template <typename BUILDER_TYPE,
+          typename ARRAY_TYPE>
+class __arrowFileWriterFixedSizeBinaryColumn : public arrowFileWriterScalarColumn<BUILDER_TYPE,
+																				  ARRAY_TYPE,
+																				  std::string_view>
+{
+	uint32_t	unitsz;
+public:
+	__arrowFileWriterFixedSizeBinaryColumn(const char *__field_name,
+										   uint32_t __unitsz,
+										   bool __stats_enabled,
+										   arrow::Compression::type __compression)
+		: arrowFileWriterScalarColumn<BUILDER_TYPE,
+									  ARRAY_TYPE,
+									  std::string_view>(arrow::fixed_size_binary(__unitsz),
+														__field_name,
+														__stats_enabled,
+														__compression)
+	{
+		unitsz = __unitsz;
+	}
+	std::string_view
+	fetchValue(const void *ptr, size_t sz)
+	{
+		return std::string_view((const char *)ptr, unitsz);
+	}
+    std::string_view
+	fetchArrayValue(arrowArray buddy_array, int64_t index)
+	{
+		auto	array = std::dynamic_pointer_cast<ARRAY_TYPE>(buddy_array);
+
+		return std::string_view((const char *)array->Value(index), unitsz);
+	}
+	size_t
+	chunkSize(void)
+	{
+		auto	builder = std::dynamic_pointer_cast<BUILDER_TYPE>(this->arrow_builder);
+
+		return (ARROW_ALIGN(builder->nullcount() > 0 ? BITMAPLEN(builder->length()) : 0) +
+				ARROW_ALIGN(unitsz * builder->length()));
+	}
+};
+using arrowFileWriterColumnFixedSizeBinary = __arrowFileWriterFixedSizeBinaryColumn<arrow::FixedSizeBinaryBuilder,
+																					arrow::FixedSizeBinaryArray>;
+/*
+ * List field type
+ */
+template <typename BUILDER_TYPE,
+		  typename ARRAY_TYPE,
+		  typename OFFSET_TYPE>
+class __arrowFileWriterListColumn : public arrowFileWriterColumn
+{
+public:
+	__arrowFileWriterListColumn(const char *__field_name,
+								std::shared_ptr<arrowFileWriterColumn> element,
+								bool __stats_enabled,
+								arrow::Compression::type __compression)
+		: arrowFileWriterColumn(sizeof(OFFSET_TYPE) == sizeof(int32_t)
+								? arrow::list(element->arrow_type)
+								: arrow::large_list(element->arrow_type),
+								__field_name,
+								__stats_enabled,
+								__compression)
+	{
+		arrow_builder = std::make_shared<BUILDER_TYPE>(arrow::default_memory_pool(),
+													   element->arrow_type,
+													   this->arrow_type);
+		children.push_back(element);
+	}
+	size_t	chunkSize(void)
+	{
+		auto	builder = std::dynamic_pointer_cast<BUILDER_TYPE>(arrow_builder);
+		size_t	length = 0;
+
+		assert(children.size() == 1);
+		if (builder->null_count() > 0)
+			length = ARROW_ALIGN(BITMAPLEN(builder->length()));
+		return length + children[0]->chunkSize();
+	}
+	size_t	putValue(const void *ptr, size_t sz)
+	{
+		auto	builder = std::dynamic_pointer_cast<BUILDER_TYPE>(arrow_builder);
+		arrow::Status rv;
+
+		assert(children.size() == 1);
+		if (!ptr)
+		{
+			rv = builder->AppendNull();
+			if (!rv.ok())
+				Elog("unable to put NULL to '%s' field (%s): %s",
+					 field_name.c_str(),
+					 arrow_type->name().c_str(),
+					 rv.ToString().c_str());
+		}
+		else
+		{
+			auto	element = children[0];
+			char   *temp = (char *)alloca(sz + 1);
+			char   *tok, *pos;
+			int		index = 0;
+
+			rv = builder->Append();
+			if (!rv.ok())
+				Elog("unable to put value to '%s' field (%s): %s",
+					 field_name.c_str(),
+					 arrow_type->name().c_str(),
+					 rv.ToString().c_str());
+			memcpy(temp, ptr, sz);
+			temp[sz] = '\0';
+			for (tok = __strtok_quotable(temp, ',', &pos);
+				 index < children.size();
+				 tok = __strtok_quotable(NULL, ',', &pos))
+			{
+				element->putValue(tok, strlen(tok));
+			}
+		}
+		return chunkSize();
+	}
+	size_t	moveValue(std::shared_ptr<class arrowFileWriterColumn> buddy, uint64_t index)
+	{
+		auto	builder = std::dynamic_pointer_cast<BUILDER_TYPE>(arrow_builder);
+		auto	buddy_array = std::dynamic_pointer_cast<ARRAY_TYPE>(buddy->arrow_array);
+		arrow::Status rv;
+
+		assert(children.size() == buddy->children.size());
+		if (buddy_array->IsNull(index))
+			rv = builder->AppendNull();
+		else
+		{
+			rv = builder->Append();
+			if (rv.ok())
+			{
+				OFFSET_TYPE	head = buddy_array->value_offset(index);
+				OFFSET_TYPE	tail = buddy_array->value_offset(index+1);
+				auto		elem_dst = children[0];
+				auto		elem_src = buddy->children[0];
+
+				for (OFFSET_TYPE curr=head; curr < tail; curr++)
+				{
+					elem_dst->moveValue(elem_src, curr);
+				}
+			}
+		}
+		if (!rv.ok())
+			Elog("unable to move value to '%s' field (%s): %s",
+				 field_name.c_str(),
+				 arrow_type->name().c_str(),
+				 rv.ToString().c_str());
+		return chunkSize();
+	}
+	void	Reset(void)
+	{
+		assert(children.size() == 1);
+		children[0]->Reset();
+		arrowFileWriterColumn::Reset();
+	}
+	void	Finish(void)
+	{
+		assert(children.size() == 1);
+		children[0]->Finish();
+		arrowFileWriterColumn::Finish();
+	}
+};
+using arrowFileWriterColumnList = __arrowFileWriterListColumn<arrow::ListBuilder,
+															  arrow::ListArray,
+															  int32_t>;
+using arrowFileWriterColumnLargeList = __arrowFileWriterListColumn<arrow::LargeListBuilder,
+																   arrow::LargeListArray,
+																   int64_t>;
+/*
+ * Composite field type
+ */
+class arrowFileWriterColumnStruct : public arrowFileWriterColumn
+{
+	static std::shared_ptr<arrow::DataType>
+	__build_composite_arrow_type(std::vector<std::shared_ptr<arrowFileWriterColumn>> &__children)
+	{
+		arrow::FieldVector children_fields;
+
+		for (int i=0; i < __children.size(); i++)
+		{
+			auto	child = __children[i];
+			auto	field = arrow::field(child->field_name,
+										 child->arrow_type,
+										 true,	/* nullable */
+										 child->field_metadata);
+			children_fields.push_back(field);
+		}
+		return struct_(children_fields);
+	}
+public:
+	arrowFileWriterColumnStruct(const char *__field_name,
+								std::vector<std::shared_ptr<arrowFileWriterColumn>> &__children,
+								bool __stats_enabled,
+								arrow::Compression::type __compression)
+		: arrowFileWriterColumn(__build_composite_arrow_type(__children),
+								__field_name,
+								__stats_enabled,
+								__compression)
+	{
+		std::vector<arrowBuilder>	children_builders;
+
+		for (int i=0; i < __children.size(); i++)
+		{
+			auto	__child = __children[i];
+
+			children_builders.push_back(__child->arrow_builder);
+			children.push_back(__child);
+		}
+		arrow_builder = std::make_shared<arrow::StructBuilder>(arrow_type,
+															   arrow::default_memory_pool(),
+															   children_builders);
+	}
+	size_t	chunkSize(void)
+	{
+		auto	builder = std::dynamic_pointer_cast<arrow::StructBuilder>(arrow_builder);
+		size_t	length = 0;
+
+		if (builder->null_count() > 0)
+			length = ARROW_ALIGN(BITMAPLEN(builder->length()));
+		for (int i=0; i < children.size(); i++)
+		{
+			auto	child = children[i];
+
+			length += child->chunkSize();
+		}
+		return length;
+	}
+	size_t	putValue(const void *ptr, size_t sz)
+	{
+		auto	builder = std::dynamic_pointer_cast<arrow::StructBuilder>(arrow_builder);
+		arrow::Status rv;
+
+		if (!ptr)
+			rv = builder->AppendNull();
+		else
+		{
+			rv = builder->Append();
+			if (rv.ok())
+			{
+				char   *temp = (char *)alloca(sz + 1);
+				char   *tok, *pos;
+				int		index = 0;
+
+				memcpy(temp, ptr, sz);
+				temp[sz] = '\0';
+				for (tok = __strtok_quotable(temp, ',', &pos);
+					 index < children.size();
+					 tok = __strtok_quotable(NULL, ',', &pos))
+				{
+					children[index++]->putValue(tok, strlen(tok));
+				}
+			}
+		}
+		if (!rv.ok())
+			Elog("unable to put value to '%s' field (Struct): %s",
+				 field_name.c_str(),
+				 rv.ToString().c_str());
+		return chunkSize();
+	}
+	size_t	moveValue(std::shared_ptr<class arrowFileWriterColumn> buddy, uint64_t index)
+	{
+		auto	builder = std::dynamic_pointer_cast<arrow::StructBuilder>(arrow_builder);
+		auto	buddy_array = std::dynamic_pointer_cast<arrow::StructArray>(buddy->arrow_array);
+		size_t	length = 0;
+		arrow::Status rv;
+
+		assert(children.size() == buddy->children.size());
+		if (buddy_array->IsNull(index))
+		{
+			for (int i=0; i < children.size(); i++)
+				length += children[i]->putValue(NULL, 0);
+			rv = builder->AppendNull();
+		}
+		else
+		{
+			rv = builder->Append();
+			if (rv.ok())
+			{
+				for (int i=0; i < children.size(); i++)
+				{
+					auto	child = children[i];
+					auto	buddy_child = buddy->children[i];
+
+					child->moveValue(buddy_child, index);
+				}
+			}
+		}
+		if (!rv.ok())
+			Elog("unable to move value to '%s' field (Struct): %s",
+				 field_name.c_str(),
+				 rv.ToString().c_str());
+		return chunkSize();
+	}
+	void	Reset(void)
+	{
+		for (int i=0; i < children.size(); i++)
+			children[i]->Reset();
+		arrowFileWriterColumn::Reset();
+	}
+	void	Finish(void)
+	{
+		for (int i=0; i < children.size(); i++)
+			children[i]->Finish();
+		arrowFileWriterColumn::Finish();
+	}
+};
 
 #endif	/* _ARROW_WRITE_H_ */

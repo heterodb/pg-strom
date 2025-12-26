@@ -69,12 +69,12 @@ CPPFLAGS += -DHAS_LIBARROW=1 $(shell pkgconf --cflags arrow)
 ifeq ($(HAS_PARQUET),yes)
 CPPFLAGS += -DHAS_PARQUET=1  $(shell pkgconf --cflags parquet)
 PG2ARROW_LDFLAGS  += $(shell pkgconf --libs parquet)
-VCF2ARROW_LDFLAGS += $(shell pkgconf --libs parquet) -lstdc++
+VCF2ARROW_LDFLAGS += $(shell pkgconf --libs parquet)
 TSV2ARROW_LDFLAGS += $(shell pkgconf --libs parquet)
 ARROW2CSV_LDFLAGS += $(shell pkgconf --libs parquet)
 else
 PG2ARROW_LDFLAGS  += $(shell pkgconf --libs arrow)
-VCF2ARROW_LDFLAGS += $(shell pkgconf --libs arrow) -lstdc++
+VCF2ARROW_LDFLAGS += $(shell pkgconf --libs arrow)
 TSV2ARROW_LDFLAGS += $(shell pkgconf --libs arrow)
 ARROW2CSV_LDFLAGS += $(shell pkgconf --libs arrow)
 endif
@@ -153,7 +153,7 @@ install-vcf2arrow-legacy: vcf2arrow-legacy
 # VCF2Arrow(legacy)
 #
 vcf2arrow: $(VCF2ARROW_OBJS)
-	$(CC) -o $@ $(VCF2ARROW_OBJS) $(VCF2ARROW_LDFLAGS)
+	$(CXX) -o $@ $(VCF2ARROW_OBJS) $(VCF2ARROW_LDFLAGS)
 
 install-vcf2arrow: vcf2arrow
 	mkdir -p $(DESTDIR)$(BINDIR) && \
