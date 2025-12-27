@@ -59,9 +59,8 @@ SELECT * INTO gpusort_result1 FROM (
 ) subqry
 WHERE rank < 4;
  WindowAgg
-   Output: customer.c_region, customer.c_nation, customer.c_city, (pgstrom.fsum_numeric((pgstrom.psum(lineorder.lo_revenue)))), rank() OVER w1
-   Window: w1 AS (PARTITION BY customer.c_region, customer.c_nation ORDER BY (pgstrom.fsum_numeric((pgstrom.psum(lineorder.lo_revenue)))) ROWS UNBOUNDED PRECEDING)
-   Run Condition: (rank() OVER w1 < 4)
+   Output: customer.c_region, customer.c_nation, customer.c_city, (pgstrom.fsum_numeric((pgstrom.psum(lineorder.lo_revenue)))), rank() OVER (?)
+   Run Condition: (rank() OVER (?) < 4)
    ->  Gather
          Output: customer.c_region, customer.c_nation, customer.c_city, (pgstrom.fsum_numeric((pgstrom.psum(lineorder.lo_revenue))))
          Workers Planned: 2
@@ -105,9 +104,8 @@ SELECT * INTO gpusort_result2 FROM (
 ) subqry
 WHERE dense_rank <= 4;
  WindowAgg
-   Output: customer.c_region, customer.c_nation, customer.c_city, (pgstrom.favg_numeric((pgstrom.pavg(lineorder.lo_revenue)))), dense_rank() OVER w1
-   Window: w1 AS (PARTITION BY customer.c_region, customer.c_nation ORDER BY (pgstrom.favg_numeric((pgstrom.pavg(lineorder.lo_revenue)))) ROWS UNBOUNDED PRECEDING)
-   Run Condition: (dense_rank() OVER w1 <= 4)
+   Output: customer.c_region, customer.c_nation, customer.c_city, (pgstrom.favg_numeric((pgstrom.pavg(lineorder.lo_revenue)))), dense_rank() OVER (?)
+   Run Condition: (dense_rank() OVER (?) <= 4)
    ->  Sort
          Output: customer.c_region, customer.c_nation, customer.c_city, (pgstrom.favg_numeric((pgstrom.pavg(lineorder.lo_revenue))))
          Sort Key: customer.c_region, customer.c_nation, (pgstrom.favg_numeric((pgstrom.pavg(lineorder.lo_revenue)))) DESC
@@ -152,9 +150,8 @@ SELECT * INTO gpusort_result3 FROM (
 ) subqry
 WHERE row_number <= 4;
  WindowAgg
-   Output: customer.c_region, customer.c_nation, customer.c_city, (pgstrom.fmax_num((pgstrom.pmax((lineorder.lo_revenue)::double precision)))), row_number() OVER w1
-   Window: w1 AS (PARTITION BY customer.c_region, customer.c_nation ORDER BY (pgstrom.fmax_num((pgstrom.pmax((lineorder.lo_revenue)::double precision)))) ROWS UNBOUNDED PRECEDING)
-   Run Condition: (row_number() OVER w1 <= 4)
+   Output: customer.c_region, customer.c_nation, customer.c_city, (pgstrom.fmax_num((pgstrom.pmax((lineorder.lo_revenue)::double precision)))), row_number() OVER (?)
+   Run Condition: (row_number() OVER (?) <= 4)
    ->  Gather
          Output: customer.c_region, customer.c_nation, customer.c_city, (pgstrom.fmax_num((pgstrom.pmax((lineorder.lo_revenue)::double precision))))
          Workers Planned: 2
