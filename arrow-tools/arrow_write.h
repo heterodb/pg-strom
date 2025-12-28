@@ -18,20 +18,16 @@
 #include <arrow/util/value_parsing.h>
 #include <ctype.h>
 #include <parquet/arrow/writer.h>
+#include <stdarg.h>
 #include <string>
 
 #ifndef Elog
-#define Elog(fmt,...)								\
-	do {											\
-		fprintf(stderr, "[Error: %s:%d] " fmt "\n",	\
-				__FILE__, __LINE__, ##__VA_ARGS__);	\
-		_exit(1);									\
-	} while(0)
+#define Elog(fmt,...)	__throw_error("[ERROR %s:%d] " fmt,			\
+									  __FILE__, __LINE__, ##__VA_ARGS__)
 #endif
 #ifndef Info
-#define Info(fmt,...)							\
-	fprintf(stderr, "[Info: %s:%d] " fmt "\n",	\
-			__FILE__, __LINE__, ##__VA_ARGS__)
+#define Info(fmt,...)	fprintf(stderr, "[INFO: %s:%d] " fmt "\n",	\
+								__FILE__, __LINE__, ##__VA_ARGS__)
 #endif
 #define Max(a,b)	((a)>(b) ? (a) : (b))
 #define Min(a,b)	((a)<(b) ? (a) : (b))
@@ -41,6 +37,27 @@
 /*
  * utility functions
  */
+[[noreturn]] static inline void
+__throw_error(const char *fmt, ...)
+{
+	va_list ap;
+	int		n, bufsz = 400;
+	char   *buf = (char *)alloca(bufsz);
+
+	va_start(ap, fmt);
+	for (;;)
+	{
+		n = vsnprintf(buf, bufsz, fmt, ap);
+		if (n < bufsz)
+			break;
+		bufsz += (bufsz + 1000);
+		buf = (char *)alloca(bufsz);
+	}
+	va_end(ap);
+
+	throw std::runtime_error(buf);
+}
+
 static inline char *
 __trim(char *token)
 {
@@ -57,58 +74,92 @@ __trim(char *token)
 }
 
 static inline char *
-__strtok_quotable(char *line, char delim, char **savepos)
+__trim_quotable(char *token)
 {
-	bool	in_quote = false;
-	char   *r_pos;
-	char   *w_pos;
-	char   *head;
-
-	if (line)
-		r_pos = w_pos = line;
-	else if (*savepos != NULL)
-		r_pos = w_pos = *savepos;
-	else
-		return NULL;
-	head = w_pos;
-
-	while (*r_pos != '\0')
+	token = __trim(token);
+	if (token)
 	{
-		if (*r_pos == '"')		/* begin/end quotation */
+		char   *tail = token + strlen(token) - 1;
+
+		if (*token == '"' && token < tail && *tail == '"')
 		{
-			in_quote = !in_quote;
-			r_pos++;
+			*tail = '\0';
+			return token + 1;
 		}
-		else if (*r_pos == '\\')	/* escape */
+	}
+	return token;
+}
+
+static inline char *
+__strtok_quotable(char *line, char delim, char **saveptr)
+{
+	char   *r_pos = (line ? line : *saveptr);
+	char   *w_pos = r_pos;
+	char   *start = w_pos;
+	bool	in_quote = false;
+
+	assert(saveptr != NULL);
+	if (!r_pos)
+		return NULL;	/* already touched to the end */
+	/* skip white-spaces in the head */
+	while (isspace(*r_pos))
+		r_pos++;
+	for (;;)
+	{
+		int		c = *r_pos++;
+
+		if (c == '\0')
 		{
-			switch (*++r_pos)
-			{
-				case '\\':	*w_pos++ = '\\';	break;
-				case '"':	*w_pos++ = '"';		break;
-				case 'n':	*w_pos++ = '\n';	break;
-                case 'r':	*w_pos++ = '\r';	break;
-                case 't':	*w_pos++ = '\t';	break;
-                case 'f':	*w_pos++ = '\f';	break;
-                case 'b':	*w_pos++ = '\b';	break;
-                default:
-					Elog("unknown escape '\\%c'", *r_pos);
-			}
-			r_pos++;
-		}
-		else if (!in_quote && *r_pos == delim)
-		{
-			/* delimiter */
+			*saveptr = NULL;
+			*w_pos++ = '\0';
 			break;
+		}
+		else if (!in_quote && c == delim)
+		{
+			*saveptr = r_pos;
+			*w_pos++ = '\0';
+			break;
+		}
+		else if (c == '"')
+		{
+			if (*r_pos == '"')	/* "" is just an escaped '"' */
+				*w_pos++ = *r_pos++;
+			else
+				in_quote = !in_quote;
+		}
+		else if (c == '\\')
+		{
+			c = *r_pos++;
+			switch (c)
+			{
+				case '\0':
+					*saveptr = NULL;
+					*w_pos++ = '\0';
+					goto out;
+				case '0':
+					*w_pos++ = '\0';
+					break;
+				case 'n':
+					*w_pos++ = '\n';
+					break;
+				case 'r':
+					*w_pos++ = '\r';
+					break;
+				case 't':
+					*w_pos++ = '\t';
+					break;
+				default:
+					*w_pos++ = c;
+					break;
+			}
 		}
 		else
 		{
-			/* payload */
-			*w_pos++ = *r_pos++;
+			*w_pos++ = c;
 		}
 	}
-	*savepos = (*r_pos == '\0' ? NULL : r_pos+1);
-	*w_pos++ = '\0';
-	return __trim(head);
+out:
+	return __trim(start);
 }
 
 /*
@@ -131,16 +182,18 @@ public:
 	bool			parquet_mode;
 	arrow::Compression::type default_compression;
 	arrowSchema		arrow_schema;
-	std::vector<std::shared_ptr<class arrowFileWriterColumn>> arrow_columns;
 	arrowMetadata	table_metadata;
-	arrowFileWriter(void)
+	std::vector<std::shared_ptr<class arrowFileWriterColumn>> arrow_columns;
+	arrowFileWriter(bool __parquet_mode = false,
+					arrow::Compression::type __compression = arrow::Compression::type::ZSTD)
 	{
 		file_out_stream = nullptr;
 		arrow_file_writer = nullptr;
 		parquet_file_writer = nullptr;
-		parquet_mode = false;
-		default_compression = arrow::Compression::type::ZSTD;
+		parquet_mode = __parquet_mode;
+		default_compression = __compression;
 		arrow_schema = nullptr;
+		table_metadata = std::make_shared<arrow::KeyValueMetadata>();
 	}
 	bool		Open(const char *__pathname);
 	void		Close();
@@ -167,8 +220,8 @@ public:
 	arrow::Compression::type compression;	/* valid only if parquet-mode */
 	arrowBuilder	arrow_builder;
 	arrowArray		arrow_array;
-	arrowMetadata	field_metadata;
 	std::vector<std::shared_ptr<class arrowFileWriterColumn>> children;	/* only Struct/List */
+	arrowMetadata	field_metadata;
 	arrowFileWriterColumn(std::shared_ptr<arrow::DataType> __arrow_type,
 						  const char *__field_name,
 						  bool __stats_enabled,
@@ -180,10 +233,11 @@ public:
 		compression = __compression;
 		arrow_builder = nullptr;
 		arrow_array = nullptr;
+		field_metadata = std::make_shared<arrow::KeyValueMetadata>();
 	}
 	virtual size_t	chunkSize() = 0;
 	virtual size_t	putValue(const void *ptr, size_t sz) = 0;
-	virtual size_t	moveValue(std::shared_ptr<class arrowFileWriterColumn> buddy, uint64_t index) = 0;
+	virtual size_t	moveValue(std::shared_ptr<class arrowFileWriterColumn> buddy, int64_t index) = 0;
 	virtual void	Reset(void)
 	{
 		arrow_builder->Reset();
@@ -663,7 +717,7 @@ public:
 	{
 		auto	builder = std::dynamic_pointer_cast<BUILDER_TYPE>(this->arrow_builder);
 
-		return (ARROW_ALIGN(builder->nullcount() > 0 ? BITMAPLEN(builder->length()) : 0) +
+		return (ARROW_ALIGN(builder->null_count() > 0 ? BITMAPLEN(builder->length()) : 0) +
 				ARROW_ALIGN(sizeof(OFFSET_TYPE) * builder->length()) +
 				ARROW_ALIGN(builder->value_data_length()));
 	}
@@ -847,7 +901,7 @@ public:
 	{
 		auto	builder = std::dynamic_pointer_cast<BUILDER_TYPE>(this->arrow_builder);
 
-		return (ARROW_ALIGN(builder->nullcount() > 0 ? BITMAPLEN(builder->length()) : 0) +
+		return (ARROW_ALIGN(builder->null_count() > 0 ? BITMAPLEN(builder->length()) : 0) +
 				ARROW_ALIGN(unitsz * builder->length()));
 	}
 };
@@ -927,7 +981,7 @@ public:
 		}
 		return chunkSize();
 	}
-	size_t	moveValue(std::shared_ptr<class arrowFileWriterColumn> buddy, uint64_t index)
+	size_t	moveValue(std::shared_ptr<class arrowFileWriterColumn> buddy, int64_t index)
 	{
 		auto	builder = std::dynamic_pointer_cast<BUILDER_TYPE>(arrow_builder);
 		auto	buddy_array = std::dynamic_pointer_cast<ARRAY_TYPE>(buddy->arrow_array);
@@ -1069,7 +1123,7 @@ public:
 				 rv.ToString().c_str());
 		return chunkSize();
 	}
-	size_t	moveValue(std::shared_ptr<class arrowFileWriterColumn> buddy, uint64_t index)
+	size_t	moveValue(std::shared_ptr<class arrowFileWriterColumn> buddy, int64_t index)
 	{
 		auto	builder = std::dynamic_pointer_cast<arrow::StructBuilder>(arrow_builder);
 		auto	buddy_array = std::dynamic_pointer_cast<arrow::StructArray>(buddy->arrow_array);
@@ -1116,5 +1170,10 @@ public:
 		arrowFileWriterColumn::Finish();
 	}
 };
+
+
+	void		ParseSchemaDefs(const char *schema_defs);
+
+
 
 #endif	/* _ARROW_WRITE_H_ */
