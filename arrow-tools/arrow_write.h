@@ -204,19 +204,21 @@ class ArrowFileBuilderTable
 {
 	arrowRecordBatch	__buildRecordBatch();
 	arrowMetadata		__buildMinMaxStats();
+	std::shared_ptr<parquet::WriterProperties>		__parquetWriterProperties();
+	std::shared_ptr<parquet::ArrowWriterProperties>	__parquetArrowProperties();
 protected:
 	std::shared_ptr<arrow::io::FileOutputStream>	file_out_stream;
 	std::shared_ptr<arrow::ipc::RecordBatchWriter>	arrow_file_writer;
 	std::unique_ptr<parquet::arrow::FileWriter>		parquet_file_writer;
 	bool			parquet_mode;
 public:
+	std::string		appname;	/* application name (optional) */
 	std::string		pathname;
 	arrow::Compression::type default_compression;
 	arrowSchema		arrow_schema;
 	arrowMetadata	table_metadata;
 	std::vector<arrowFileBuilderColumn> arrow_columns;
-	/* --- vcf2arrow specific fields --- */
-	bool		has_allele_population;
+	std::unordered_map<std::string, arrowFileBuilderColumn> columns_htable;
 	/* --- methods --- */
 	ArrowFileBuilderTable(bool __parquet_mode,
 						  arrow::Compression::type __compression)
@@ -228,8 +230,6 @@ public:
 		default_compression = __compression;
 		arrow_schema = nullptr;
 		table_metadata = std::make_shared<arrow::KeyValueMetadata>();
-		/* --- vcf2arrow --- */
-		has_allele_population = false;
 	}
 	bool		Open(const char *__pathname, bool allow_overwrite = false);
 	void		Close();
@@ -254,10 +254,12 @@ makeArrowFileBuilderTable(bool __parquet_mode = false,
  */
 class ArrowFileBuilderColumn
 {
+	friend class ArrowFileBuilderTable;
 public:
 	std::shared_ptr<arrow::DataType> arrow_type;
 	std::string		sql_type_name;			/* just for display */
 	std::string		field_name;
+	int				field_index;
 	bool			stats_enabled;
 	arrow::Compression::type compression;	/* valid only if parquet-mode */
 	arrowBuilder	arrow_builder;
@@ -265,7 +267,7 @@ public:
 	std::vector<std::shared_ptr<class ArrowFileBuilderColumn>> children;	/* only Struct/List */
 	arrowMetadata	field_metadata;
 	/* ---- vcf2arrow specific fields ---- */
-	bool			vcf_allele_population;
+	char			vcf_allele_policy;
 	/* ---- methods ---- */
 	ArrowFileBuilderColumn(std::shared_ptr<arrow::DataType> __arrow_type,
 						  const char *__field_name,
@@ -280,7 +282,7 @@ public:
 		arrow_array = nullptr;
 		field_metadata = std::make_shared<arrow::KeyValueMetadata>();
 		/* for vcf2arrow */
-		vcf_allele_population = ' ';
+		vcf_allele_policy = ' ';
 	}
 	virtual void
 	appendStats(arrowMetadata custom_metadata)
@@ -309,7 +311,7 @@ public:
 			stats_enabled == buddy->stats_enabled &&
 			compression == buddy->compression &&
 			arrow_type->Equals(buddy->arrow_type) &&
-			vcf_allele_population == buddy->vcf_allele_population)
+			vcf_allele_policy == buddy->vcf_allele_policy)
 			return true;
 		return false;
 	}
@@ -323,6 +325,15 @@ public:
 		else
 			sql += " ";
 		sql += sql_type_name;
+	}
+protected:
+	virtual void	__parquetWriterProperties(parquet::WriterProperties::Builder &builder,
+											  arrow::Compression::type default_compression)
+	{
+		// if column level compression is different from default_compression,
+		// set its own compression
+		for (int j=0; j < children.size(); j++)
+			children[j]->__parquetWriterProperties(builder, default_compression);
 	}
 };
 
@@ -1349,25 +1360,40 @@ void
 ArrowFileBuilderTable::Close(void)
 {
 	arrow::Status	rv;
+	int64_t			nrows = -1;
 
+	/* flush if remaining record exist */
+	for (int i=0; i < arrow_columns.size(); i++)
+	{
+		auto	column = arrow_columns[i];
+		auto	builder = column->arrow_builder;
+
+		if (nrows < 0)
+			nrows = builder->length();
+		else if (nrows != builder->length())
+			Elog("Bug? number of rows in arrow_builder is not consistent");
+	}
+	if (nrows > 0)
+		WriteChunk();
+	/* write out arrow footer */
 	if (arrow_file_writer)
 	{
-		/* write out arrow footer */
 		rv = arrow_file_writer->Close();
 		if (!rv.ok())
 			Elog("failed on arrow::ipc::RecordBatchWriter::Close: %s",
 				 rv.ToString().c_str());
 		arrow_file_writer = nullptr;
 	}
+	/* write out parquet footer */
 	if (parquet_file_writer)
 	{
-		/* write out parquet footer */
 		rv = parquet_file_writer->Close();
 		if (!rv.ok())
 			Elog("failed on parquet::arrow::FileWriter::Close: %s",
 				 rv.ToString().c_str());
 		parquet_file_writer = nullptr;
 	}
+	/* close the output stream */
 	if (file_out_stream)
 	{
 		rv = file_out_stream->Close();
@@ -1393,6 +1419,11 @@ ArrowFileBuilderTable::AssignSchema(void)
 									 true,
 									 column->field_metadata);
 		arrow_fields.push_back(field);
+
+		column->field_index = i;
+		if (columns_htable.count(column->field_name) != 0)
+			Elog("multiple field '%s' exist", column->field_name.c_str());
+		columns_htable[column->field_name] = column;
 	}
 	arrow_schema = arrow::schema(arrow_fields);
 }
@@ -1462,6 +1493,30 @@ ArrowFileBuilderTable::__buildMinMaxStats(void)
 	return metadata;
 }
 
+std::shared_ptr<parquet::WriterProperties>
+ArrowFileBuilderTable::__parquetWriterProperties()
+{
+	parquet::WriterProperties::Builder builder;
+	/* application name, if any */
+	if (appname.size() > 0)
+		builder.created_by(appname);
+	/* we don't switch row-group by number of lines basis  */
+	builder.max_row_group_length(INT64_MAX);
+	/* default compression method */
+	builder.compression(default_compression);
+	for (int j=0; j < arrow_columns.size(); j++)
+		arrow_columns[j]->__parquetWriterProperties(builder, default_compression);
+	// MEMO: Parquet enables min/max/null-count statistics in the default,
+	// so we don't need to touch something special ...(like enable_statistics())
+	return builder.build();
+}
+
+std::shared_ptr<parquet::ArrowWriterProperties>
+ArrowFileBuilderTable::__parquetArrowProperties()
+{
+	return parquet::default_arrow_writer_properties();
+}
+
 void
 ArrowFileBuilderTable::WriteChunk(void)
 {
@@ -1492,8 +1547,33 @@ ArrowFileBuilderTable::WriteChunk(void)
 	else
 	{
 		/* write out parquet file */
+		if (!parquet_file_writer)
+		{
+			auto	rv = parquet::arrow::FileWriter::Open(*arrow_schema,
+														  arrow::default_memory_pool(),
+														  file_out_stream,
+														  __parquetWriterProperties(),
+														  __parquetArrowProperties());
+			if (!rv.ok())
+				Elog("failed on parquet::arrow::FileWriter::Open('%s'): %s",
+					 pathname.c_str(), rv.status().ToString().c_str());
+			parquet_file_writer = std::move(rv).ValueOrDie();
+		}
+		/* write out row-group */
+		{
+			auto	rv = parquet_file_writer->WriteRecordBatch(*__buildRecordBatch());
+			if (!rv.ok())
+				Elog("failed on parquet::arrow::FileWriter::WriteRecordBatch: %s",
+					 rv.ToString().c_str());
 
-
+		}
+		/* flush to the disk */
+		{
+			auto	rv = parquet_file_writer->NewBufferedRowGroup();
+			if (!rv.ok())
+				Elog("failed on parquet::arrow::FileWriter::NewBufferedRowGroup: %s",
+					 rv.ToString().c_str());
+		}
 	}
 }
 

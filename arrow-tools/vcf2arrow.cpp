@@ -32,20 +32,57 @@ static const char  *error_items_filename = NULL;
 static FILE		   *error_items_filp = NULL;
 
 /*
- * report_unconvertible_entry
+ * __strdup
  */
-static void
-report_unconvertible_entry(const char *line)
+#define STRDUP_BUFFER_SZ	(512UL<<10)		//512kB
+static std::vector<char *>	strdup_buffers_array;
+static char				   *strdup_buffers_curr = NULL;
+static size_t				strdup_buffers_usage = 0;
+static char *
+__strdup(const char *str)
 {
-	if (!error_items_filp)
+	char	   *copy = NULL;
+
+	if (str)
 	{
-		if (!error_items_filename)
-			Elog("This line is not convertible, and -e OUTFILE is not given.\n%s", line);
-		error_items_filp = fopen(error_items_filename, "ab");
-		if (!error_items_filp)
-			Elog("unable to open '%s' for error reporting", error_items_filename);
+		size_t	sz = strlen(str) + 1;
+
+		if (sz >= STRDUP_BUFFER_SZ / 4)
+		{
+			copy = strdup(str);
+			if (!copy)
+				Elog("out of memory");
+			strdup_buffers_array.push_back(copy);
+		}
+		else if (!strdup_buffers_curr ||
+				 strdup_buffers_usage + sz >= STRDUP_BUFFER_SZ)
+		{
+			if (strdup_buffers_curr)
+				strdup_buffers_array.push_back(strdup_buffers_curr);
+			strdup_buffers_curr = (char *)malloc(STRDUP_BUFFER_SZ);
+			if (!strdup_buffers_curr)
+				Elog("out of memory");
+			copy = strdup_buffers_curr;
+			strcpy(copy, str);
+			strdup_buffers_usage = sz;
+		}
+		else
+		{
+			copy = strdup_buffers_curr + strdup_buffers_usage;
+			strcpy(copy, str);
+			strdup_buffers_usage += sz;
+		}
 	}
-	fputs(line, error_items_filp);
+	return copy;
+}
+
+static void
+__strdup_buffer_reset(void)
+{
+	for (int k=0; k < strdup_buffers_array.size(); k++)
+		free(strdup_buffers_array[k]);
+	strdup_buffers_array.clear();
+	strdup_buffers_usage = 0;
 }
 
 /*
@@ -58,6 +95,7 @@ openArrowFileStream(arrowFileBuilderTable af_builder)
 	{
 		if (!af_builder->Open(output_filename, force_write_file))
 			Elog("failed on arrowFileBuilderTable::Open('%s')", output_filename);
+		return;
 	}
 	/* no -o FILENAME given, so generate a safe alternative */
 	const char *input_fname = input_filenames[0];
@@ -210,11 +248,10 @@ addVcfInfoField(arrowFileBuilderTable &af_builder,
 		column = makeVcfFieldFloat(namebuf.c_str());
 	else
 		column = makeVcfFieldString(namebuf.c_str());
-	if (strcmp(number, "A") == 0 || strcmp(number, "R") == 0)
-	{
-        column->vcf_allele_population = number[0];
-		af_builder->has_allele_population = true;
-	}
+	if (strcmp(number, "0") == 0 ||
+		strcmp(number, "A") == 0 ||
+		strcmp(number, "R") == 0)
+        column->vcf_allele_policy = number[0];
 	if (descr)
 	{
 		column->field_metadata->Append(std::string("description"),
@@ -268,7 +305,7 @@ parseLastVcfHeaderLine(arrowFileBuilderTable &af_builder,
  * openVcfFileHeader
  */
 static arrowFileBuilderTable
-openVcfFileHeader(FILE *filp, const char *fname)
+openVcfFileHeader(FILE *filp, const char *fname, long &line_no)
 {
 	std::vector<std::string> format_lines;
 	char	   *line = NULL;
@@ -287,6 +324,7 @@ openVcfFileHeader(FILE *filp, const char *fname)
 	
 	while ((nbytes = getline(&line, &bufsz, filp)) >= 0)
 	{
+		line_no++;
 		line = __trim(line);
 		if (*line == '\0')
 			continue;		/* empty line */
@@ -309,10 +347,361 @@ openVcfFileHeader(FILE *filp, const char *fname)
 		else if (strncmp(line, "#CHROM", 6) == 0 && isspace(line[6]))
 		{
 			parseLastVcfHeaderLine(af_builder, format_lines, fname, line);
+			free(line);
 			return af_builder;
 		}
 	}
 	Elog("input file '%s' has no VCF header line", fname);
+}
+
+/*
+ * __processVcfOneFieldItem
+ */
+static void
+__processVcfOneFieldItem(arrowFileBuilderTable &af_builder,
+						 std::vector<const char *> &vcf_tokens,
+						 const char *field_prefix,
+						 const char *field_name,
+						 const char *field_tok,
+						 int alt_loop)
+{
+	arrowFileBuilderColumn column;
+	std::string key;
+
+	if (field_prefix)
+		key += field_prefix;
+	key += field_name;
+	column = af_builder->columns_htable.at(key);
+	if (column->vcf_allele_policy == '0')
+	{
+		vcf_tokens[column->field_index] = "true";
+		return;
+	}
+	else if (!field_tok)
+	{
+		Elog("Value of '%s' is missing for non-boolean field", key.c_str());
+	}
+	else if (column->vcf_allele_policy == 'A')
+	{
+		char   *temp = (char *)alloca(strlen(field_tok)+1);
+		char   *tok, *pos;
+		int		index;
+
+		strcpy(temp, field_tok);
+		for (tok = strtok_r(temp, ",", &pos), index=0;
+			 tok != NULL;
+			 tok = strtok_r(NULL, ",", &pos), index++)
+		{
+			if (index == alt_loop)
+			{
+				vcf_tokens[column->field_index] = __strdup(__trim(tok));
+				return;
+			}
+		}
+		Elog("corrupted 'A' item - %dth item is missing", alt_loop+1);
+	}
+	else if (column->vcf_allele_policy == 'R')
+	{
+		char   *temp = (char *)alloca(strlen(field_tok)+1);
+		char   *tok, *pos;
+		char   *first = NULL;
+		int		index;
+
+		strcpy(temp, field_tok);
+		for (tok = strtok_r(temp, ",", &pos), index=-1;
+			 tok != NULL;
+			 tok = strtok_r(NULL, ",", &pos), index++)
+		{
+			if (index < 0)
+				first = tok;
+			else if (index == alt_loop)
+			{
+				char   *__temp = (char *)alloca(strlen(first) + strlen(tok) + 20);
+
+				vcf_tokens[column->field_index] = __strdup(__temp);
+				return;
+			}
+		}
+		Elog("corrupted 'R' item - %dth item is missing", alt_loop+2);
+	}
+	else
+	{
+		vcf_tokens[column->field_index] = __strdup(field_tok);
+	}
+}
+
+/*
+ * __processVcfOneInfoItem
+ */
+static void
+__processVcfOneInfoItem(arrowFileBuilderTable &af_builder,
+						std::vector<const char *> &vcf_tokens,
+						const char *__info,
+						int alt_loop)
+{
+	char   *info = (char *)alloca(strlen(__info) + 1);
+	char   *tok, *pos;
+
+	strcpy(info, __info);
+	for (tok = strtok_r(info, ";", &pos);
+		 tok != NULL;
+		 tok = strtok_r(NULL, ";", &pos))
+	{
+		char   *val = strchr(tok, '=');
+
+		if (val)
+			*val++ = '\0';
+		__processVcfOneFieldItem(af_builder,
+								 vcf_tokens,
+								 "info__",
+								 __trim(tok),
+								 __trim(val),
+								 alt_loop);
+	}
+}
+
+/*
+ * __processVcfOneFormatItem
+ */
+static void
+__processVcfOneFormatItem(arrowFileBuilderTable &af_builder,
+						  std::vector<const char *> &vcf_tokens,
+						  const char *prefix,
+						  const char *__format,
+						  const char *__sample,
+						  int alt_loop)
+{
+	char   *format = (char *)alloca(strlen(__format) + 1);
+	char   *sample = (char *)alloca(strlen(__sample) + 1);
+	char   *tok1, *pos1;
+	char   *tok2, *pos2;
+
+	strcpy(format, __format);
+	strcpy(sample, __sample);
+	for (tok1 = strtok_r(format, ":", &pos1), tok2 = strtok_r(sample, ":", &pos2);
+		 tok1 != NULL && tok2 != NULL;
+		 tok1 = strtok_r(NULL,   ":", &pos1), tok2 = strtok_r(NULL,   ":", &pos2))
+	{
+		__processVcfOneFieldItem(af_builder,
+								 vcf_tokens,
+								 prefix,
+								 __trim(tok1),
+								 __trim(tok2),
+								 alt_loop);
+	}
+	if (tok1 != NULL || tok2 != NULL)
+		Elog("corrupted FORMAT - SAMPLE pairs");
+}
+
+/*
+ * __processVcfFileOneVariant
+ */
+static void
+__processVcfFileOneVariant(arrowFileBuilderTable &af_builder,
+						   std::vector<const char *> &vcf_tokens,
+						   char *vcf_chrom,
+						   char *vcf_pos,
+						   char *vcf_id,
+						   char *vcf_ref,
+						   char *vcf_alt,
+						   int   alt_loop,
+						   char *vcf_qual,
+						   char *vcf_filter,
+						   char *vcf_info,
+						   char *vcf_format,
+						   std::vector<char *> &vcf_samples)
+{
+	/* fixed fields */
+	__processVcfOneFieldItem(af_builder, vcf_tokens, NULL, "chrom",  vcf_chrom,  alt_loop);
+	__processVcfOneFieldItem(af_builder, vcf_tokens, NULL, "pos",    vcf_pos,    alt_loop);
+	__processVcfOneFieldItem(af_builder, vcf_tokens, NULL, "id",     vcf_id,     alt_loop);
+	__processVcfOneFieldItem(af_builder, vcf_tokens, NULL, "ref",    vcf_ref,    alt_loop);
+	__processVcfOneFieldItem(af_builder, vcf_tokens, NULL, "alt",    vcf_alt,    alt_loop);
+	__processVcfOneFieldItem(af_builder, vcf_tokens, NULL, "qual",   vcf_qual,   alt_loop);
+	__processVcfOneFieldItem(af_builder, vcf_tokens, NULL, "filter", vcf_filter, alt_loop);
+	/* INFO */
+	__processVcfOneInfoItem(af_builder, vcf_tokens, vcf_info, alt_loop);
+	/* FORMAT (optional) */
+	if (vcf_format)
+	{
+		char	prefix[40];
+
+		for (int k=0; k < vcf_samples.size(); k++)
+		{
+			sprintf(prefix, "sample%u__", k+1);
+
+			__processVcfOneFormatItem(af_builder,
+									  vcf_tokens,
+									  prefix,
+									  vcf_format,
+									  vcf_samples[k],
+									  alt_loop);
+		}
+	}
+}
+
+/*
+ * __processVcfFileOneLine
+ */
+static void
+__processVcfFileOneLine(arrowFileBuilderTable &af_builder,
+						std::vector<std::vector<const char *>> &vcf_multi_tokens,
+						char *line)
+{
+	int		ncols = af_builder->arrow_columns.size();
+	char   *vcf_chrom = NULL;
+	char   *vcf_pos = NULL;
+	char   *vcf_id = NULL;
+	char   *vcf_ref = NULL;
+	char   *vcf_alt = NULL;
+	char   *vcf_qual = NULL;
+	char   *vcf_filter = NULL;
+	char   *vcf_info = NULL;
+	char   *vcf_format = NULL;
+	std::vector<char *> vcf_samples;
+	char   *tok, *pos;
+	int		loop;
+
+	for (tok = strtok_r(line, " \t", &pos), loop=0;
+		 tok != NULL;
+		 tok = strtok_r(NULL, " \t", &pos), loop++)
+	{
+		switch (loop)
+		{
+			case 0: vcf_chrom  = __trim(tok); break;
+			case 1: vcf_pos    = __trim(tok); break;
+			case 2: vcf_id     = __trim(tok); break;
+			case 3: vcf_ref    = __trim(tok); break;
+			case 4: vcf_alt    = __trim(tok); break;
+			case 5: vcf_qual   = __trim(tok); break;
+			case 6: vcf_filter = __trim(tok); break;
+			case 7: vcf_info   = __trim(tok); break;
+			case 8: vcf_format = __trim(tok); break;
+			default:
+				vcf_samples.push_back(__trim(tok));
+				break;
+		}
+	}
+	/* CHROME...INFO should be mandatory field */
+	if (!vcf_info)
+		Elog("mandatory fields are missing");
+	/* Split VCF-ALT for each variant */
+	for (tok = strtok_r(vcf_alt, ",", &pos), loop=0;
+		 tok != NULL;
+		 tok = strtok_r(NULL,    ",", &pos), loop++)
+	{
+		std::vector<const char *> vcf_tokens;
+
+		vcf_tokens.resize(ncols);
+		memset(vcf_tokens.data(), 0, sizeof(char *) * ncols);
+
+		__processVcfFileOneVariant(af_builder,
+								   vcf_tokens,
+								   vcf_chrom,
+								   vcf_pos,
+								   vcf_id,
+								   vcf_ref,
+								   __trim(tok),	/* vcf_alt */
+								   loop,
+								   vcf_qual,
+								   vcf_filter,
+								   vcf_info,
+								   vcf_format,
+								   vcf_samples);
+		vcf_multi_tokens.push_back(vcf_tokens);
+	}
+}
+
+/*
+ * processVcfFileBody
+ */
+static void
+processVcfFileBody(arrowFileBuilderTable &af_builder,
+				   FILE *filp,
+				   const char *fname,
+				   long line_no)
+{
+	size_t		line_sz = 0;
+	char	   *line = NULL;
+	size_t		work_sz = 0;
+	char	   *work = NULL;
+	ssize_t		nbytes;
+	std::vector<std::vector<const char *>> vcf_multi_tokens;
+
+	while ((nbytes = getline(&line, &line_sz, filp)) >= 0)
+	{
+		bool	skip_this_line = false;
+
+		/*
+		 * Once copy the VCF line to working buffer
+		 * (if line is not convertible, the original should be reported)
+		 */
+		if (line_sz >= work_sz)
+		{
+			work_sz = line_sz * 2 + 8000;
+			if (!work)
+				work = (char *)malloc(work_sz+1);
+			else
+				work = (char *)realloc(work, work_sz+1);
+			if (!work)
+				Elog("out of memory");
+		}
+		strcpy(work, line);
+		line_no++;
+
+		/* Parse VCF line */
+		try {
+			__processVcfFileOneLine(af_builder, vcf_multi_tokens, work);
+		}
+		catch (std::exception &e)
+		{
+			if (!error_items_filp)
+			{
+				if (!error_items_filename)
+				{
+					fprintf(stderr, "Not convertible item at FILE=%s LINE=%ld: %s\n%s",
+						 fname, line_no, e.what(), line);
+					_exit(1);
+				}
+				error_items_filp = fopen(error_items_filename, "ab");
+				if (!error_items_filp)
+					Elog("unable to open '%s' for error reporting", error_items_filename);
+			}
+			fprintf(error_items_filp, "###UNCONVERTIBLE FILE=%s LINE=%ld MESSAGE=%s\n%s",
+					fname, line_no, e.what(), line);
+			skip_this_line = true;
+		}
+		/* Append One Line */
+		if (!skip_this_line)
+		{
+			int		ncols = af_builder->arrow_columns.size();
+
+			for (int k=0; k < vcf_multi_tokens.size(); k++)
+			{
+				auto	vcf_tokens = vcf_multi_tokens[k];
+				size_t	length = 0;
+
+				assert(vcf_tokens.size() == ncols);
+				for (int j=0; j < ncols; j++)
+				{
+					auto	column = af_builder->arrow_columns[j];
+					const char *token = vcf_tokens[j];
+
+					if (token)
+						length += column->putValue(token, strlen(token));
+					else if (column->vcf_allele_policy == '0')
+						length += column->putValue("false", 5);
+					else
+						length += column->putValue(NULL, 0);
+				}
+				if (length >= batch_segment_sz)
+					af_builder->WriteChunk();
+			}
+		}
+		/* Reset working buffer */
+		vcf_multi_tokens.clear();
+		__strdup_buffer_reset();
+	}
 }
 
 /*
@@ -511,6 +900,7 @@ int main(int argc, char * const argv[])
 {
 	std::shared_ptr<arrow::io::FileOutputStream> arrow_out_stream;
 	std::vector<FILE *> input_filp_array;
+	std::vector<long>	input_line_no_array;
 	arrowFileBuilderTable af_builder = nullptr;
 
 	try{
@@ -520,16 +910,18 @@ int main(int argc, char * const argv[])
 		{
 			const char *fname = input_filenames[i];
 			FILE	   *filp = fopen(fname, "rb");
+			long		line_no = 0;
 			arrowFileBuilderTable __builder;
 
 			if (!filp)
 				Elog("unable to open input file '%s': %m", fname);
-			__builder = openVcfFileHeader(filp, fname);
+			__builder = openVcfFileHeader(filp, fname, line_no);
 			if (!af_builder)
 				af_builder = __builder;
 			else if (!af_builder->checkCompatibility(__builder))
 				Elog("VCF file '%s' does not have compatible schema", fname);
 			input_filp_array.push_back(filp);
+			input_line_no_array.push_back(line_no);
 		}
 		assert(af_builder != nullptr);
 		/* assign arrow::Schema */
@@ -538,9 +930,18 @@ int main(int argc, char * const argv[])
 		if (schema_table_name)
 			return printSchemaDefinition(af_builder);
 		openArrowFileStream(af_builder);
+		/* process VCF files for each */
+		for (int i=0; i < input_filenames.size(); i++)
+		{
+			const char *fname = input_filenames[i];
+			FILE	   *filp = input_filp_array[i];
+			long		line_no = input_line_no_array[i];
 
-
-	//static const char  *output_filename = NULL;
+			processVcfFileBody(af_builder, filp, fname, line_no);
+			fclose(filp);
+		}
+		/* finalize */
+		af_builder->Close();
 	}
 	catch (std::exception &e)
 	{
