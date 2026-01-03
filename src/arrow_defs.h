@@ -857,6 +857,8 @@ typedef struct		ArrowMessage
 	ArrowMetadataVersion version;
 	ArrowMessageBody body;
 	uint64_t		bodyLength;
+	ArrowKeyValue  *custom_metadata;
+	int				_num_custom_metadata;
 } ArrowMessage;
 
 /*
@@ -913,6 +915,7 @@ __EXTERN char  *dumpArrowNode(const ArrowNode *node);
 __EXTERN void	copyArrowNode(ArrowNode *dest, const ArrowNode *src);
 __EXTERN bool	equalArrowNode(const ArrowNode *a, const ArrowNode *b);
 __EXTERN int	readArrowFileInfo(const char *filename, ArrowFileInfo *af_info);
+__EXTERN char  *dumpArrowFileInfo(const ArrowFileInfo *af_info);
 
 /*
  * parquet_read.cc (C++ interface)
@@ -924,7 +927,8 @@ parquetReadOneRowGroup(const char *filename,
 					   const struct kern_data_store *kds_head,
 					   void *(*malloc_callback)(void *malloc_private,
 												size_t malloc_size),
-					   void *malloc_private);
+					   void *malloc_private,
+					   const char **p_error_message);
 #undef __EXTERN
 
 #endif		/* !__CUDACC__ */

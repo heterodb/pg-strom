@@ -88,8 +88,9 @@ __xpuConnectAttachCommand(void *__priv, XpuCommand *xcmd)
 			 * tasks with different repeat-id.
 			 */
 			control = pg_atomic_fetch_sub_u64(conn->scan_repeat_sync_control, 1);
-			assert((control >> 32) == xcmd->u.results.scan_repeat_id &&
+			assert((control >> 32) == xcmd->repeat_id &&
 				   (control & 0xffffffffUL) > 0);
+			SetLatch(MyLatch);
 		}
 		else
 		{
@@ -194,23 +195,15 @@ __syncScanRepeatIdChangingPoint(XpuConnection *conn, const XpuCommand *xcmd)
 	int32_t		repeat_id;
 	uint64_t	control;
 
-	switch (xcmd->tag)
-	{
-		case XpuCommandTag__OpenSession:
-			repeat_id = 0;
-			break;
-		case XpuCommandTag__XpuTaskExec:
-		case XpuCommandTag__XpuTaskExecGpuCache:
-			repeat_id = xcmd->u.task.scan_repeat_id;
-			break;
-		case XpuCommandTag__XpuTaskFinal:
-			repeat_id = INT_MAX;
-			break;
-		default:
-			elog(ERROR, "unexpected XpuCommand tag: %d", xcmd->tag);
-	}
-
 	control = pg_atomic_read_u64(conn->scan_repeat_sync_control);
+	/*
+	 * MEMO: When OpenSession is processed, other worker process already reached
+	 * to the of the relation once and scan_repeat_sync_control may be non-zero.
+	 */
+	if (xcmd->tag == XpuCommandTag__OpenSession)
+		((XpuCommand *)xcmd)->repeat_id = (control >> 32);
+	repeat_id = xcmd->repeat_id;
+
 	for (;;)
 	{
 		/*
@@ -227,7 +220,10 @@ __syncScanRepeatIdChangingPoint(XpuConnection *conn, const XpuCommand *xcmd)
 			if (pg_atomic_compare_exchange_u64(conn->scan_repeat_sync_control,
 											   &control,
 											   control + 1))
+			{
+				SetLatch(MyLatch);
 				break;
+			}
 		}
 		else if ((control & 0xffffffffUL) == 0)
 		{
@@ -236,6 +232,7 @@ __syncScanRepeatIdChangingPoint(XpuConnection *conn, const XpuCommand *xcmd)
 											   &control,
 											   ((uint64_t)repeat_id << 32) | 1UL))
 			{
+				SetLatch(MyLatch);
 				elog(DEBUG1, "executor: scan repeat-id was switched %u -> %u",
 					 (int32_t)(control>>32), repeat_id);
 				break;
@@ -263,7 +260,7 @@ __syncScanRepeatIdChangingPoint(XpuConnection *conn, const XpuCommand *xcmd)
 /*
  * xpuClientSendCommand
  */
-void
+static void
 xpuClientSendCommand(XpuConnection *conn, const XpuCommand *xcmd)
 {
 	int			sockfd = conn->sockfd;
@@ -344,7 +341,7 @@ xpuClientSendCommandIOV(XpuConnection *conn,
 /*
  * xpuClientPutResponse
  */
-void
+static void
 xpuClientPutResponse(XpuCommand *xcmd)
 {
 	XpuConnection  *conn = xcmd->priv;
@@ -1590,9 +1587,6 @@ pgstromCreateTaskState(CustomScan *cscan,
 	Assert(pp_info->num_rels == num_rels);
 	pts->num_scan_repeats = 1;
 	pts->num_rels = num_rels;
-	pts->curr_tbm = palloc0(offsetof(TBMIterateResult, offsets) +
-							sizeof(OffsetNumber) * MaxHeapTuplesPerPage);
-	pts->curr_repeat_id = -1;
 
 	return (Node *)pts;
 }
@@ -1967,7 +1961,6 @@ __pgstromExecTaskOpenConnection(pgstromTaskState *pts)
 		 * length of BITMAPLEN(kds->ncols) and may expand the starting
 		 * point of t_hoff for all the tuples.
 		 */
-		kds_dst_tupdesc = CreateTupleDescCopy(pts->css.ss.ps.scandesc);
 		foreach (lc, cscan->custom_scan_tlist)
 		{
 			TargetEntry *tle = lfirst(lc);
@@ -1975,8 +1968,8 @@ __pgstromExecTaskOpenConnection(pgstromTaskState *pts)
 			if (!tle->resjunk)
 				nvalids = tle->resno;
 		}
-		Assert(nvalids <= kds_dst_tupdesc->natts);
-		kds_dst_tupdesc->natts = nvalids;
+		Assert(nvalids <= pts->css.ss.ps.scandesc->natts);
+		kds_dst_tupdesc = CreateTupleDescTruncatedCopy(pts->css.ss.ps.scandesc, nvalids);
 	}
 	/* build the session information */
 	session = pgstromBuildSessionInfo(pts, inner_handle, kds_dst_tupdesc);
@@ -2154,6 +2147,8 @@ pgstromExecEndTaskState(CustomScanState *node)
 	}
 	foreach (lc, pts->css.custom_ps)
 		ExecEndNode((PlanState *) lfirst(lc));
+	/* for performance investigation */
+	pgstrom_print_perf_counter();
 }
 
 /*
@@ -2996,8 +2991,8 @@ pgstromExplainTaskState(CustomScanState *node,
 	 */
 	if (pts->arrow_state)
 	{
-		pgstromArrowFdwExplain(pts->arrow_state,
-							   pts->css.ss.ss_currentRelation,
+		pgstromArrowFdwExplain(&pts->css.ss,
+							   pts->arrow_state,
 							   es, dcontext);
 		pgstromGpuDirectExplain(pts, es, dcontext);
 	}

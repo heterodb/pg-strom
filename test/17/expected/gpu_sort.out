@@ -64,20 +64,18 @@ WHERE rank < 4;
    ->  Gather
          Output: customer.c_region, customer.c_nation, customer.c_city, (pgstrom.fsum_numeric((pgstrom.psum(lineorder.lo_revenue))))
          Workers Planned: 2
-         ->  Result
+         ->  Parallel Custom Scan (GpuPreAgg) on public.lineorder
                Output: customer.c_region, customer.c_nation, customer.c_city, pgstrom.fsum_numeric((pgstrom.psum(lineorder.lo_revenue)))
-               ->  Parallel Custom Scan (GpuPreAgg) on public.lineorder
-                     Output: (pgstrom.psum(lineorder.lo_revenue)), customer.c_region, customer.c_nation, customer.c_city
-                     GPU Projection: pgstrom.psum(lineorder.lo_revenue), customer.c_region, customer.c_nation, customer.c_city
-                     GPU Scan Quals: (lineorder.lo_shipmode = ANY ('{RAIL,SHIP}'::bpchar[]))
-                     GPU Join Quals [1]: (lineorder.lo_custkey = customer.c_custkey)
-                     GPU Outer Hash [1]: lineorder.lo_custkey
-                     GPU Inner Hash [1]: customer.c_custkey
-                     GPU Group Key: customer.c_region, customer.c_nation, customer.c_city
-                     GPU-Sort keys: customer.c_region, customer.c_nation, pgstrom.fsum_numeric((pgstrom.psum(lineorder.lo_revenue)))
-                     Window-Rank Filter: rank() over(PARTITION BY customer.c_region, customer.c_nation ORDER BY pgstrom.fsum_numeric((pgstrom.psum(lineorder.lo_revenue)))) < 4
-                     ->  Parallel Seq Scan on public.customer
-                           Output: customer.c_region, customer.c_nation, customer.c_city, customer.c_custkey
+               GPU Projection: pgstrom.psum(lineorder.lo_revenue), customer.c_region, customer.c_nation, customer.c_city
+               GPU Scan Quals: (lineorder.lo_shipmode = ANY ('{RAIL,SHIP}'::bpchar[]))
+               GPU Join Quals [1]: (lineorder.lo_custkey = customer.c_custkey)
+               GPU Outer Hash [1]: lineorder.lo_custkey
+               GPU Inner Hash [1]: customer.c_custkey
+               GPU Group Key: customer.c_region, customer.c_nation, customer.c_city
+               GPU-Sort keys: customer.c_region ASC NULLS LAST, customer.c_nation ASC NULLS LAST, pgstrom.fsum_numeric((pgstrom.psum(lineorder.lo_revenue))) ASC NULLS LAST
+               Window-Rank Filter: rank() over(PARTITION BY customer.c_region, customer.c_nation ORDER BY pgstrom.fsum_numeric((pgstrom.psum(lineorder.lo_revenue)))) < 4
+               ->  Parallel Seq Scan on public.customer
+                     Output: customer.c_region, customer.c_nation, customer.c_city, customer.c_custkey
 
 SELECT * INTO gpusort_result1 FROM (
     SELECT c_region, c_nation, c_city, SUM(lo_revenue) lo_rev,
@@ -114,18 +112,16 @@ WHERE dense_rank <= 4;
          ->  Gather
                Output: customer.c_region, customer.c_nation, customer.c_city, (pgstrom.favg_numeric((pgstrom.pavg(lineorder.lo_revenue))))
                Workers Planned: 2
-               ->  Result
+               ->  Parallel Custom Scan (GpuPreAgg) on public.lineorder
                      Output: customer.c_region, customer.c_nation, customer.c_city, pgstrom.favg_numeric((pgstrom.pavg(lineorder.lo_revenue)))
-                     ->  Parallel Custom Scan (GpuPreAgg) on public.lineorder
-                           Output: (pgstrom.pavg(lineorder.lo_revenue)), customer.c_region, customer.c_nation, customer.c_city
-                           GPU Projection: pgstrom.pavg(lineorder.lo_revenue), customer.c_region, customer.c_nation, customer.c_city
-                           GPU Scan Quals: (lineorder.lo_shipmode = ANY ('{RAIL,SHIP}'::bpchar[]))
-                           GPU Join Quals [1]: (lineorder.lo_custkey = customer.c_custkey)
-                           GPU Outer Hash [1]: lineorder.lo_custkey
-                           GPU Inner Hash [1]: customer.c_custkey
-                           GPU Group Key: customer.c_region, customer.c_nation, customer.c_city
-                           ->  Parallel Seq Scan on public.customer
-                                 Output: customer.c_region, customer.c_nation, customer.c_city, customer.c_custkey
+                     GPU Projection: pgstrom.pavg(lineorder.lo_revenue), customer.c_region, customer.c_nation, customer.c_city
+                     GPU Scan Quals: (lineorder.lo_shipmode = ANY ('{RAIL,SHIP}'::bpchar[]))
+                     GPU Join Quals [1]: (lineorder.lo_custkey = customer.c_custkey)
+                     GPU Outer Hash [1]: lineorder.lo_custkey
+                     GPU Inner Hash [1]: customer.c_custkey
+                     GPU Group Key: customer.c_region, customer.c_nation, customer.c_city
+                     ->  Parallel Seq Scan on public.customer
+                           Output: customer.c_region, customer.c_nation, customer.c_city, customer.c_custkey
 
 SELECT * INTO gpusort_result2 FROM (
     SELECT c_region, c_nation, c_city, AVG(lo_revenue) lo_rev,
@@ -159,20 +155,18 @@ WHERE row_number <= 4;
    ->  Gather
          Output: customer.c_region, customer.c_nation, customer.c_city, (pgstrom.fmax_num((pgstrom.pmax((lineorder.lo_revenue)::double precision))))
          Workers Planned: 2
-         ->  Result
+         ->  Parallel Custom Scan (GpuPreAgg) on public.lineorder
                Output: customer.c_region, customer.c_nation, customer.c_city, pgstrom.fmax_num((pgstrom.pmax((lineorder.lo_revenue)::double precision)))
-               ->  Parallel Custom Scan (GpuPreAgg) on public.lineorder
-                     Output: (pgstrom.pmax((lineorder.lo_revenue)::double precision)), customer.c_region, customer.c_nation, customer.c_city
-                     GPU Projection: pgstrom.pmax((lineorder.lo_revenue)::double precision), customer.c_region, customer.c_nation, customer.c_city
-                     GPU Scan Quals: (lineorder.lo_shipmode = ANY ('{RAIL,SHIP}'::bpchar[]))
-                     GPU Join Quals [1]: (lineorder.lo_custkey = customer.c_custkey)
-                     GPU Outer Hash [1]: lineorder.lo_custkey
-                     GPU Inner Hash [1]: customer.c_custkey
-                     GPU Group Key: customer.c_region, customer.c_nation, customer.c_city
-                     GPU-Sort keys: customer.c_region, customer.c_nation, pgstrom.fmax_num((pgstrom.pmax((lineorder.lo_revenue)::double precision)))
-                     Window-Rank Filter: row_number() over(PARTITION BY customer.c_region, customer.c_nation ORDER BY pgstrom.fmax_num((pgstrom.pmax((lineorder.lo_revenue)::double precision)))) < 5
-                     ->  Parallel Seq Scan on public.customer
-                           Output: customer.c_region, customer.c_nation, customer.c_city, customer.c_custkey
+               GPU Projection: pgstrom.pmax((lineorder.lo_revenue)::double precision), customer.c_region, customer.c_nation, customer.c_city
+               GPU Scan Quals: (lineorder.lo_shipmode = ANY ('{RAIL,SHIP}'::bpchar[]))
+               GPU Join Quals [1]: (lineorder.lo_custkey = customer.c_custkey)
+               GPU Outer Hash [1]: lineorder.lo_custkey
+               GPU Inner Hash [1]: customer.c_custkey
+               GPU Group Key: customer.c_region, customer.c_nation, customer.c_city
+               GPU-Sort keys: customer.c_region ASC NULLS LAST, customer.c_nation ASC NULLS LAST, pgstrom.fmax_num((pgstrom.pmax((lineorder.lo_revenue)::double precision))) ASC NULLS LAST
+               Window-Rank Filter: row_number() over(PARTITION BY customer.c_region, customer.c_nation ORDER BY pgstrom.fmax_num((pgstrom.pmax((lineorder.lo_revenue)::double precision)))) < 5
+               ->  Parallel Seq Scan on public.customer
+                     Output: customer.c_region, customer.c_nation, customer.c_city, customer.c_custkey
 
 SELECT * INTO gpusort_result3 FROM (
     SELECT c_region, c_nation, c_city, MAX(lo_revenue) lo_rev,

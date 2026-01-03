@@ -410,7 +410,8 @@ __execFallbackCpuJoinOneDepth(pgstromTaskState *pts,
 		}
 		mtup = heap_form_minimal_tuple(scan_slot->tts_tupleDescriptor,
 									   scan_slot->tts_values,
-									   scan_slot->tts_isnull);
+									   scan_slot->tts_isnull,
+									   0);
 		pgstromStoreFallbackTuple(pts, mtup);
 		pfree(mtup);
 	}

@@ -11,9 +11,10 @@ module Fluent
       desc "The Path of the arrow file"
       config_param :path, :string
       config_param :schema_defs, :string
+      config_param :format, :string, default: nil
+      config_param :compression, :string, default: nil
       config_param :ts_column, :string, default: nil
       config_param :tag_column, :string, default: nil
-      config_param :filesize_threshold, :integer, default: 10000
 
       config_section :buffer do
         config_set_default :@type, 'memory'
@@ -34,7 +35,10 @@ module Fluent
         compat_parameters_convert(conf, :buffer, :inject, default_chunk_key: "time")
         super
 
-        @af=ArrowFileWrite.new(@path,@schema_defs,{"ts_column" => @ts_column,"tag_column" => @tag_column,"filesize_threshold" => @filesize_threshold})
+        @af=ArrowFileWrite.new(@path,@schema_defs,{"format"      => @format,
+                                                   "compression" => @compression,
+                                                   "ts_column"   => @ts_column,
+                                                   "tag_column"  => @tag_column})
       end
 
       def format(tag,time,record)

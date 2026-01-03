@@ -40,6 +40,7 @@
 #include "catalog/pg_am.h"
 #include "catalog/pg_amop.h"
 #include "catalog/pg_cast.h"
+#include "catalog/pg_collation_d.h"
 #include "catalog/pg_database.h"
 #include "catalog/pg_depend.h"
 #include "catalog/pg_foreign_table.h"
@@ -57,6 +58,9 @@
 #include "commands/dbcommands.h"
 #include "commands/defrem.h"
 #include "commands/event_trigger.h"
+#if PG_VERSION_NUM >= 180000
+#include "commands/explain_format.h"
+#endif
 #include "commands/extension.h"
 #include "commands/tablecmds.h"
 #include "commands/tablespace.h"
@@ -511,8 +515,6 @@ struct pgstromTaskState
 	List			   *fallback_load_dst;	/* dest resno of fallback-slot */
 	bytea			   *kern_fallback_desc;
 	/* request command buffer (+ status for table scan) */
-	TBMIterateResult   *curr_tbm;
-	int32_t				curr_repeat_id;		/* for KDS_FORMAT_ROW */
 	Buffer				curr_vm_buffer;		/* for visibility-map */
 	uint64_t			curr_block_num;		/* for KDS_FORMAT_BLOCK */
 	uint64_t			curr_block_tail;	/* for KDS_FORMAT_BLOCK */
@@ -694,9 +696,6 @@ extern size_t	setup_kern_data_store(kern_data_store *kds,
 extern XpuCommand *pgstromRelScanChunkDirect(pgstromTaskState *pts,
 											 struct iovec *xcmd_iov,
 											 int *xcmd_iovcnt);
-extern XpuCommand *pgstromRelScanChunkNormal(pgstromTaskState *pts,
-											 struct iovec *xcmd_iov,
-											 int *xcmd_iovcnt);
 extern void		pgstrom_init_relscan(void);
 
 /*
@@ -712,8 +711,6 @@ xpuConnectReceiveCommands(pgsocket sockfd,
 						  void *priv,
 						  const char *error_label);
 extern void		xpuClientCloseSession(XpuConnection *conn);
-extern void		xpuClientSendCommand(XpuConnection *conn, const XpuCommand *xcmd);
-extern void		xpuClientPutResponse(XpuCommand *xcmd);
 extern const XpuCommand *pgstromBuildSessionInfo(pgstromTaskState *pts,
 												 uint32_t join_inner_handle,
 												 TupleDesc tdesc_final);
@@ -860,6 +857,10 @@ extern bool		gpuServiceGoingTerminate(void);
 extern void		gpuservBgWorkerMain(Datum arg);
 extern void		pgstrom_init_gpu_service(void);
 
+extern void		pgstrom_inc_perf_counter(int num);
+extern void		pgstrom_add_perf_counter(int num, const struct timeval *tv_base);
+extern void		pgstrom_print_perf_counter(void);
+
 /*
  * gpu_cache.c
  */
@@ -1003,8 +1004,8 @@ extern void		pgstromArrowFdwInitDSM(ArrowFdwState *arrow_state,
 extern void		pgstromArrowFdwAttachDSM(ArrowFdwState *arrow_state,
 										 pgstromSharedState *ps_state);
 extern void		pgstromArrowFdwShutdown(ArrowFdwState *arrow_state);
-extern void		pgstromArrowFdwExplain(ArrowFdwState *arrow_state,
-									   Relation frel,
+extern void		pgstromArrowFdwExplain(ScanState *ss,
+									   ArrowFdwState *arrow_state,
 									   ExplainState *es,
 									   List *dcontext);
 extern bool		kds_arrow_fetch_tuple(TupleTableSlot *slot,
@@ -1102,6 +1103,20 @@ extern Relids	fixup_relids_by_partition_leaf(PlannerInfo *root,
 extern int		__appendBinaryStringInfo(StringInfo buf,
 										 const void *data, int datalen);
 extern int		__appendZeroStringInfo(StringInfo buf, int nbytes);
+typedef struct LargeStringInfoData
+{
+	char	   *data;
+	size_t		len;
+	size_t		maxlen;
+} LargeStringInfoData;
+typedef LargeStringInfoData *LargeStringInfo;
+extern void		initLargeStringInfo(LargeStringInfo buf);
+extern void		resetLargeStringInfo(LargeStringInfo buf);
+extern size_t	appendBinaryLargeStringInfo(LargeStringInfo buf,
+											const void *data, size_t len);
+extern size_t	appendStringLargeStringInfo(LargeStringInfo buf, const char *str);
+extern size_t	appendZeroLargeStringInfo(LargeStringInfo buf, size_t nbytes);
+extern void		enlargeLargeStringInfo(LargeStringInfo buf, size_t needed);
 extern char	   *get_type_name(Oid type_oid, bool missing_ok);
 extern Oid		get_type_namespace(Oid type_oid);
 extern char	   *get_type_extension_name(Oid type_oid);

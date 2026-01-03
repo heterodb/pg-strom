@@ -122,6 +122,12 @@ typedef struct
 #define MAX_ASYNC_TASKS_BITS	10
 #define MAX_ASYNC_TASKS_MASK	((1UL<<MAX_ASYNC_TASKS_BITS)-1)
 	pg_atomic_uint64	max_async_tasks;
+	/*
+	 * A common debug counter infrastructure
+	 */
+#define MAX_DEBUG_PERF_COUNTER	12
+	pg_atomic_uint32	debug_perf_mask;
+	pg_atomic_uint64	debug_perf_counter[MAX_DEBUG_PERF_COUNTER];
 } gpuServSharedState;
 
 /*
@@ -134,7 +140,6 @@ static __thread gpuContext		*GpuWorkerCurrentContext = NULL;
 #define MY_STREAM_PER_THREAD	CU_STREAM_PER_THREAD
 #define MY_MEMLOCATION_PER_THREAD (GpuWorkerCurrentContext->cuda_mlocation)
 static CUmemLocation		host_mlocation = {CU_DEVICE_CPU, CU_MEM_LOCATION_TYPE_HOST};
-static CUmemLocation		invalid_mlocation = {-1,CU_MEM_LOCATION_TYPE_INVALID};
 static volatile int			gpuserv_bgworker_got_signal = 0;
 static gpuContext		   *gpuserv_gpucontext_array;
 static dlist_head			gpuserv_gpucontext_list;
@@ -250,6 +255,58 @@ gpuserv_ready_accept(void)
 {
 	return (gpuserv_shared_state &&
 			gpuserv_shared_state->gpuserv_ready_accept);
+}
+
+/*
+ * pgstrom_inc_perf_counter
+ */
+void
+pgstrom_inc_perf_counter(int num)
+{
+	if (gpuserv_shared_state && num >= 0 && num < MAX_DEBUG_PERF_COUNTER)
+	{
+		pg_atomic_add_fetch_u64(&gpuserv_shared_state->debug_perf_counter[num], 1);
+		pg_atomic_fetch_or_u32(&gpuserv_shared_state->debug_perf_mask, (1U<<num));
+	}
+}
+
+/*
+ * pgstrom_add_perf_counter
+ */
+void
+pgstrom_add_perf_counter(int num, const struct timeval *tv_base)
+{
+	if (gpuserv_shared_state && num >= 0 && num < MAX_DEBUG_PERF_COUNTER)
+	{
+		struct timeval	tv_curr;
+		uint64_t		tval;
+
+		gettimeofday(&tv_curr, NULL);
+		tval = ((uint64_t)(tv_curr.tv_sec  - tv_base->tv_sec) * 1000000L +
+				(uint64_t)(tv_curr.tv_usec - tv_base->tv_usec));
+		pg_atomic_add_fetch_u64(&gpuserv_shared_state->debug_perf_counter[num], tval);
+		pg_atomic_fetch_or_u32(&gpuserv_shared_state->debug_perf_mask, (1U<<num));
+	}
+}
+
+void
+pgstrom_print_perf_counter(void)
+{
+	uint32_t	mask;
+
+	if (gpuserv_shared_state &&
+		(mask = pg_atomic_exchange_u32(&gpuserv_shared_state->debug_perf_mask, 0)) != 0)
+	{
+		for (int i=0; i < MAX_DEBUG_PERF_COUNTER; i++)
+		{
+			if ((mask & (1U<<i)) != 0)
+			{
+				uint64_t	dval = pg_atomic_exchange_u64(&gpuserv_shared_state->debug_perf_counter[i], 0);
+
+				elog(INFO, "debug counter[%d] = %lu", i, dval);
+			}
+		}
+	}
 }
 
 /*
@@ -2059,17 +2116,40 @@ __setupGpuJoinPinnedInnerBufferReconstruct(gpuClient *gclient,
 		gq_src->gpus[i].m_kds_final = 0UL;
 		gq_src->gpus[i].m_kds_final_length = 0UL;
 	}
-	/* assign read-only attribute; note that CU_MEM_ADVISE_SET_READ_MOSTLY ignores
-	 * CUmemLocation argument. */
+	/* assign read-only attribute */
 	rc = cuMemAdvise(m_kds_in, kds_head->length,
 					 CU_MEM_ADVISE_SET_READ_MOSTLY,
-					 invalid_mlocation);
+					 MY_MEMLOCATION_PER_THREAD);
 	if (rc != CUDA_SUCCESS)
 	{
 		gpuClientELog(gclient, "failed on cuMemAdvise(SET_READ_MOSTLY): %s",
 					  cuStrError(rc));
-		return false;
+		goto error;
 	}
+#if 1
+	/* confirmation */
+	else
+	{
+		int32_t		mem_attr;
+
+		rc = cuMemRangeGetAttribute(&mem_attr, sizeof(int32_t),
+									CU_MEM_RANGE_ATTRIBUTE_READ_MOSTLY,
+									m_kds_in, kds_head->length);
+		if (rc != CUDA_SUCCESS)
+		{
+			gpuClientELog(gclient, "failed on cuMemRangeGetAttribute(SET_READ_MOSTLY): %s",
+						  cuStrError(rc));
+			goto error;
+		}
+		if (mem_attr == 0)
+		{
+			gpuClientELog(gclient, "cuMemAdvise didn't change memory policy at %p-%p",
+						  (char *)m_kds_in,
+						  (char *)m_kds_in + kds_head->length);
+			goto error;
+		}
+	}
+#endif
 	gpuContextSwitchTo(gcontext_saved);
 	gettimeofday(&tv2, NULL);
 	m_kmrels->chunks[depth-1].kds_in = (kern_data_store *)m_kds_in;
@@ -2243,6 +2323,7 @@ __setupGpuQueryJoinInnerBuffer(gpuClient *gclient,
 	struct stat	stat_buf;
 	char		namebuf[100];
 	size_t		mmap_sz = 0;
+	size_t		ro_size;
 	struct timeval tv1, tv2;
 
 	if (session->join_inner_handle == 0)
@@ -2331,15 +2412,46 @@ __setupGpuQueryJoinInnerBuffer(gpuClient *gclient,
 	 * Note that CU_MEM_ADVISE_SET_READ_MOSTLY ignores the CUmemLocation.
 	 */
 	assert(h_kmrels->ojmap_sz < h_kmrels->length);
-	rc = cuMemAdvise((CUdeviceptr)m_kmrels,
-					 h_kmrels->length - h_kmrels->ojmap_sz,
+	ro_size = h_kmrels->length - h_kmrels->ojmap_sz;
+	rc = cuMemAdvise((CUdeviceptr)m_kmrels, ro_size,
 					 CU_MEM_ADVISE_SET_READ_MOSTLY,
-					 invalid_mlocation);
+					 MY_MEMLOCATION_PER_THREAD);
 	if (rc != CUDA_SUCCESS)
-		__gsInfo("failed on cuMemAdvise (%p-%p; CU_MEM_ADVISE_SET_READ_MOSTLY): %s",
-				 (char *)m_kmrels,
-				 (char *)m_kmrels + (h_kmrels->length - h_kmrels->ojmap_sz),
-				 cuStrError(rc));
+	{
+		gpuClientELog(gclient, "failed on cuMemAdvise (%p-%p; CU_MEM_ADVISE_SET_READ_MOSTLY): %s",
+					  (char *)m_kmrels,
+					  (char *)m_kmrels + ro_size,
+					  cuStrError(rc));
+		goto error;
+	}
+#if 1
+	/*
+	 * confirmation: because cuMemAdvise() of CUDA v13 returned success status
+	 * even if memory policy was not changed when CUmemLocation is not valie
+	 * (although CU_MEM_ADVISE_SET_READ_MOSTLY ignores CUmemLocation!!).
+	 */
+	else
+	{
+		int32_t	mem_attr;
+
+		rc = cuMemRangeGetAttribute(&mem_attr, sizeof(int32_t),
+									CU_MEM_RANGE_ATTRIBUTE_READ_MOSTLY,
+									(CUdeviceptr)m_kmrels, ro_size);
+		if (rc != CUDA_SUCCESS)
+		{
+			gpuClientELog(gclient, "failed on cuMemRangeGetAttribute: %s",
+						  cuStrError(rc));
+			goto error;
+		}
+		if (mem_attr == 0)
+		{
+			gpuClientELog(gclient, "cuMemAdvise didn't change memory policy at %p-%p",
+						  (char *)m_kmrels,
+						  (char *)m_kmrels + ro_size);
+			goto error;
+		}
+	}
+#endif
 	/* OK */
 	close(fdesc);
 	gettimeofday(&tv2, NULL);
@@ -2866,9 +2978,9 @@ gpuClientWriteBackPartial(gpuClient  *gclient,
 	memset(&resp, 0, sizeof(resp));
 	resp.magic  = XpuCommandMagicNumber;
 	resp.tag    = XpuCommandTag__SuccessHalfWay;
+	resp.repeat_id = -1;		/* shall not be checked */
 	resp.u.results.chunks_nitems = 1;
 	resp.u.results.chunks_offset = resp_sz;
-	resp.u.results.scan_repeat_id = -1;		/* should not be checked */
 
 	iov = &iov_array[iovcnt++];
 	iov->iov_base = &resp;
@@ -2893,7 +3005,7 @@ static void
 gpuClientWriteBackNormal(gpuClient  *gclient,
 						 kern_exec_results *kern_stats,
 						 kern_data_store *kds,
-						 int32_t scan_repeat_id)
+						 int32_t orig_repeat_id)
 {
 	struct iovec	iov_array[10];
 	struct iovec   *iov;
@@ -2907,9 +3019,9 @@ gpuClientWriteBackNormal(gpuClient  *gclient,
 	memset(resp, 0, resp_sz);
 	resp->magic  = XpuCommandMagicNumber;
 	resp->tag    = XpuCommandTag__Success;
+	resp->repeat_id = orig_repeat_id;
 	memcpy(&resp->u.results, kern_stats,
 		   offsetof(kern_exec_results, stats[kern_stats->num_rels]));
-	resp->u.results.scan_repeat_id = scan_repeat_id;
 	/* sanity checks */
 	assert(resp->u.results.chunks_offset == 0 &&
 		   resp->u.results.chunks_nitems == 0 &&
@@ -3543,13 +3655,18 @@ gpuservLoadKdsParquet(gpuClient *gclient,
 {
 	gpuMemChunk *m_chunk;
 	kern_data_store *kds;
+	const char	*error_message;
 
 	kds = parquetReadOneRowGroup(pathname,
 								 kds_head,
 								 __loadKdsParquetMallocCallback,
-								 &m_chunk);
+								 &m_chunk,
+								 &error_message);
 	if (!kds)
+	{
+		__gsLog("%s", error_message);
 		return NULL;
+	}
 	Assert(m_chunk->m_devptr == (CUdeviceptr)kds);
 	return m_chunk;
 }
@@ -3801,7 +3918,7 @@ again:
 				rc = cuMemAdvise((CUdeviceptr)kds_in,
 								 kds_in->length,
 								 CU_MEM_ADVISE_SET_READ_MOSTLY,
-								 invalid_mlocation);
+								 MY_MEMLOCATION_PER_THREAD);
 				if (rc != CUDA_SUCCESS)
 				{
 					pthreadRWLockUnlock(&gq_buf->m_kds_rwlock);
@@ -3809,6 +3926,33 @@ again:
 								  cuStrError(rc));
 					return -1;
 				}
+#if 1
+				/* confirmation */
+				else
+				{
+					int32_t		mem_attr;
+
+					rc = cuMemRangeGetAttribute(&mem_attr, sizeof(int32_t),
+												CU_MEM_RANGE_ATTRIBUTE_READ_MOSTLY,
+												(CUdeviceptr)kds_in,
+												kds_in->length);
+					if (rc != CUDA_SUCCESS)
+					{
+						pthreadRWLockUnlock(&gq_buf->m_kds_rwlock);
+						gpuClientELog(gclient, "failed on cuMemRangeGetAttribute(SET_READ_MOSTLY): %s",
+									  cuStrError(rc));
+						return -1;
+					}
+					if (mem_attr == 0)
+					{
+						pthreadRWLockUnlock(&gq_buf->m_kds_rwlock);
+						gpuClientELog(gclient, "cuMemAdvise didn't change memory policy at %p-%p",
+									  (char *)kds_in,
+									  (char *)kds_in + kds_in->length);
+						return -1;
+					}
+				}
+#endif
 			}
 		}
 		__gsInfo("GPU-Service: repeat-id changed %u -> %u\n",
@@ -4249,7 +4393,7 @@ gpuservHandleGpuTaskExec(gpuContext *gcontext,
 		kbuf_parts = KERN_MULTIRELS_PARTITION_DESC((kern_multirels *)m_kmrels, -1);
 		if (kbuf_parts)
 		{
-			int32_t		repeat_id = xcmd->u.task.scan_repeat_id;
+			int32_t		repeat_id = xcmd->repeat_id;
 
 			part_gcontexts = alloca(sizeof(gpuContext *) * kbuf_parts->hash_divisor);
 			part_reminders = alloca(sizeof(uint32_t) * kbuf_parts->hash_divisor);
@@ -4332,8 +4476,7 @@ gpuservHandleGpuTaskExec(gpuContext *gcontext,
 								 * so no memory leak problems.
 								 */
 		}
-		gpuClientWriteBackNormal(gclient, kern_stats, kds_dst,
-								 xcmd->u.task.scan_repeat_id);
+		gpuClientWriteBackNormal(gclient, kern_stats, kds_dst, xcmd->repeat_id);
 	}
 bailout:
 	THREAD_GPU_CONTEXT_VALIDATION_CHECK(gcontext);
@@ -5757,9 +5900,9 @@ gpuservHandleGpuTaskFinal(gpuContext *gcontext,
 	memset(resp, 0, resp_sz);
 	resp->magic = XpuCommandMagicNumber;
 	resp->tag   = XpuCommandTag__Success;
+	resp->repeat_id = xcmd->repeat_id;	/* repeat-id of the final command */
 	resp->u.results.chunks_nitems = 0;
 	resp->u.results.chunks_offset = resp_sz;
-	resp->u.results.scan_repeat_id = INT_MAX;	/* repeat-id of the final command */
 	resp->u.results.num_rels = num_rels;
 
 	iov_array = alloca(sizeof(struct iovec) * iovmax);
@@ -5773,7 +5916,9 @@ gpuservHandleGpuTaskFinal(gpuContext *gcontext,
 	if (SESSION_SUPPORTS_CPU_FALLBACK(gclient->h_session))
 	{
 		kern_multirels *d_kmrels = (kern_multirels *)gq_buf->m_kmrels;
-
+		/* sanity checks */
+		assert((gclient->xpu_task_flags & (DEVTASK__SELECT_INTO_DIRECT |
+										   DEVTASK__MERGE_FINAL_BUFFER)) == 0);
 		/* Merge RIGHT-OUTER-JOIN Map to the shared host buffer */
 		if (h_kmrels && d_kmrels)
 		{
@@ -5833,9 +5978,18 @@ gpuservHandleGpuTaskFinal(gpuContext *gcontext,
 	}
 
 	/*
-	 * Is the GpuPreAgg final buffer written back?
+	 * Is the GPU-PreAgg final buffer written back?
+	 *
+	 * If CPU-Fallback is enabled, it always write back the final buffer, and
+	 * runs CPU-based Agg node.
+	 * In addition, no-group aggregation always has CPU-based Agg-node to handle
+	 * empty result set. So, it must be written back.
+	 *
+	 * TODO: more simple conditions are needed.
 	 */
-	if (SESSION_SUPPORTS_CPU_FALLBACK(gclient->h_session))
+	if (SESSION_SUPPORTS_CPU_FALLBACK(gclient->h_session) ||
+		(gclient->xpu_task_flags & (DEVTASK__PREAGG |
+									DEVTASK__MERGE_FINAL_BUFFER)) == DEVTASK__PREAGG)
 	{
 		for (int __dindex=0; __dindex < numGpuDevAttrs; __dindex++)
 		{

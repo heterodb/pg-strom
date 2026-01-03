@@ -521,6 +521,7 @@ process_one_token(std::shared_ptr<arrow::Array> carray, int64_t rowid, bool in_q
 		case Type::TIMESTAMP: {
 			auto	arr = std::static_pointer_cast<arrow::TimestampArray>(carray);
 			auto	ts_type = std::static_pointer_cast<arrow::TimestampType>(arr->type());
+			auto	ts_tz = ts_type->timezone();
 			time_t	tval = arr->Value(rowid);
 			int		subsec;
 			struct tm __tm;
@@ -528,56 +529,59 @@ process_one_token(std::shared_ptr<arrow::Array> carray, int64_t rowid, bool in_q
 			switch (ts_type->unit())
 			{
 				case TimeUnit::SECOND:
-					gmtime_r(&tval, &__tm);
-					printf("%04d-%02d-%02d %02d:%02d:%02d",
-						   __tm.tm_year + 1900,
-						   __tm.tm_mon + 1,
-						   __tm.tm_mday,
-						   __tm.tm_hour,
-						   __tm.tm_min,
-						   __tm.tm_sec);
+					subsec = 0;
 					break;
 				case TimeUnit::MILLI:
 					subsec = tval % 1000;
-					tval /= 1000;
-					gmtime_r(&tval, &__tm);
-					printf("%04d-%02d-%02d %02d:%02d:%02d.%03u",
-						   __tm.tm_year + 1900,
-						   __tm.tm_mon + 1,
-						   __tm.tm_mday,
-						   __tm.tm_hour,
-						   __tm.tm_min,
-						   __tm.tm_sec,
-						   subsec);
+                    tval /= 1000;
 					break;
 				case TimeUnit::MICRO:
 					subsec = tval % 1000000;
 					tval /= 1000000;
-					gmtime_r(&tval, &__tm);
-					printf("%04d-%02d-%02d %02d:%02d:%02d.%06u",
-						   __tm.tm_year + 1900,
-						   __tm.tm_mon + 1,
-						   __tm.tm_mday,
-						   __tm.tm_hour,
-						   __tm.tm_min,
-						   __tm.tm_sec,
-						   subsec);
 					break;
 				case TimeUnit::NANO:
 					subsec = tval % 1000000000;
 					tval /= 1000000000;
-					gmtime_r(&tval, &__tm);
-					printf("%04d-%02d-%02d %02d:%02d:%02d.%09u",
-						   __tm.tm_year + 1900,
-						   __tm.tm_mon + 1,
-						   __tm.tm_mday,
-						   __tm.tm_hour,
-						   __tm.tm_min,
-						   __tm.tm_sec,
-						   subsec);
 					break;
 				default:
-					Elog("unknown Arrow::Timestamp unit");
+                    Elog("unknown Arrow::Timestamp unit");
+			}
+			/* adjust timestamp by timezone, if valid */
+			if (ts_tz.empty())
+				 gmtime_r(&tval, &__tm);
+			else
+			{
+				static std::string	last_tz;
+
+				if (last_tz.empty() || ts_tz != last_tz)
+				{
+					if (setenv("TZ", ts_tz.c_str(), 1) != 0)
+						Elog("unable set 'TZ' to '%s'", ts_tz.c_str());
+					tzset();
+					last_tz = ts_tz;
+				}
+				localtime_r(&tval, &__tm);
+			}
+			printf("%04d-%02d-%02d %02d:%02d:%02d",
+				   __tm.tm_year + 1900,
+				   __tm.tm_mon + 1,
+				   __tm.tm_mday,
+				   __tm.tm_hour,
+				   __tm.tm_min,
+				   __tm.tm_sec);
+			switch (ts_type->unit())
+			{
+				case TimeUnit::MILLI:
+					printf(".%03u", subsec);
+					break;
+				case TimeUnit::MICRO:
+					printf(".%06u", subsec);
+					break;
+				case TimeUnit::NANO:
+					printf(".%09u", subsec);
+					break;
+				default:
+					break;
 			}
 			break;
 		}
@@ -843,12 +847,12 @@ process_one_table(std::shared_ptr<arrow::Table> table)
 		if (skip_limit == 0)
 			return false;
 
-		for (auto elem = columns_array.begin(); elem != columns_array.end(); elem++)
+		for (int64_t j=0; j < columns_array.size(); j++)
 		{
-			auto	carray = (*elem);
+			auto	carray = columns_array[j];
 
 			/* add delimiter */
-			if (elem != columns_array.begin())
+			if (j > 0)
 				fputc(csv_mode ? ',' : '\t', output_filp);
 			process_one_token(carray, i, false);
 		}
@@ -996,7 +1000,7 @@ static void __usage(const char *fmt,...)
 		  "-v|--verbose          verbose output\n"
 		  "-h|--help             print this message\n"
 		  "\n"
-		  "Report bugs to <pgstrom@heterodb.com>\n",
+		  "arrow2csv version " PGSTROM_VERSION " - reports bugs to <pgstrom@heterodb.com>.\n",
 		  stderr);
 	exit(1);
 }

@@ -2756,7 +2756,6 @@ typedef struct {
 	uint32_t	kds_src_pathname;	/* offset to const char *pathname */
 	uint32_t	kds_src_iovec;		/* offset to strom_io_vector */
 	uint32_t	kds_src_offset;		/* offset to kds_src */
-	int32_t		scan_repeat_id;		/* current repeat-id */
 	char		data[1]				__MAXALIGNED__;
 } kern_exec_task;
 
@@ -2765,7 +2764,6 @@ typedef struct {
 	uint32_t	chunks_nitems;		/* number of kds_dst items */
 	uint32_t	ojmap_offset;		/* offset of outer-join-map */
 	uint32_t	ojmap_length;		/* length of outer-join-map */
-	int32_t		scan_repeat_id;		/* repeat-id in the request kern_exec_task */
 	bool		right_outer_join;	/* true, if CPU should exex RIGHT-OUTER-JOIN */
 	bool		final_plan_task;	/* true, if it is final response */
 	uint32_t	final_nitems;		/* final buffer's nitems, if any */
@@ -2804,15 +2802,6 @@ typedef struct dlist_node
 	struct dlist_node *prev;
 	struct dlist_node *next;
 } dlist_node;
-typedef struct dlist_head
-{
-	dlist_node		head;
-} dlist_head;
-typedef struct dlist_iter
-{
-	dlist_node *cur;
-	dlist_node *end;
-} dlist_iter;
 #endif
 
 typedef struct
@@ -2820,6 +2809,7 @@ typedef struct
 	uint32_t	magic;
 	uint32_t	tag;
 	uint64_t	length;
+	int32_t		repeat_id;
 	void	   *priv;
 	dlist_node	chain;
 	union {
@@ -3924,6 +3914,69 @@ __preagg_fetch_xdatum_as_float64(float8_t *p_fval, const xpu_datum_t *xdatum)
 	return true;
 }
 
+/* ----------------------------------------------------------------
+ *
+ * C++ Specific Utility functions
+ *
+ * ----------------------------------------------------------------
+ */
+#ifdef __cplusplus
+/*
+ * Template based Double Linked List
+ */
+template <typename T>
+struct __dlist_node
+{
+	T	   *owner;		/* NULL if dlist head */
+	struct __dlist_node<T> *prev;
+	struct __dlist_node<T> *next;
+	__dlist_node()
+	{
+		owner = NULL;
+		prev = next = this;
+	}
+};
+#define __dlist_foreach(entry, lhead)									\
+	for (auto __iter = (lhead)->next, __iter_next = __iter->next;		\
+		 (entry = __iter->owner) != NULL;								\
+		 __iter = __iter_next, __iter_next = __iter->next, entry = __iter->owner)
+
+template <typename T>
+INLINE_FUNCTION(void)
+__dlist_delete(__dlist_node<T> *node)
+{
+	assert(node->owner != NULL);	/* should not list head */
+	if (node->next && node->prev)
+	{
+		node->prev->next = node->next;
+		node->next->prev = node->prev;
+	}
+	else
+	{
+		assert(!node->next && node->prev);
+	}
+	node->prev = node->next = NULL;
+}
+
+template <typename T>
+INLINE_FUNCTION(void)
+__dlist_push_tail(__dlist_node<T> *head, __dlist_node<T> *node)
+{
+	assert(!head->owner && node->owner);
+	node->prev = head->prev;
+	head->prev->next = node;
+	head->prev = node;
+	node->next = head;
+}
+
+template <typename T>
+INLINE_FUNCTION(void)
+__dlist_move_tail(__dlist_node<T> *head, __dlist_node<T> *node)
+{
+	__dlist_delete(node);
+	__dlist_push_tail(head, node);
+}
+#endif
 /* ----------------------------------------------------------------
  *
  * Misc functions

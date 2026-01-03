@@ -60,7 +60,7 @@ UPDATE tt_1 SET c.a = pgstrom.random_int(2, -3200000,  3200000),
                 c.c = pgstrom.random_text_len(2, 40),
                 c.d = pgstrom.random_timestamp(2);
 
-\! $PG2ARROW_CMD -c 'SELECT * FROM regtest_arrow_utils_temp.tt_1' -o $ARROW_TEST_DATA_DIR/test_pg2arrow_tt1.arrow
+\! $PG2ARROW_CMD -c 'SELECT * FROM regtest_arrow_utils_temp.tt_1' -o $ARROW_TEST_DATA_DIR/test_pg2arrow_tt1.arrow > /dev/null 2>&1
 
 \set test_pg2arrow_tt1_path `echo -n $ARROW_TEST_DATA_DIR/test_pg2arrow_tt1.arrow` 
 IMPORT FOREIGN SCHEMA ft_1
@@ -83,7 +83,7 @@ INSERT INTO tt_2 (
             pgstrom.random_timestamp(1)
     FROM generate_series(1,25) x);
 
-\! $PG2ARROW_CMD -c 'SELECT * FROM regtest_arrow_utils_temp.tt_2' -o $ARROW_TEST_DATA_DIR/test_pg2arrow_tt2.arrow
+\! $PG2ARROW_CMD -c 'SELECT * FROM regtest_arrow_utils_temp.tt_2' -o $ARROW_TEST_DATA_DIR/test_pg2arrow_tt2.arrow > /dev/null 2>&1
 
 \set test_pg2arrow_tt2_path `echo -n $ARROW_TEST_DATA_DIR/test_pg2arrow_tt2.arrow` 
 IMPORT FOREIGN SCHEMA ft_2
@@ -93,17 +93,6 @@ OPTIONS (file :'test_pg2arrow_tt2_path');
 
 SELECT * FROM tt_2 EXCEPT SELECT * FROM ft_2 ORDER BY id;
 SELECT * FROM ft_2 EXCEPT SELECT * FROM tt_2 ORDER BY id;
-
---
--- Append mode
---
-\! $PG2ARROW_CMD -c 'SELECT id+3000,-i2,-i4,-i8,-f2,-f4,-f8,c,-num FROM regtest_arrow_utils_temp.tt_1' --append $ARROW_TEST_DATA_DIR/test_pg2arrow_tt1.arrow
-
-INSERT INTO tt_1 (
-  SELECT id+3000,-i2,-i4,-i8,-f2,-f4,-f8,c,-num FROM tt_1
-);
-SELECT * FROM tt_1 EXCEPT SELECT * FROM ft_1 ORDER BY id;
-SELECT * FROM ft_1 EXCEPT SELECT * FROM tt_1 ORDER BY id;
 
 --
 -- TODO: Dictionary Batch

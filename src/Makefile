@@ -72,12 +72,22 @@ endif
 HAS_LIBARROW = $(shell pkgconf --exists arrow>/dev/null 2>&1   && echo -n yes)
 HAS_PARQUET  = $(shell pkgconf --exists parquet>/dev/null 2>&1 && echo -n yes)
 ifeq ($(HAS_LIBARROW),yes)
-PGSTROM_FLAGS += -DHAS_LIBARROW=1 $(shell pkgconf --cflags arrow)
+PGSTROM_FLAGS += -DHAS_LIBARROW=1
+PG_CXXFLAGS += $(shell pkgconf --cflags arrow)
 ifeq ($(HAS_PARQUET),yes)
-PGSTROM_FLAGS += -DHAS_PARQUET=1  $(shell pkgconf --cflags parquet)
+PGSTROM_FLAGS += -DHAS_PARQUET=1
+PG_CXXFLAGS += $(shell pkgconf --cflags parquet)
 SHLIB_LINK += $(shell pkgconf --libs parquet)
+PARQUET_LIBDIR = $(shell pkgconf --variable=libdir parquet)
+ifneq ($(PARQUET_LIBDIR),)
+SHLIB_LINK += -Wl,-rpath,$(PARQUET_LIBDIR)
+endif
 else
 SHLIB_LINK += $(shell pkgconf --libs arrow)
+ARROW_LIBDIR = $(shell pkgconf --variable=libdir arrow)
+ifneq ($(ARROW_LIBDIR),)
+SHLIB_LINK += -Wl,-rpath,$(ARROW_LIBDIR)
+endif
 endif
 endif
 
@@ -99,6 +109,14 @@ SHLIB_LINK += -L $(CUDA_LPATH) -lcuda
 
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
+
+# Our C++ code (and libarrow/libparquet) expects C++17 as baseline,
+# however, some distribution has different defaults for clang.
+# PostgreSQL's makefile has no particular label to give "-std=c++17"
+# to clang to build JIT bytecode. So, we inject this option after
+# the inclusion of buildchain.
+#
+BITCODE_CXXFLAGS += $(PG_CXXFLAGS)
 
 #
 # Device Attributes

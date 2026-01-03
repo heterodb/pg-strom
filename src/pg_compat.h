@@ -29,8 +29,12 @@
 #define smgr_init_buffer_tag(tag,smgr,fork_num,block_num)	\
 	INIT_BUFFERTAG((*tag),(smgr)->smgr_rnode.node,(fork_num),(block_num))
 #else
+#if PG_VERSION_NUM < 180000
 #define smgr_relpath(smgr,forknum)		relpath((smgr)->smgr_rlocator,(forknum))
-#define smgr_init_buffer_tag(tag,smgr,fork_num,block_num)	\
+#else
+#define smgr_relpath(smgr,forknum)		pstrdup(relpath((smgr)->smgr_rlocator,(forknum)).str)
+#endif
+#define smgr_init_buffer_tag(tag,smgr,fork_num,block_num)				\
 	InitBufferTag((tag),&(smgr)->smgr_rlocator.locator,(fork_num),(block_num))
 #endif
 
@@ -46,10 +50,18 @@
 /*
  * MEMO: PostgreSQL v16 removed the 7th 'jointype' argument that has been
  * redundant because same value is also stored in the SpecialJoinInfo.
+ *
+ * MEMO: PostgreSQL v18 changed build_child_join_rel() prototype for better
+ * memory usage.
+ *
+ * git: 513f4472a4a0d294ca64123627ce7b48ce0ee7c1
  */
 #if PG_VERSION_NUM < 160000
-#define build_child_join_rel(a,b,c,d,e,f)	\
+#define build_child_join_rel(a,b,c,d,e,f,g,h)	\
 	build_child_join_rel((a),(b),(c),(d),(e),(f),(f)->jointype)
+#elif PG_VERSION_NUM < 180000
+#define build_child_join_rel(a,b,c,d,e,f,g,h)	\
+	build_child_join_rel((a),(b),(c),(d),(e),(f))
 #endif
 
 /*
@@ -91,6 +103,76 @@ typedef Node *(*tree_mutator_callback) (Node *node, void *context);
 #define __windowAggPathGetRunCondition(wpath)	((wpath)->winclause->runCondition)
 #else
 #define __windowAggPathGetRunCondition(wpath)	((wpath)->runCondition)
+#endif
+
+/*
+ * MEMO: PostgreSQL v17 adds 'fdw_restrictinfo' but we don't use it.
+ *
+ * MEMO: PostgreSQL v18 adds 'disabled_nodes' to shows number of disabled node
+ * in the plan tree, and it affects to create_xxxx() constructor APIs.
+ *
+ * git: 161320b4b960ee4fe918959be6529ae9b106ea5a
+ */
+#if PG_VERSION_NUM < 170000
+#define create_foreignscan_path(a,b,c,d,e,f,g,h,i,j,k,l)					\
+	create_foreignscan_path((a),(b),(c),(d),(f),(g),(h),(i),(j),(l))
+#elif PG_VERSION_NUM < 180000
+#define create_foreignscan_path(a,b,c,d,e,f,g,h,i,j,k,l)					\
+	create_foreignscan_path((a),(b),(c),(d),(f),(g),(h),(i),(j),(k),(l))
+#endif
+
+/*
+ * MEMO: PostgreSQL v18 adds the 4th argument 'extra' to inform extra bytes
+ * for heap_form_minimal_tuple(), but PG-Strom does not use this option.
+ */
+#if PG_VERSION_NUM < 180000
+#define heap_form_minimal_tuple(a,b,c,d)	heap_form_minimal_tuple((a),(b),(c))
+#endif
+
+/*
+ * MEMO: PostgreSQL v18 removed lc_collate_is_c() that is a checker function
+ * to determine the collation is simple enough.
+ *
+ * git: 06421b08436414b42cd169501005f15adee986f1
+ */
+#if PG_VERSION_NUM < 180000
+#define __collate_is_c(coll_oid)	lc_collate_is_c(coll_oid)
+#else
+#define __collate_is_c(coll_oid)	(pg_newlocale_from_collation(coll_oid)->collate_is_c)
+#endif
+
+/*
+ * MEMO: PostgreSQL v18 changed PathKey's field layout to use CompareType
+ * to record the sort direction instead of hardcoding btree strategy numbers.
+ *
+ * git: 8123e91f5aeb26c6e4cf583bb61c99281485af83
+ */
+#if PG_VERSION_NUM < 180000
+#define __PathKeyUseNullsFirstCompare(pk)	((pk)->pk_nulls_first)
+#define __PathKeyUseLessThanCompare(pk)		((pk)->pk_strategy == BTLessStrategyNumber)
+#define __PathKeyUseGreaterThanCompare(pk)	((pk)->pk_strategy == BTGreaterStrategyNumber)
+#else
+#define __PathKeyUseNullsFirstCompare(pk)	((pk)->pk_nulls_first)
+#define __PathKeyUseLessThanCompare(pk)		((pk)->pk_cmptype == COMPARE_LT)
+#define __PathKeyUseGreaterThanCompare(pk)	((pk)->pk_cmptype == COMPARE_GT)
+#endif
+
+/*
+ * MEMO: PostgreSQL v18 changed TupleDesc's layout for CompactAttribute array.
+ * It points some payloads using tupdesc->natts, thus, it is not legal to change
+ * natts after the construction, unlike v17 or before.
+ *
+ * git: 5983a4cffc31640fda6643f10146a5b72b203eaa
+ */
+#if PG_VERSION_NUM < 180000
+static inline TupleDesc
+CreateTupleDescTruncatedCopy(TupleDesc __tupdesc, int natts)
+{
+	TupleDesc	tupdesc = CreateTupleDescCopy(__tupdesc);
+
+	tupdesc->natts = natts;
+	return tupdesc;
+}
 #endif
 
 /*

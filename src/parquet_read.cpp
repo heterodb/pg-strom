@@ -29,187 +29,17 @@
 /*
  * Error Reporting
  */
-#ifdef PGSTROM_DEBUG_BUILD
-#define __Elog(fmt,...)							\
-	fprintf(stderr, "(%s:%d) " fmt "\n",		\
-			__FILE__,__LINE__, ##__VA_ARGS__)
-#else
-#define __Elog(fmt,...)
-#endif
-
+static thread_local	char	__private_error_message[512];
+#define __Elog(fmt,...)										\
+	snprintf(__private_error_message,						\
+			 sizeof(__private_error_message),				\
+			 "[error %s:%d] " fmt "\n",						\
+			 __basename(__FILE__),__LINE__, ##__VA_ARGS__)	\
 /*
- * parquetFileEntry
+ * Debug support
  */
-struct parquetFileEntry
-{
-	uint32_t	hash;
-	int			refcnt;
-	dlist_node	hash_chain;
-	dlist_node	lru_chain;
-	struct timeval lru_tv;
-	struct stat	stat_buf;
-	std::string	filename;
-	std::shared_ptr<arrow::io::RandomAccessFile> random_access_file;
-	std::unique_ptr<parquet::arrow::FileReader>	parquet_file_reader;
-	/* constructor */
-	parquetFileEntry(const char *__filename,
-					 const struct stat *__stat_buf,
-					 uint32_t __hash)
-	{
-		hash = __hash;
-		refcnt = 1;
-		memset(&hash_chain, 0, sizeof(dlist_node));
-		memset(&lru_chain, 0, sizeof(dlist_node));
-		memset(&lru_tv, 0, sizeof(struct timeval));
-		memcpy(&stat_buf, __stat_buf, sizeof(struct stat));
-		filename = std::string(__filename);
-		random_access_file = nullptr;
-		parquet_file_reader = nullptr;
-	}
-	/* destructor */
-	~parquetFileEntry()
-	{
-		if (random_access_file)
-		{
-			auto status = random_access_file->Close();
-			if (!status.ok())
-				__Elog("failed on Close('%s') of parquet::arrow::FileReader: %s",
-					   filename.c_str(),
-					   status.ToString().c_str());
-			else
-				__Elog("parquet::arrow::FileReader('%s') was closed",
-					   filename.c_str());
-		}
-	}
-};
-using parquetFileEntry	= struct parquetFileEntry;
-
-#define PQ_HASH_NSLOTS	797
-static uint32_t			pq_hash_initialized = 0;
-static std::mutex		pq_hash_lock[PQ_HASH_NSLOTS];
-static dlist_head		pq_hash_slot[PQ_HASH_NSLOTS];
-static std::mutex		pq_hash_lru_lock;
-static dlist_head		pq_hash_lru_list;
-static std::thread	   *pq_hash_worker = NULL;
-
-/* copy from ilist.h */
-#define dlist_foreach(iter, lhead)										\
-	for ((iter).end = &(lhead)->head,									\
-		 (iter).cur = (iter).end->next ? (iter).end->next : (iter).end;	\
-		 (iter).cur != (iter).end;										\
-		 (iter).cur = (iter).cur->next)
-#define dlist_container(type, membername, ptr)							\
-	((type *) ((char *) (ptr) - offsetof(type, membername)))
-
-static inline void
-dlist_init(dlist_head *head)
-{
-    head->head.next = head->head.prev = &head->head;
-}
-static inline void
-dlist_delete(dlist_node *node)
-{
-	node->prev->next = node->next;
-	node->next->prev = node->prev;
-}
-static inline void
-dlist_push_tail(dlist_head *head, dlist_node *node)
-{
-	node->next = &head->head;
-	node->prev = head->head.prev;
-	node->prev->next = node;
-	head->head.prev = node;
-}
-static inline void
-dlist_move_tail(dlist_head *head, dlist_node *node)
-{
-	if (node->prev && node->next)
-		dlist_delete(node);
-	dlist_push_tail(head, node);
-}
-
-/*
- * ParquetFileHashTableWorker
- */
-static void
-ParquetFileHashTableWorker(void)
-{
-	for (;;)
-	{
-		struct timeval	curr;
-		dlist_iter		iter;
-
-		gettimeofday(&curr, NULL);
-		pq_hash_lru_lock.lock();
-		dlist_foreach (iter, &pq_hash_lru_list)
-		{
-			auto	entry = dlist_container(parquetFileEntry, lru_chain, iter.cur);
-
-			if (entry->lru_tv.tv_sec > curr.tv_sec ||
-				(entry->lru_tv.tv_sec  == curr.tv_sec &&
-				 entry->lru_tv.tv_usec > curr.tv_usec) ||
-				((curr.tv_sec  - entry->lru_tv.tv_sec)  * 1000000UL +
-				 (curr.tv_usec - entry->lru_tv.tv_usec) < 8000000UL))
-			{
-				/* no more entry elapsed from the last access */
-				break;
-			}
-			else
-			{
-				/* 8sec or more elapsed from the last access!! */
-				uint32_t	hindex = entry->hash % PQ_HASH_NSLOTS;
-
-				pq_hash_lock[hindex].lock();
-				if (entry->refcnt == 0)
-				{
-					// OK, nobody references the entry, so we can drop it.
-					// Note that 'hash_chain' may not be valid, if parquet
-					// file was modified on the disk and detached from the
-					// hash-table.
-					if (entry->hash_chain.prev && entry->hash_chain.next)
-						dlist_delete(&entry->hash_chain);
-					dlist_delete(&entry->lru_chain);
-					delete(entry);
-				}
-				pq_hash_lock[hindex].unlock();
-			}
-		}
-		pq_hash_lru_lock.unlock();
-
-		sleep(1);
-	}
-}
-
-/*
- * __tryInitializeParquetFileHashTable
- */
-static void
-__tryInitializeParquetFileHashTable(void)
-{
-	uint32_t	curr_val;
-retry:
-	curr_val = __atomic_cas_uint32(&pq_hash_initialized, 0, UINT_MAX);
-	if (curr_val == 0)
-	{
-		for (int i=0; i < PQ_HASH_NSLOTS; i++)
-			dlist_init(&pq_hash_slot[i]);
-		dlist_init(&pq_hash_lru_list);
-		pq_hash_worker = new std::thread(ParquetFileHashTableWorker);
-		pq_hash_worker->detach();
-		__atomic_exchange_uint32(&pq_hash_initialized, 1);	/* done */
-	}
-	else if (curr_val == UINT_MAX)
-	{
-		/* someone works in progress */
-		usleep(100);		/* 100us */
-		goto retry;
-	}
-	else
-	{
-		/* already initialized */
-		assert(curr_val == 1);
-	}
-}
+extern "C" void	pgstrom_inc_perf_counter(int num);
+extern "C" void	pgstrom_add_perf_counter(int num, const struct timeval *tv_base);
 
 /*
  * __checkParquetFileColumn
@@ -512,16 +342,9 @@ __checkParquetFileColumn(const std::shared_ptr<arrow::Field> &field,
  * checkParquetFileSchema
  */
 static bool
-checkParquetFileSchema(parquetFileEntry *entry,
+checkParquetFileSchema(std::shared_ptr<arrow::Schema> arrow_schema,
 					   const kern_data_store *kds_head)
 {
-	std::shared_ptr<arrow::Schema> arrow_schema;
-	// Get Schema definition
-	{
-		auto status = entry->parquet_file_reader->GetSchema(&arrow_schema);
-		if (!status.ok())
-			return false;
-	}
 	// Type compatibility checks (only referenced attributes)
 	for (int j=0; j < kds_head->ncols; j++)
 	{
@@ -550,101 +373,6 @@ checkParquetFileSchema(parquetFileEntry *entry,
 }
 
 /*
- * __parquetFileHash
- */
-static inline uint32_t
-__parquetFileHash(dev_t st_dev, ino_t st_ino)
-{
-	uint64_t	hkey = ((uint64_t)st_dev << 32 | (uint64_t)st_ino);
-
-	hkey += 0x9e3779b97f4a7c15ULL;
-	hkey = (hkey ^ (hkey >> 30)) * 0xbf58476d1ce4e5b9ULL;
-	hkey = (hkey ^ (hkey >> 27)) * 0x94d049bb133111ebULL;
-	return (hkey ^ (hkey >> 31)) & 0xffffffffU;
-}
-
-/*
- * lookupParquetFileEntry
- */
-static parquetFileEntry *
-lookupParquetFileEntry(const char *filename, struct stat *stat_buf, uint32_t hash)
-{
-	uint32_t	hindex = hash % PQ_HASH_NSLOTS;
-	dlist_iter	iter;
-
-	dlist_foreach (iter, &pq_hash_slot[hindex])
-	{
-		auto	entry = dlist_container(parquetFileEntry,
-										hash_chain, iter.cur);
-		if (entry->stat_buf.st_dev == stat_buf->st_dev &&
-			entry->stat_buf.st_ino == stat_buf->st_ino)
-		{
-			// confirm the stat_buf.st_mtim is identical to the hashed one.
-			// if changed, it means the parquet file is modified on the storage.
-			if (entry->stat_buf.st_mtim.tv_sec  == stat_buf->st_mtim.tv_sec &&
-				entry->stat_buf.st_mtim.tv_nsec == stat_buf->st_mtim.tv_nsec)
-			{
-				entry->refcnt++;
-				return entry;
-			}
-			// oops, the parquet file was modified on the disk, so must be re-read.
-			dlist_delete(&entry->hash_chain);
-			memset(&entry->hash_chain, 0, sizeof(dlist_node));
-			assert(entry->lru_chain.prev && entry->lru_chain.next);
-			break;
-		}
-	}
-	return NULL;
-}
-
-/*
- * buildParquetFileEntry
- */
-static parquetFileEntry *
-buildParquetFileEntry(const char *filename, struct stat *stat_buf, uint32_t hash)
-{
-	parquetFileEntry *entry = new(std::nothrow) parquetFileEntry(filename,
-																 stat_buf,
-																 hash);
-	if (!entry)
-	{
-		__Elog("out of memory");
-		return NULL;
-	}
-
-	/* open a RandomAccessFile */
-	{
-		arrow::fs::LocalFileSystem fs;
-
-		auto rv = fs.OpenInputFile(std::string(filename));
-		if (!rv.ok())
-		{
-			__Elog("unable to open '%s' using arrow::fs::LocalFileSystem: %s",
-				   filename,
-				   rv.status().ToString().c_str());
-			delete(entry);
-			return NULL;
-		}
-		entry->random_access_file = *rv;;
-	}
-	/* Open a Parquet File Reader */
-	{
-		auto rv = parquet::arrow::OpenFile(entry->random_access_file,
-										   arrow::default_memory_pool());
-		if (!rv.ok())
-		{
-			__Elog("failed on parquet::arrow::OpenFile('%s'): %s",
-				   filename,
-				   rv.status().ToString().c_str());
-			delete(entry);
-			return NULL;
-		}
-		entry->parquet_file_reader = std::move(*rv);
-	}
-	return entry;
-}
-
-/*
  * parquetReadArrowTable
  */
 static kern_data_store *
@@ -655,7 +383,8 @@ parquetReadArrowTable(std::shared_ptr<arrow::Table> table,
 											   size_t malloc_size),
 					  void *malloc_private)
 {
-	size_t		kds_length = KDS_HEAD_LENGTH(kds_head) + kds_head->arrow_virtual_usage;
+	size_t		kds_length = ARROW_ALIGN(KDS_HEAD_LENGTH(kds_head) +
+										 kds_head->arrow_virtual_usage);
 	size_t		curr_pos = kds_length;
 	kern_data_store *kds;
 
@@ -747,52 +476,60 @@ parquetReadArrowTable(std::shared_ptr<arrow::Table> table,
  * It returns a KDS buffer with KDS_FORMAT_ARROW that loads the
  * specified row-group.
  */
-kern_data_store *
-parquetReadOneRowGroup(const char *filename,
-					   const kern_data_store *kds_head,
-					   void *(*malloc_callback)(void *malloc_private,
-												size_t malloc_size),
-					   void *malloc_private)
+static kern_data_store *
+__parquetReadOneRowGroup(const char *filename,
+						 const kern_data_store *kds_head,
+						 void *(*malloc_callback)(void *malloc_private,
+												  size_t malloc_size),
+						 void *malloc_private)
 {
 	uint32_t	row_group_index = kds_head->parquet_row_group;
-	uint32_t	hash, hindex;
-	struct stat	stat_buf;
-	parquetFileEntry *entry;
-	kern_data_store	*kds = NULL;
+    std::unique_ptr<parquet::ParquetFileReader> raw_file_reader = nullptr;
+    std::unique_ptr<parquet::arrow::FileReader> parquet_file_reader = nullptr;
+	std::shared_ptr<arrow::Schema> arrow_schema;
+	kern_data_store *kds = NULL;
+	arrow::Status status;
 
-	/* initialize the parquet file hash table, only once */
-	__tryInitializeParquetFileHashTable();
-
-	/* lookup the hash-table */
-	if (stat(filename, &stat_buf) != 0)
+	/*
+	 * Open a new Parquet File Reader dedicated for this thread, but
+	 * utilize parquet::FileMetada once parsed by other one.
+	 * As discussed in #937, libarrow/libparquet is not designed for
+	 * thread-safe, so we use Parquet File Reader per thread.
+	 * ----
+	 * Open the Parquet File (with cached metadata)
+	 */
+	raw_file_reader = parquet::ParquetFileReader::OpenFile(std::string(filename),
+														   false,	/* memory_map */
+														   parquet::default_reader_properties(),
+														   nullptr);
+	if (!raw_file_reader)
 	{
-		__Elog("failed on stat('%s'): %m", filename);
+		__Elog("failed on parquet::ParquetFileReader::Open('%s')", filename);
 		return NULL;
 	}
-	hash = __parquetFileHash(stat_buf.st_dev,
-							 stat_buf.st_ino);
-	hindex = hash % PQ_HASH_NSLOTS;
 
-	pq_hash_lock[hindex].lock();
-	entry = lookupParquetFileEntry(filename, &stat_buf, hash);
-	if (!entry)
+	/*
+	 * Open the Arrow File Reader
+	 */
+	status = parquet::arrow::FileReader::Make(arrow::default_memory_pool(),
+											  std::move(raw_file_reader),
+											  &parquet_file_reader);
+	if (!status.ok())
 	{
-		entry = buildParquetFileEntry(filename, &stat_buf, hash);
-		if (entry)
-			dlist_push_tail(&pq_hash_slot[hindex], &entry->hash_chain);
+		__Elog("failed on parquet::arrow::FileReader::Make('%s'): %s",
+			   filename, status.ToString().c_str());
+		return NULL;
 	}
-	pq_hash_lock[hindex].unlock();
-	if (!entry)
-		return NULL;	/* not found and failed on build */
-	// update LRU state (under the pq_hash_lru_lock)
-	pq_hash_lru_lock.lock();
-	gettimeofday(&entry->lru_tv, NULL);
-	dlist_move_tail(&pq_hash_lru_list, &entry->lru_chain);	
-	pq_hash_lru_lock.unlock();
-
 	// quick check of schema compatibility
-	if (checkParquetFileSchema(entry, kds_head) &&
-		row_group_index < entry->parquet_file_reader->num_row_groups())
+	status = parquet_file_reader->GetSchema(&arrow_schema);
+	if (!status.ok())
+	{
+		__Elog("failed on parquet::arrow::FileReader::GetSchema(): %s",
+			   status.ToString().c_str());
+		return NULL;
+	}
+	if (checkParquetFileSchema(arrow_schema, kds_head) &&
+		row_group_index < parquet_file_reader->num_row_groups())
 	{
 		std::shared_ptr<arrow::Table> table;
 		std::vector<int>	referenced;
@@ -804,9 +541,9 @@ parquetReadOneRowGroup(const char *filename,
 			if (cmeta->field_index >= 0)
 				referenced.push_back(cmeta->field_index);
 		}
-		auto status = entry->parquet_file_reader->ReadRowGroup(row_group_index,
-															   referenced,
-															   &table);
+		status = parquet_file_reader->ReadRowGroup(row_group_index,
+												   referenced,
+												   &table);
 		if (status.ok())
 		{
 			kds = parquetReadArrowTable(table, referenced,
@@ -816,13 +553,48 @@ parquetReadOneRowGroup(const char *filename,
 		}
 		else
 		{
-			__Elog("failed on parquet::arrow::FileReader::ReadRowGroup");
+			__Elog("failed on parquet::arrow::FileReader::ReadRowGroup: %s",
+				   status.ToString().c_str());
 		}
 	}
-	// put the hash table entry
-	pq_hash_lock[hindex].lock();
-	assert(entry->refcnt > 0);
-	entry->refcnt--;
-	pq_hash_lock[hindex].unlock();
+	return kds;
+}
+
+/*
+ * parquetReadOneRowGroup - interface to C-portion
+ */
+kern_data_store *
+parquetReadOneRowGroup(const char *filename,
+					   const kern_data_store *kds_head,
+					   void *(*malloc_callback)(void *malloc_private,
+												size_t malloc_size),
+					   void *malloc_private,
+					   const char **p_error_message)
+{
+	kern_data_store *kds = NULL;
+
+	*__private_error_message = '\0';
+	try {
+		kds = __parquetReadOneRowGroup(filename,
+									   kds_head,
+									   malloc_callback,
+									   malloc_private);
+	}
+	catch (const std::exception &e) {
+		const char *estr = e.what();
+		snprintf(__private_error_message,
+				 sizeof(__private_error_message),
+				 "[exception] %s", estr);
+	}
+	/* error reporting */
+	if (p_error_message)
+	{
+		if (kds)
+			*p_error_message = NULL;	/* no error status */
+		else if (*__private_error_message == '\0')
+			*p_error_message = "unknown internal error";
+		else
+			*p_error_message = __private_error_message;
+	}
 	return kds;
 }
