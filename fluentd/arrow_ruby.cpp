@@ -1033,7 +1033,7 @@ arrowFileWrite::OpenFile(std::string &filename)
 			filename += temp;
 		}
 		/* open the output file */
-		fdesc = open(filename.c_str(), O_RDWR | O_CREAT | O_EXCL | 0600);
+		fdesc = open(filename.c_str(), O_RDWR | O_CREAT | O_EXCL, 0600);
 		if (fdesc < 0 && errno != EEXIST)
 			Elog("failed on open('%s'): %m", filename.c_str());
 	}
