@@ -9,6 +9,7 @@
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the PostgreSQL License.
  */
+#include <assert.h>
 #include <fcntl.h>
 #include <iostream>
 #include <getopt.h>
@@ -30,59 +31,73 @@ static std::vector<std::string>	user_custom_metadata;
 static const char  *schema_table_name = NULL;
 static const char  *error_items_filename = NULL;
 static FILE		   *error_items_filp = NULL;
+static bool			enable_numeric_conversion = true;
+static bool			unconvertible_numeric_as_null = false;
 
 /*
- * __strdup
+ * line-buffer - a lightweight string buffer
  */
-#define STRDUP_BUFFER_SZ	(512UL<<10)		//512kB
-static std::vector<char *>	strdup_buffers_array;
-static char				   *strdup_buffers_curr = NULL;
-static size_t				strdup_buffers_usage = 0;
+static std::vector<char *>	line_buffers_array;
+static char				   *line_buffer_curr = NULL;
+static size_t				line_buffer_usage = 0;
+static size_t				line_buffer_over_size = 0;
+static size_t				line_buffer_alloc_size = (512UL<<10);	/* 512kB */
 static char *
-__strdup(const char *str)
+linebuf_strdup(const char *str)
 {
-	char	   *copy = NULL;
-
+	char	   *buf = NULL;
 	if (str)
 	{
 		size_t	sz = strlen(str) + 1;
 
-		if (sz >= STRDUP_BUFFER_SZ / 4)
+		if (line_buffer_curr &&
+			line_buffer_usage + sz <= line_buffer_alloc_size)
 		{
-			copy = strdup(str);
-			if (!copy)
-				Elog("out of memory");
-			strdup_buffers_array.push_back(copy);
+			buf = line_buffer_curr + line_buffer_usage;
+			line_buffer_usage += sz;
 		}
-		else if (!strdup_buffers_curr ||
-				 strdup_buffers_usage + sz >= STRDUP_BUFFER_SZ)
+		else if (sz > line_buffer_alloc_size / 2)
 		{
-			if (strdup_buffers_curr)
-				strdup_buffers_array.push_back(strdup_buffers_curr);
-			strdup_buffers_curr = (char *)malloc(STRDUP_BUFFER_SZ);
-			if (!strdup_buffers_curr)
+			buf = (char *)malloc(sz);
+			if (!buf)
 				Elog("out of memory");
-			copy = strdup_buffers_curr;
-			strcpy(copy, str);
-			strdup_buffers_usage = sz;
+			line_buffers_array.push_back(buf);
+			line_buffer_over_size += sz;
 		}
 		else
 		{
-			copy = strdup_buffers_curr + strdup_buffers_usage;
-			strcpy(copy, str);
-			strdup_buffers_usage += sz;
+			buf = (char *)malloc(line_buffer_alloc_size);
+			if (!buf)
+				Elog("out of memory: %ld", line_buffer_alloc_size);
+			if (line_buffer_curr)
+			{
+				line_buffers_array.push_back(line_buffer_curr);
+				line_buffer_over_size += line_buffer_alloc_size;
+			}
+			line_buffer_curr = buf;
+			line_buffer_usage = sz;
 		}
+		strcpy(buf, str);
 	}
-	return copy;
+	return buf;
 }
-
 static void
-__strdup_buffer_reset(void)
+linebuf_reset(void)
 {
-	for (int k=0; k < strdup_buffers_array.size(); k++)
-		free(strdup_buffers_array[k]);
-	strdup_buffers_array.clear();
-	strdup_buffers_usage = 0;
+	for (int k=0; k < line_buffers_array.size(); k++)
+		free(line_buffers_array[k]);
+	line_buffers_array.clear();
+	line_buffer_usage = 0;
+	if (line_buffer_over_size > 0)
+	{
+		size_t	unitsz_512kb = ((512UL<<10) - 1);
+
+		line_buffer_alloc_size += (line_buffer_over_size + unitsz_512kb) & ~unitsz_512kb;
+		if (line_buffer_curr)
+			free(line_buffer_curr);
+		line_buffer_curr = NULL;
+	}
+	line_buffer_over_size = 0;
 }
 
 /*
@@ -100,22 +115,18 @@ openArrowFileStream(arrowFileBuilderTable af_builder)
 	/* no -o FILENAME given, so generate a safe alternative */
 	const char *input_fname = input_filenames[0];
 	size_t		len = strlen(input_fname);
-	char	   *temp = (char *)alloca(len+50);
-	char	   *dpos;
 	const char *suffix = (!parquet_mode ? "arrow" : "parquet");
 
-	strcpy(temp, input_fname);
-	if (len > 4 && strcasecmp(temp+len-4, ".vcf") == 0)
-		dpos = temp+len-4;
-	else
-		dpos = temp+len;
+	if (len >= 4 && strcasecmp(input_fname+len-4, ".vcf") == 0)
+		len -= 4;
 	for (int loop=0; loop < 100; loop++)
 	{
-		if (loop == 0)
-			sprintf(dpos, ".%s", suffix);
-		else
-			sprintf(dpos, ".%d.%s", loop, suffix);
-		if (af_builder->Open(temp, false))
+		std::string	fname(input_fname, len);
+
+		if (loop > 0)
+			fname += std::string(".") + std::to_string(loop);
+		fname += std::string(suffix);
+		if (af_builder->Open(fname.c_str(), false))
 			return;
 	}
 	Elog("unable to generate output file name, please use -o FILENAME manually");
@@ -240,11 +251,13 @@ addVcfInfoField(arrowFileBuilderTable &af_builder,
 	namebuf += ident;
 	if (strcmp(number, "0") == 0)
 		column = makeVcfFieldBoolean(namebuf.c_str());
-	else if ((strcmp(number, "1") == 0 ||
-			  strcmp(number, "A") == 0) && strcmp(dtype, "Integer") == 0)
+	else if (enable_numeric_conversion &&
+			 ((strcmp(number, "1") == 0 ||
+			   strcmp(number, "A") == 0) && strcmp(dtype, "Integer") == 0))
 		column = makeVcfFieldInteger(namebuf.c_str());
-	else if ((strcmp(number, "1") == 0 ||
-			  strcmp(number, "A") == 0) && strcmp(dtype, "Float") == 0)
+	else if (enable_numeric_conversion &&
+			 ((strcmp(number, "1") == 0 ||
+			   strcmp(number, "A") == 0) && strcmp(dtype, "Float") == 0))
 		column = makeVcfFieldFloat(namebuf.c_str());
 	else
 		column = makeVcfFieldString(namebuf.c_str());
@@ -256,6 +269,31 @@ addVcfInfoField(arrowFileBuilderTable &af_builder,
 	{
 		column->field_metadata->Append(std::string("description"),
 									   std::string(descr));
+	}
+	/*
+	 * check duplicated field name
+	 */
+	for (int j=0; j < af_builder->arrow_columns.size(); j++)
+	{
+		auto    __column = af_builder->arrow_columns[j];
+		if (__column->field_name == column->field_name)
+		{
+			if (__column->arrow_type->Equals(column->arrow_type) &&
+				__column->vcf_allele_policy == column->vcf_allele_policy)
+			{
+				Info("Duplicated field '%s' found, but compatible (type='%s' policy='%c'); second one is ignored.",
+					 column->field_name.c_str(),
+					 column->arrow_type->ToString().c_str(),
+					 column->vcf_allele_policy);
+				return;
+			}
+			Elog("Duplicated field '%s' found, and they are mutually inconsistent: the first has '%s' and policy='%c', but the second has '%s' and policy='%c'",
+				 __column->field_name.c_str(),
+				 __column->arrow_type->ToString().c_str(),
+				 __column->vcf_allele_policy,
+				 column->arrow_type->ToString().c_str(),
+				 column->vcf_allele_policy);
+		}
 	}
 	af_builder->arrow_columns.push_back(column);
 }
@@ -286,7 +324,6 @@ parseLastVcfHeaderLine(arrowFileBuilderTable &af_builder,
 			for (int i=0; i < format_lines.size(); i++)
 			{
 				std::string __line = format_lines[i];
-
 				__line += '\0';		/* termination */
 				addVcfInfoField(af_builder, temp, __line.data());
 			}
@@ -355,6 +392,66 @@ openVcfFileHeader(FILE *filp, const char *fname, long &line_no)
 }
 
 /*
+ * __validateFieldItem
+ */
+static const char *
+__validateFieldItem(arrowFileBuilderColumn column, const char *tok)
+{
+	switch (column->arrow_type->id())
+	{
+		char   *end;
+
+		case arrow::Type::INT32: {
+			long    ival = strtol(tok, &end, 10);
+			if (*end != '\0')
+			{
+				if (unconvertible_numeric_as_null)
+					return NULL;
+				Elog("Integer token [%s] is not convertible at field '%s'",
+					 tok, column->field_name.c_str());
+			}
+			if (ival < INT_MIN || ival > INT_MAX)
+			{
+				if (unconvertible_numeric_as_null)
+					return NULL;
+				Elog("Integer token [%s] is out of range at field '%s'",
+					 tok, column->field_name.c_str());
+			}
+			break;
+		}
+		case arrow::Type::FLOAT: {
+			double  fval = strtod(tok, &end);
+			if (*end != '\0')
+			{
+				if (unconvertible_numeric_as_null)
+					return NULL;
+				Elog("Float token [%s] is not convertible at field '%s'",
+					 tok, column->field_name.c_str());
+			}
+			if (fval == 0.0 && end == tok)
+			{
+				if (unconvertible_numeric_as_null)
+					return NULL;
+				Elog("no conversion is performed on Float token['%s'] at field '%s'",
+					 tok, column->field_name.c_str());
+			}
+			if (errno == ERANGE)
+			{
+				if (unconvertible_numeric_as_null)
+					return NULL;
+				Elog("Float token [%s] is out of range at field '%s'",
+					 tok, column->field_name.c_str());
+			}
+			break;
+		}
+		default:
+			assert(column->arrow_type->id() == arrow::Type::STRING);
+			break;
+	}
+	return __trim(linebuf_strdup(tok));
+}
+
+/*
  * __processVcfOneFieldItem
  */
 static void
@@ -383,18 +480,17 @@ __processVcfOneFieldItem(arrowFileBuilderTable &af_builder,
 	}
 	else if (column->vcf_allele_policy == 'A')
 	{
-		char   *temp = (char *)alloca(strlen(field_tok)+1);
+		char   *temp = linebuf_strdup(field_tok);
 		char   *tok, *pos;
 		int		index;
 
-		strcpy(temp, field_tok);
 		for (tok = strtok_r(temp, ",", &pos), index=0;
 			 tok != NULL;
 			 tok = strtok_r(NULL, ",", &pos), index++)
 		{
 			if (index == alt_loop)
 			{
-				vcf_tokens[column->field_index] = __strdup(__trim(tok));
+				vcf_tokens[column->field_index] = __validateFieldItem(column, tok);
 				return;
 			}
 		}
@@ -402,12 +498,11 @@ __processVcfOneFieldItem(arrowFileBuilderTable &af_builder,
 	}
 	else if (column->vcf_allele_policy == 'R')
 	{
-		char   *temp = (char *)alloca(strlen(field_tok)+1);
+		char   *temp = linebuf_strdup(field_tok);
 		char   *tok, *pos;
 		char   *first = NULL;
 		int		index;
 
-		strcpy(temp, field_tok);
 		for (tok = strtok_r(temp, ",", &pos), index=-1;
 			 tok != NULL;
 			 tok = strtok_r(NULL, ",", &pos), index++)
@@ -416,9 +511,9 @@ __processVcfOneFieldItem(arrowFileBuilderTable &af_builder,
 				first = tok;
 			else if (index == alt_loop)
 			{
-				char   *__temp = (char *)alloca(strlen(first) + strlen(tok) + 20);
-
-				vcf_tokens[column->field_index] = __strdup(__temp);
+				char   *comb = (char *)alloca(strlen(first) + strlen(tok) + 2);
+				sprintf(comb, "%s,%s", first, tok);
+				vcf_tokens[column->field_index] = __validateFieldItem(column, comb);
 				return;
 			}
 		}
@@ -426,7 +521,7 @@ __processVcfOneFieldItem(arrowFileBuilderTable &af_builder,
 	}
 	else
 	{
-		vcf_tokens[column->field_index] = __strdup(field_tok);
+		vcf_tokens[column->field_index] = __validateFieldItem(column, field_tok);
 	}
 }
 
@@ -439,10 +534,9 @@ __processVcfOneInfoItem(arrowFileBuilderTable &af_builder,
 						const char *__info,
 						int alt_loop)
 {
-	char   *info = (char *)alloca(strlen(__info) + 1);
+	char   *info = linebuf_strdup(__info);
 	char   *tok, *pos;
 
-	strcpy(info, __info);
 	for (tok = strtok_r(info, ";", &pos);
 		 tok != NULL;
 		 tok = strtok_r(NULL, ";", &pos))
@@ -471,13 +565,11 @@ __processVcfOneFormatItem(arrowFileBuilderTable &af_builder,
 						  const char *__sample,
 						  int alt_loop)
 {
-	char   *format = (char *)alloca(strlen(__format) + 1);
-	char   *sample = (char *)alloca(strlen(__sample) + 1);
+	char   *format = linebuf_strdup(__format);
+	char   *sample = linebuf_strdup(__sample);
 	char   *tok1, *pos1;
 	char   *tok2, *pos2;
 
-	strcpy(format, __format);
-	strcpy(sample, __sample);
 	for (tok1 = strtok_r(format, ":", &pos1), tok2 = strtok_r(sample, ":", &pos2);
 		 tok1 != NULL && tok2 != NULL;
 		 tok1 = strtok_r(NULL,   ":", &pos1), tok2 = strtok_r(NULL,   ":", &pos2))
@@ -623,34 +715,16 @@ processVcfFileBody(arrowFileBuilderTable &af_builder,
 {
 	size_t		line_sz = 0;
 	char	   *line = NULL;
-	size_t		work_sz = 0;
-	char	   *work = NULL;
 	ssize_t		nbytes;
 	std::vector<std::vector<const char *>> vcf_multi_tokens;
 
 	while ((nbytes = getline(&line, &line_sz, filp)) >= 0)
 	{
 		bool	skip_this_line = false;
-
-		/*
-		 * Once copy the VCF line to working buffer
-		 * (if line is not convertible, the original should be reported)
-		 */
-		if (line_sz >= work_sz)
-		{
-			work_sz = line_sz * 2 + 8000;
-			if (!work)
-				work = (char *)malloc(work_sz+1);
-			else
-				work = (char *)realloc(work, work_sz+1);
-			if (!work)
-				Elog("out of memory");
-		}
-		strcpy(work, line);
-		line_no++;
-
 		/* Parse VCF line */
+		line_no++;
 		try {
+			char   *work = linebuf_strdup(line);
 			__processVcfFileOneLine(af_builder, vcf_multi_tokens, work);
 		}
 		catch (std::exception &e)
@@ -695,12 +769,12 @@ processVcfFileBody(arrowFileBuilderTable &af_builder,
 						length += column->putValue(NULL, 0);
 				}
 				if (length >= batch_segment_sz)
-					af_builder->WriteChunk();
+					af_builder->WriteChunk(shows_progress ? stdout : NULL);
 			}
 		}
 		/* Reset working buffer */
 		vcf_multi_tokens.clear();
-		__strdup_buffer_reset();
+		linebuf_reset();
 	}
 }
 
@@ -767,6 +841,10 @@ static void usage(const char *format, ...)
 		  "      --schema           Print expected schema definition for the input files.\n"
 		  "\n"
 		  "SPECIALS:\n"
+		  "      --disable-numaric-conversion  Don't convert Number=Integer/Float items to\n"
+		  "                                    numeric values in arrow/parquet.\n"
+		  "      --unconvertible-numeric-as-null  Unconvertible numeric values are considered\n"
+		  "                                       as NULL value, not a reportable error.\n"
 		  "\n"
 		  "  -v, --verbose          Verbose output mode (for debugging)\n"
 		  "  -h, --help             Print this message.\n", stderr);
@@ -792,6 +870,8 @@ parse_options(int argc, char * const argv[])
 		{"schema",        optional_argument, NULL, 1001},
 		{"verbose",       no_argument,       NULL, 'v'},
 		{"help",          no_argument,       NULL, 'h'},
+		{"disable-numaric-conversion", no_argument, NULL, 2001},
+		{"unconvertible-numeric-as-null", no_argument, NULL, 2002},
 		{NULL, 0, NULL, 0},
 	};
 	int		code;
@@ -861,12 +941,12 @@ parse_options(int argc, char * const argv[])
 				break;
 			}
 			case 'e':   /* --error-items */
-				if (optarg)
-					error_items_filename = optarg;
+				if (!optarg)
+					error_items_filp = stderr;
 				else
 				{
-					error_items_filp = stderr;
-					error_items_filename = "/dev/stderr";
+					error_items_filename = optarg;
+					error_items_filp = NULL;
 				}
 				break;
 			case 1000:  /* --progress */
@@ -877,6 +957,12 @@ parse_options(int argc, char * const argv[])
 					schema_table_name = optarg;
 				else
 					schema_table_name = "VCF_FTABLE_NAME";
+				break;
+			case 2001:	/* --disable-numaric-conversion */
+				enable_numeric_conversion = false;
+				break;
+			case 2002:	/* --unconvertible-numeric-as-null */
+				unconvertible_numeric_as_null = true;
 				break;
 			case 'v':   /* --verbose */
 				verbose = true;
@@ -941,7 +1027,7 @@ int main(int argc, char * const argv[])
 			fclose(filp);
 		}
 		/* finalize */
-		af_builder->Close();
+		af_builder->Close(shows_progress ? stdout : NULL);
 	}
 	catch (std::exception &e)
 	{
