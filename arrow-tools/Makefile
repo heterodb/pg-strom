@@ -8,40 +8,27 @@ include ../Makefile.common
 #
 CXX          ?= g++
 PG_CONFIG    ?= pg_config
-MYSQL_CONFIG ?= mysql_config
 
 HAS_PG_CONFIG = $(shell which $(PG_CONFIG)>/dev/null 2>&1 && echo yes)
-HAS_MYSQL_CONFIG = $(shell which $(MYSQL_CONFIG)>/dev/null 2>&1 && echo yes)
 HAS_LIBARROW = $(shell pkgconf --exists arrow>/dev/null 2>&1 && echo -n yes)
 HAS_PARQUET = $(shell pkgconf --exists parquet>/dev/null 2>&1 && echo -n yes)
 
 ALL_PROGS = arrow2csv-legacy vcf2arrow-legacy
-ifeq ($(HAS_PG_CONFIG),yes)
-ALL_PROGS += pg2arrow-legacy
 ifeq ($(HAS_LIBARROW),yes)
+ifeq ($(HAS_PG_CONFIG),yes)
 ALL_PROGS += pg2arrow
 endif
-endif
-ifeq ($(HAS_MYSQL_CONFIG),yes)
-ALL_PROGS += mysql2arrow-legacy
-endif
-ifeq ($(HAS_LIBARROW),yes)
 ALL_PROGS += vcf2arrow tsv2arrow arrow2csv
 endif
 
-PG2ARROW_OBJS = pg2arrow.o arrow_meta.o
-PG2ARROW_LEGACY_OBJS = __pgsql2arrow.o pgsql_client.o \
-                       arrow_nodes.o arrow_write.o arrow_pgsql.o
-MYSQL2ARROW_LEGACY_OBJS = __mysql2arrow.o mysql_client.o \
-                          arrow_nodes.o arrow_write.o
-VCF2ARROW_LEGACY_OBJS = vcf2arrow_legacy.o arrow_nodes.o arrow_write.o
+PG2ARROW_OBJS    = pg2arrow.o arrow_meta.o
 VCF2ARROW_OBJS   = vcf2arrow.o
 TSV2ARROW_OBJS   = tsv2arrow.o
 ARROW2CSV_OBJS   = arrow2csv.o arrow_meta.o
+VCF2ARROW_LEGACY_OBJS = vcf2arrow_legacy.o arrow_nodes.o arrow_write.o
 ARROW2CSV_LEGACY_OBJS = arrow2csv_legacy.o arrow_nodes.o
 CLEAN_OBJS = $(PG2ARROW_OBJS) $(TSV2ARROW_OBJS) $(ARROW2CSV_OBJS) $(VCF2ARROW_OBJS) \
              $(VCF2ARROW_LEGACY_OBJS) \
-             $(PG2ARROW_LEGACY_OBJS) $(MYSQL2ARROW_LEGACY_OBJS) \
              $(ARROW2CSV_LEGACY_OBJS) $(ALL_PROGS)
 
 CFLAGS = -O2 -fPIC -g -Wall -I. -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64 \
@@ -49,9 +36,6 @@ CFLAGS = -O2 -fPIC -g -Wall -I. -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64 \
 
 ifeq ($(HAS_PG_CONFIG),yes)
 CFLAGS += -I $(shell $(PG_CONFIG) --includedir)
-endif
-ifeq ($(HAS_MYSQL_CONFIG),yes)
-CFLAGS += $(shell $(MYSQL_CONFIG) --include)
 endif
 ifeq ($(DEBUG),1)
 CFLAGS += -g -O0
@@ -91,36 +75,17 @@ pg2arrow: $(PG2ARROW_OBJS)
 install-pg2arrow: pg2arrow
 	mkdir -p $(DESTDIR)$(BINDIR) && \
 	install -m 0755 $< $(DESTDIR)$(BINDIR)
-
-pg2arrow-legacy: $(PG2ARROW_LEGACY_OBJS)
-	$(CC) -o $@ $(PG2ARROW_LEGACY_OBJS) -lpq -lpthread \
-	$(shell $(PG_CONFIG) --ldflags) \
-	-L $(shell $(PG_CONFIG) --libdir)
-
-install-pg2arrow-legacy: pg2arrow-legacy
-	mkdir -p $(DESTDIR)$(BINDIR) && \
-	install -m 0755 $< $(DESTDIR)$(BINDIR)
-
-__pgsql2arrow.o: sql2arrow.c
-	$(CC) $(CFLAGS) -D__PG2ARROW__ -c -o $@ $<
 endif
 
 #
-# Only if mysql_config is available
+# VCF2Arrow
 #
-ifeq ($(HAS_MYSQL_CONFIG),yes)
-mysql2arrow-legacy: $(MYSQL2ARROW_LEGACY_OBJS)
-	$(CC) -o $@ $(MYSQL2ARROW_LEGACY_OBJS) \
-	$(shell $(MYSQL_CONFIG) --libs) \
-	-Wl,-rpath,$(shell $(MYSQL_CONFIG) --variable=pkglibdir)
+vcf2arrow: $(VCF2ARROW_OBJS)
+	$(CXX) -o $@ $(VCF2ARROW_OBJS) $(VCF2ARROW_LDFLAGS)
 
-install-mysql2arrow-legacy: mysql2arrow-legacy
+install-vcf2arrow: vcf2arrow
 	mkdir -p $(DESTDIR)$(BINDIR) && \
-	install -m 0755 $< $(DESTDIR)$(BINDIR)
-
-__mysql2arrow.o: sql2arrow.c
-	$(CC) $(CFLAGS) -D__MYSQL2ARROW__ -c -o $@ $<
-endif
+	install -m 0755 vcf2arrow $(DESTDIR)$(BINDIR)
 
 #
 # VCF2Arrow(legacy)
@@ -131,16 +96,6 @@ vcf2arrow-legacy: $(VCF2ARROW_LEGACY_OBJS)
 install-vcf2arrow-legacy: vcf2arrow-legacy
 	mkdir -p $(DESTDIR)$(BINDIR) && \
 	install -m 0755 vcf2arrow-legacy $(DESTDIR)$(BINDIR)
-
-#
-# VCF2Arrow(legacy)
-#
-vcf2arrow: $(VCF2ARROW_OBJS)
-	$(CXX) -o $@ $(VCF2ARROW_OBJS) $(VCF2ARROW_LDFLAGS)
-
-install-vcf2arrow: vcf2arrow
-	mkdir -p $(DESTDIR)$(BINDIR) && \
-	install -m 0755 vcf2arrow $(DESTDIR)$(BINDIR)
 
 #
 # Arrow2CSV(legacy)

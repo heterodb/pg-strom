@@ -92,19 +92,6 @@ rpm-pg_strom: tarball
 	# configuration with symbolic link (/usr/local/cuda)
 	env QA_RPATHS=7 rpmbuild -ba $(__SPECFILE)
 
-rpm-mysql2arrow: tarball
-	cp -f $(PGSTROM_TGZ) $(__SOURCEDIR) || exit 1
-	git show --format=raw $(GITHASH):files/mysql2arrow.spec.in |	\
-		sed -e "s/@@STROM_VERSION@@/$(VERSION)/g"		\
-		    -e "s/@@STROM_RELEASE@@/$(RELEASE)/g"		\
-		    -e "s/@@STROM_TARBALL@@/$(__PGSTROM_TGZ)/g"		\
-		    -e "s/@@PGSTROM_GITHASH@@/$(GITHASH)/g" >		\
-		$(__SPECDIR)/mysql2arrow.spec
-	git show --format=raw $(GITHASH):files/pg_strom.spec.in |	\
-		awk 'BEGIN {flag=0;} /^%changelog$$/{flag=1; next;} { if (flag>0) print; }' >> \
-		$(__SPECDIR)/mysql2arrow.spec
-	env QA_RPATHS=7 rpmbuild -ba $(__SPECDIR)/mysql2arrow.spec
-
 deb:
 	@which fakeroot >&/dev/null || (echo "Run, sudo dnf install fakeroot"; exit 1)
 	@which dpkg-deb >&/dev/null || (echo "Run, sudo dnf install dpkg"; exit 1)
