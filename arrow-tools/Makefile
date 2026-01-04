@@ -13,23 +13,21 @@ HAS_PG_CONFIG = $(shell which $(PG_CONFIG)>/dev/null 2>&1 && echo yes)
 HAS_LIBARROW = $(shell pkgconf --exists arrow>/dev/null 2>&1 && echo -n yes)
 HAS_PARQUET = $(shell pkgconf --exists parquet>/dev/null 2>&1 && echo -n yes)
 
-ALL_PROGS = arrow2csv-legacy vcf2arrow-legacy
 ifeq ($(HAS_LIBARROW),yes)
+ALL_PROGS = vcf2arrow tsv2arrow arrow2csv
 ifeq ($(HAS_PG_CONFIG),yes)
 ALL_PROGS += pg2arrow
 endif
-ALL_PROGS += vcf2arrow tsv2arrow arrow2csv
+else
+$(error libarrow is missing)
 endif
 
 PG2ARROW_OBJS    = pg2arrow.o arrow_meta.o
 VCF2ARROW_OBJS   = vcf2arrow.o
 TSV2ARROW_OBJS   = tsv2arrow.o
 ARROW2CSV_OBJS   = arrow2csv.o arrow_meta.o
-VCF2ARROW_LEGACY_OBJS = vcf2arrow_legacy.o arrow_nodes.o arrow_write.o
-ARROW2CSV_LEGACY_OBJS = arrow2csv_legacy.o arrow_nodes.o
-CLEAN_OBJS = $(PG2ARROW_OBJS) $(TSV2ARROW_OBJS) $(ARROW2CSV_OBJS) $(VCF2ARROW_OBJS) \
-             $(VCF2ARROW_LEGACY_OBJS) \
-             $(ARROW2CSV_LEGACY_OBJS) $(ALL_PROGS)
+CLEAN_OBJS = $(PG2ARROW_OBJS) $(TSV2ARROW_OBJS) \
+             $(ARROW2CSV_OBJS) $(VCF2ARROW_OBJS) $(ALL_PROGS)
 
 CFLAGS = -O2 -fPIC -g -Wall -I. -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64 \
          -DPGSTROM_VERSION=\"$(PGSTROM_VERSION)\"
@@ -86,26 +84,6 @@ vcf2arrow: $(VCF2ARROW_OBJS)
 install-vcf2arrow: vcf2arrow
 	mkdir -p $(DESTDIR)$(BINDIR) && \
 	install -m 0755 vcf2arrow $(DESTDIR)$(BINDIR)
-
-#
-# VCF2Arrow(legacy)
-#
-vcf2arrow-legacy: $(VCF2ARROW_LEGACY_OBJS)
-	$(CC) -o $@ $(VCF2ARROW_LEGACY_OBJS)
-
-install-vcf2arrow-legacy: vcf2arrow-legacy
-	mkdir -p $(DESTDIR)$(BINDIR) && \
-	install -m 0755 vcf2arrow-legacy $(DESTDIR)$(BINDIR)
-
-#
-# Arrow2CSV(legacy)
-#
-arrow2csv-legacy: $(ARROW2CSV_LEGACY_OBJS)
-	$(CC) -o $@ $(ARROW2CSV_LEGACY_OBJS)
-
-install-arrow2csv-legacy: arrow2csv-legacy
-	mkdir -p $(DESTDIR)$(BINDIR) && \
-	install -m 0755 arrow2csv-legacy $(DESTDIR)$(BINDIR)
 
 #
 # Arrow2CSV
