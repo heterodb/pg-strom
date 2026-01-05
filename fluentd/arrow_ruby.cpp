@@ -20,6 +20,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <string>
+#include <syslog.h>
 #include "float2.h"
 
 using	arrowSchema		= std::shared_ptr<arrow::Schema>;
@@ -32,6 +33,9 @@ using	arrowArray		= std::shared_ptr<arrow::Array>;
 #define Elog(fmt,...)							\
 	rb_raise(rb_eException, "%s:%d " fmt,		\
 			 __FILE__, __LINE__, ##__VA_ARGS__)
+#define Info(fmt,...)								\
+	syslog(LOG_USER, "[fluentd-arrow %s:%d] " fmt,	\
+		   __FILE__, __LINE__, ##__VA_ARGS__)
 
 static inline void *
 palloc(size_t sz)
@@ -1356,6 +1360,8 @@ __arrowFileWriteParseSchemaDefs(arrowFileWrite *fw_state, VALUE __schema_defs)
 		char   *field_name = tok;
 		char   *field_type;
 		char   *field_extra;
+		bool	ts_column = false;
+		bool	tag_column = false;
 		int		stats_enabled = -1;
 		arrow::Compression::type compression = fw_state->default_compression;
 
@@ -1402,6 +1408,10 @@ __arrowFileWriteParseSchemaDefs(arrowFileWrite *fw_state, VALUE __schema_defs)
 		if (stats_enabled < 0)
 			stats_enabled = (fw_state->parquet_mode ? 1 : 0);
 		assert(stats_enabled == 0 || stats_enabled == 1);
+		if (strcasecmp(fw_state->ts_column, field_name) == 0)
+			ts_column = true;
+		if (strcasecmp(fw_state->tag_column, field_name) == 0)
+			tag_column = true;
 
 		if (strcasecmp(field_type, "bool") == 0)
 			arrow_column = std::make_shared<arrowFileWriteColumnBoolean>(field_name,
@@ -1520,6 +1530,8 @@ __arrowFileWriteParseSchemaDefs(arrowFileWrite *fw_state, VALUE __schema_defs)
 																		 compression);
 		else
 			Elog("ArrowFileWrite: not a supported type '%s' for '%s'", field_type, field_name);
+		arrow_column->ts_column = ts_column;
+		arrow_column->tag_column = tag_column;
 		fw_state->arrow_columns.push_back(arrow_column);
 	}
 }
