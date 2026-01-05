@@ -1408,12 +1408,13 @@ __arrowFileWriteParseSchemaDefs(arrowFileWrite *fw_state, VALUE __schema_defs)
 		if (stats_enabled < 0)
 			stats_enabled = (fw_state->parquet_mode ? 1 : 0);
 		assert(stats_enabled == 0 || stats_enabled == 1);
-		if (strcasecmp(fw_state->ts_column, field_name) == 0)
+		if (fw_state->ts_column && strcasecmp(fw_state->ts_column, field_name) == 0)
 			ts_column = true;
-		if (strcasecmp(fw_state->tag_column, field_name) == 0)
+		if (fw_state->tag_column && strcasecmp(fw_state->tag_column, field_name) == 0)
 			tag_column = true;
 
-		if (strcasecmp(field_type, "bool") == 0)
+		if (strcasecmp(field_type, "bool") == 0 ||
+			strcasecmp(field_type, "boolean") == 0)
 			arrow_column = std::make_shared<arrowFileWriteColumnBoolean>(field_name,
 																		 stats_enabled,
 																		 compression);
