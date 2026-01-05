@@ -19,6 +19,7 @@
 #include <ctype.h>
 #include <parquet/arrow/writer.h>
 #include <stdarg.h>
+#include <stdio.h>
 #include <string>
 
 #ifndef Elog
@@ -202,7 +203,7 @@ using	arrowFileBuilderColumn = std::shared_ptr<class ArrowFileBuilderColumn>;
 
 class ArrowFileBuilderTable
 {
-	arrowRecordBatch	__buildRecordBatch();
+	arrowRecordBatch	__buildRecordBatch(int64_t *p_nrows, size_t *p_chunk_sz);
 	arrowMetadata		__buildMinMaxStats();
 	std::shared_ptr<parquet::WriterProperties>		__parquetWriterProperties();
 	std::shared_ptr<parquet::ArrowWriterProperties>	__parquetArrowProperties();
@@ -211,6 +212,10 @@ protected:
 	std::shared_ptr<arrow::ipc::RecordBatchWriter>	arrow_file_writer;
 	std::unique_ptr<parquet::arrow::FileWriter>		parquet_file_writer;
 	bool			parquet_mode;
+	uint32_t		total_num_chunks;		/* number of written chunks */
+	uint64_t		total_num_rows;			/* number of written rows */
+	uint64_t		total_raw_length;		/* total uncompressed length */
+	uint64_t		total_written_length;	/* total compressed length */
 public:
 	std::string		appname;	/* application name (optional) */
 	std::string		pathname;
@@ -230,11 +235,16 @@ public:
 		default_compression = __compression;
 		arrow_schema = nullptr;
 		table_metadata = std::make_shared<arrow::KeyValueMetadata>();
+
+		total_num_chunks = 0;
+		total_num_rows = 0;
+		total_raw_length = 0;
+		total_written_length = 0;
 	}
 	bool		Open(const char *__pathname, bool allow_overwrite = false);
-	void		Close();
+	void		Close(FILE *out = NULL);		/* !=NULL, if shows progress */
 	void		AssignSchema(void);
-	void		WriteChunk(void);
+	void		WriteChunk(FILE *out = NULL);	/* !=NULL, if shows progress */
 	bool		checkCompatibility(arrowFileBuilderTable buddy);
 	std::string PrintSchema(const char *ftable_name, const char *arrow_filename);
 };
@@ -328,12 +338,24 @@ public:
 	}
 protected:
 	virtual void	__parquetWriterProperties(parquet::WriterProperties::Builder &builder,
-											  arrow::Compression::type default_compression)
+											  const ArrowFileBuilderTable *af_builder,
+											  std::string parent_name)
 	{
-		// if column level compression is different from default_compression,
-		// set its own compression
+		std::string colname;
+
+		if (parent_name.size() > 0)
+			colname = parent_name + std::string(".");
+		colname += field_name;
+
+		// disables min/max statistics
+		if (!stats_enabled)
+			builder.disable_statistics();
+		// if column level compression is different from the default_compression,
+		// set its own compression.
+		if (af_builder->default_compression != compression)
+			builder.compression(colname, compression);
 		for (int j=0; j < children.size(); j++)
-			children[j]->__parquetWriterProperties(builder, default_compression);
+			children[j]->__parquetWriterProperties(builder, af_builder, colname);
 	}
 };
 
@@ -1357,10 +1379,9 @@ ArrowFileBuilderTable::Open(const char *__pathname, bool allow_overwrite)
 }
 
 void
-ArrowFileBuilderTable::Close(void)
+ArrowFileBuilderTable::Close(FILE *out)
 {
-	arrow::Status	rv;
-	int64_t			nrows = -1;
+	int64_t		nrows = -1;
 
 	/* flush if remaining record exist */
 	for (int i=0; i < arrow_columns.size(); i++)
@@ -1374,11 +1395,11 @@ ArrowFileBuilderTable::Close(void)
 			Elog("Bug? number of rows in arrow_builder is not consistent");
 	}
 	if (nrows > 0)
-		WriteChunk();
+		WriteChunk(out);
 	/* write out arrow footer */
 	if (arrow_file_writer)
 	{
-		rv = arrow_file_writer->Close();
+		auto	rv = arrow_file_writer->Close();
 		if (!rv.ok())
 			Elog("failed on arrow::ipc::RecordBatchWriter::Close: %s",
 				 rv.ToString().c_str());
@@ -1387,7 +1408,7 @@ ArrowFileBuilderTable::Close(void)
 	/* write out parquet footer */
 	if (parquet_file_writer)
 	{
-		rv = parquet_file_writer->Close();
+		auto	rv = parquet_file_writer->Close();
 		if (!rv.ok())
 			Elog("failed on parquet::arrow::FileWriter::Close: %s",
 				 rv.ToString().c_str());
@@ -1396,11 +1417,33 @@ ArrowFileBuilderTable::Close(void)
 	/* close the output stream */
 	if (file_out_stream)
 	{
-		rv = file_out_stream->Close();
+		arrow::Result<int64_t>	foffset = file_out_stream->Tell();
+		auto	rv = file_out_stream->Close();
 		if (!rv.ok())
 			Elog("failed on arrow::ipc::io::FileOutputStream::Close: %s",
 				 rv.ToString().c_str());
 		file_out_stream = nullptr;
+		/*
+		 * display the total stats (unless opening the file, nothing will be written).
+		 */
+		if (out)
+		{
+			std::string __name = pathname;
+			if (!parquet_mode)
+				fprintf(out, "arrow file '%s' written, total %u record-batches, %ld rows, %ld bytes\n",
+						basename(__name.data()),
+						total_num_chunks,
+						total_num_rows,
+						(foffset.ok() ? foffset.ValueOrDie() : -1));
+			else
+				fprintf(out, "parquet file '%s' written, total %u row-groups, %ld rows, %ld bytes (uncompressed %ld bytes, %.2f%% compressed)\n",
+						basename(__name.data()),
+						total_num_chunks,
+						total_num_rows,
+						(foffset.ok() ? foffset.ValueOrDie() : -1),
+						total_raw_length,
+						((double)total_written_length / (double)total_raw_length) * 100.0);
+		}
 	}
 }
 
@@ -1458,14 +1501,16 @@ ArrowFileBuilderTable::PrintSchema(const char *ftable_name,
 }
 
 arrowRecordBatch
-ArrowFileBuilderTable::__buildRecordBatch(void)
+ArrowFileBuilderTable::__buildRecordBatch(int64_t  *p_nrows, size_t *p_chunk_sz)
 {
 	std::vector<arrowArray> results;
+	size_t		chunk_sz = 0;
 	int64_t		nrows = -1;
 
 	for (int j=0; j < arrow_columns.size(); j++)
 	{
 		auto	column = arrow_columns[j];
+		int64_t	__chunk_sz = column->chunkSize();	//must be called before Finish()
 		int64_t	__nrows = column->Finish();
 
 		if (nrows < 0)
@@ -1473,8 +1518,11 @@ ArrowFileBuilderTable::__buildRecordBatch(void)
 		else if (nrows != __nrows)
 			Elog("Bug? number of rows mismatch across the buffers");
 		assert(column->arrow_array != NULL);
+		chunk_sz += __chunk_sz;
 		results.push_back(column->arrow_array);
 	}
+	*p_nrows = nrows;
+	*p_chunk_sz = chunk_sz;
 	return arrow::RecordBatch::Make(arrow_schema, nrows, results);
 }
 
@@ -1505,7 +1553,7 @@ ArrowFileBuilderTable::__parquetWriterProperties()
 	/* default compression method */
 	builder.compression(default_compression);
 	for (int j=0; j < arrow_columns.size(); j++)
-		arrow_columns[j]->__parquetWriterProperties(builder, default_compression);
+		arrow_columns[j]->__parquetWriterProperties(builder, this, std::string(""));
 	// MEMO: Parquet enables min/max/null-count statistics in the default,
 	// so we don't need to touch something special ...(like enable_statistics())
 	return builder.build();
@@ -1518,8 +1566,14 @@ ArrowFileBuilderTable::__parquetArrowProperties()
 }
 
 void
-ArrowFileBuilderTable::WriteChunk(void)
+ArrowFileBuilderTable::WriteChunk(FILE *out)
 {
+	arrow::Result<int64_t> foffset;
+	uint32_t	chunk_id;
+	size_t		chunk_sz;
+	int64_t		nrows;
+	int64_t		f_head, f_tail;
+
 	if (!file_out_stream)
 		Elog("ArrowFileBuilderTable::Open() must be called before WriteChunk()");
 	if (!arrow_schema)
@@ -1536,13 +1590,17 @@ ArrowFileBuilderTable::WriteChunk(void)
 					 rv.status().ToString().c_str());
 			arrow_file_writer = rv.ValueOrDie();
 		}
+		foffset = file_out_stream->Tell();
+		f_head = (foffset.ok() ? foffset.ValueOrDie() : -1);
 		/* write out record batch */
-		auto	rv = arrow_file_writer->WriteRecordBatch(*__buildRecordBatch(),
-														 __buildMinMaxStats());
-
+		auto	rbatch = __buildRecordBatch(&nrows, &chunk_sz);
+		auto	metadata = __buildMinMaxStats();
+		auto	rv = arrow_file_writer->WriteRecordBatch(*rbatch, metadata);
 		if (!rv.ok())
 			Elog("failed on arrow::ipc::RecordBatchWriter::WriteRecordBatch: %s",
 				 rv.ToString().c_str());
+		foffset = file_out_stream->Tell();
+		f_tail = (foffset.ok() ? foffset.ValueOrDie() : -1);
 	}
 	else
 	{
@@ -1559,9 +1617,12 @@ ArrowFileBuilderTable::WriteChunk(void)
 					 pathname.c_str(), rv.status().ToString().c_str());
 			parquet_file_writer = std::move(rv).ValueOrDie();
 		}
+		foffset = file_out_stream->Tell();
+		f_head = (foffset.ok() ? foffset.ValueOrDie() : -1);
 		/* write out row-group */
 		{
-			auto	rv = parquet_file_writer->WriteRecordBatch(*__buildRecordBatch());
+			auto	rbatch = __buildRecordBatch(&nrows, &chunk_sz);
+			auto	rv = parquet_file_writer->WriteRecordBatch(*rbatch);
 			if (!rv.ok())
 				Elog("failed on parquet::arrow::FileWriter::WriteRecordBatch: %s",
 					 rv.ToString().c_str());
@@ -1574,7 +1635,36 @@ ArrowFileBuilderTable::WriteChunk(void)
 				Elog("failed on parquet::arrow::FileWriter::NewBufferedRowGroup: %s",
 					 rv.ToString().c_str());
 		}
+		foffset = file_out_stream->Tell();
+		f_tail = (foffset.ok() ? foffset.ValueOrDie() : -1);
 	}
+	chunk_id = total_num_chunks++;
+	total_num_rows += nrows;
+	total_raw_length += chunk_sz;
+	total_written_length += (f_tail - f_head);
+	/* shows progress */
+	if (out)
+	{
+		time_t		t = time(NULL);
+		struct tm	tm;
+
+		localtime_r(&t, &tm);
+		fprintf(out, "%04d-%02d-%02d %02d:%02d:%02d %s[%u] nitems=%ld, length=%ld at file offset=%ld\n",
+				tm.tm_year + 1900,
+				tm.tm_mon + 1,
+				tm.tm_mday,
+				tm.tm_hour,
+				tm.tm_min,
+				tm.tm_sec,
+				!parquet_mode ? "Record Batch" : "Row Group",
+				chunk_id,
+				nrows,
+				f_head,
+				f_tail - f_head);
+	}
+	/* reset buffers */
+	for (int j=0; j < arrow_columns.size(); j++)
+		arrow_columns[j]->Reset();
 }
 
 bool

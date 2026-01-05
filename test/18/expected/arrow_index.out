@@ -50,19 +50,18 @@ SELECT * FROM regtest_arrow_index_temp.regtest_arrow
  WHERE date_num=(SELECT date_num FROM regtest_arrow_index_temp.target_num);
                                               QUERY PLAN                                              
 ------------------------------------------------------------------------------------------------------
- Gather (actual rows=269.00 loops=1)
+ Gather (actual rows=269 loops=1)
    Workers Planned: 2
    Workers Launched: 2
    InitPlan 1
-     ->  Seq Scan on target_num (actual rows=1.00 loops=1)
-   ->  Parallel Foreign Scan on regtest_arrow (actual rows=89.67 loops=3)
-         Disabled: true
+     ->  Seq Scan on target_num (actual rows=1 loops=1)
+   ->  Parallel Foreign Scan on regtest_arrow (actual rows=90 loops=3)
          Filter: (date_num = (InitPlan 1).col1)
          Rows Removed by Filter: 103473
          referenced: id, int_num, float_num, half_num, decimal_num, date_num, time_num, timestamp_num
          Stats-Hint: (date_num = $0)  [loaded: 1, skipped: 3]
          file0: test_arrow_index.data (read: 51.50MB, size: 51.50MB)
-(12 rows)
+(11 rows)
 
 EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF,BUFFERS OFF)
 SELECT count(*)
@@ -70,8 +69,8 @@ SELECT count(*)
  WHERE date_num between '2019-04-14' and '2023-05-23';
                                                         QUERY PLAN                                                        
 --------------------------------------------------------------------------------------------------------------------------
- Aggregate (actual rows=1.00 loops=1)
-   ->  Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=2.00 loops=1)
+ Aggregate (actual rows=1 loops=1)
+   ->  Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=2 loops=1)
          GPU Projection: pgstrom.nrows()
          GPU Scan Quals: ((date_num >= '04-14-2019'::date) AND (date_num <= '05-23-2023'::date)) [exec: 621378 -> 374353]
          GPU Group Key: 
@@ -105,19 +104,18 @@ SELECT * FROM regtest_arrow_index_temp.regtest_arrow
  WHERE int_num=(SELECT int_num FROM regtest_arrow_index_temp.target_num);
                                               QUERY PLAN                                              
 ------------------------------------------------------------------------------------------------------
- Gather (actual rows=1.00 loops=1)
+ Gather (actual rows=1 loops=1)
    Workers Planned: 2
    Workers Launched: 2
    InitPlan 1
-     ->  Seq Scan on target_num (actual rows=1.00 loops=1)
-   ->  Parallel Foreign Scan on regtest_arrow (actual rows=0.33 loops=3)
-         Disabled: true
+     ->  Seq Scan on target_num (actual rows=1 loops=1)
+   ->  Parallel Foreign Scan on regtest_arrow (actual rows=0 loops=3)
          Filter: (int_num = (InitPlan 1).col1)
          Rows Removed by Filter: 103563
          referenced: id, int_num, float_num, half_num, decimal_num, date_num, time_num, timestamp_num
          Stats-Hint: (int_num = $0)  [loaded: 1, skipped: 3]
          file0: test_arrow_index.data (read: 51.50MB, size: 51.50MB)
-(12 rows)
+(11 rows)
 
 EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF,BUFFERS OFF)
 SELECT count(*)
@@ -125,8 +123,8 @@ SELECT count(*)
  WHERE int_num between -50000 and 50000;
                                                QUERY PLAN                                               
 --------------------------------------------------------------------------------------------------------
- Aggregate (actual rows=1.00 loops=1)
-   ->  Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=1.00 loops=1)
+ Aggregate (actual rows=1 loops=1)
+   ->  Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=1 loops=1)
          GPU Projection: pgstrom.nrows()
          GPU Scan Quals: ((int_num >= '-50000'::integer) AND (int_num <= 50000)) [exec: 310689 -> 2941]
          GPU Group Key: 
@@ -160,19 +158,18 @@ SELECT * FROM regtest_arrow_index_temp.regtest_arrow
  WHERE float_num=(SELECT float_num FROM regtest_arrow_index_temp.target_num);
                                               QUERY PLAN                                              
 ------------------------------------------------------------------------------------------------------
- Gather (actual rows=1.00 loops=1)
+ Gather (actual rows=1 loops=1)
    Workers Planned: 2
    Workers Launched: 2
    InitPlan 1
-     ->  Seq Scan on target_num (actual rows=1.00 loops=1)
-   ->  Parallel Foreign Scan on regtest_arrow (actual rows=0.33 loops=3)
-         Disabled: true
+     ->  Seq Scan on target_num (actual rows=1 loops=1)
+   ->  Parallel Foreign Scan on regtest_arrow (actual rows=0 loops=3)
          Filter: (float_num = (InitPlan 1).col1)
          Rows Removed by Filter: 103563
          referenced: id, int_num, float_num, half_num, decimal_num, date_num, time_num, timestamp_num
          Stats-Hint: (float_num = $0)  [loaded: 1, skipped: 3]
          file0: test_arrow_index.data (read: 51.50MB, size: 51.50MB)
-(12 rows)
+(11 rows)
 
 EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF,BUFFERS OFF)
 SELECT count(*)
@@ -180,8 +177,8 @@ SELECT count(*)
  WHERE float_num between -2000 and 2000;
                                                                QUERY PLAN                                                                
 -----------------------------------------------------------------------------------------------------------------------------------------
- Aggregate (actual rows=1.00 loops=1)
-   ->  Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=1.00 loops=1)
+ Aggregate (actual rows=1 loops=1)
+   ->  Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=1 loops=1)
          GPU Projection: pgstrom.nrows()
          GPU Scan Quals: ((float_num >= '-2000'::double precision) AND (float_num <= '2000'::double precision)) [exec: 310689 -> 200036]
          GPU Group Key: 
@@ -215,18 +212,17 @@ SELECT * FROM regtest_arrow_index_temp.regtest_arrow
  WHERE half_num=(SELECT half_num FROM regtest_arrow_index_temp.target_num);
                                               QUERY PLAN                                              
 ------------------------------------------------------------------------------------------------------
- Gather (actual rows=15.00 loops=1)
+ Gather (actual rows=15 loops=1)
    Workers Planned: 2
    Workers Launched: 2
    InitPlan 1
-     ->  Seq Scan on target_num (actual rows=1.00 loops=1)
-   ->  Parallel Foreign Scan on regtest_arrow (actual rows=5.00 loops=3)
-         Disabled: true
+     ->  Seq Scan on target_num (actual rows=1 loops=1)
+   ->  Parallel Foreign Scan on regtest_arrow (actual rows=5 loops=3)
          Filter: (half_num = (InitPlan 1).col1)
          Rows Removed by Filter: 333328
          referenced: id, int_num, float_num, half_num, decimal_num, date_num, time_num, timestamp_num
          file0: test_arrow_index.data (read: 51.50MB, size: 51.50MB)
-(11 rows)
+(10 rows)
 
 EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF,BUFFERS OFF)
 SELECT count(*)
@@ -234,8 +230,8 @@ SELECT count(*)
  WHERE half_num between -2000 and 2000;
                                                                QUERY PLAN                                                               
 ----------------------------------------------------------------------------------------------------------------------------------------
- Aggregate (actual rows=1.00 loops=1)
-   ->  Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=1.00 loops=1)
+ Aggregate (actual rows=1 loops=1)
+   ->  Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=1 loops=1)
          GPU Projection: pgstrom.nrows()
          GPU Scan Quals: ((half_num >= '-2000'::double precision) AND (half_num <= '2000'::double precision)) [exec: 1000000 -> 199782]
          GPU Group Key: 
@@ -268,19 +264,18 @@ SELECT * FROM regtest_arrow_index_temp.regtest_arrow
  WHERE decimal_num=(SELECT decimal_num FROM regtest_arrow_index_temp.target_num);
                                               QUERY PLAN                                              
 ------------------------------------------------------------------------------------------------------
- Gather (actual rows=0.00 loops=1)
+ Gather (actual rows=0 loops=1)
    Workers Planned: 2
    Workers Launched: 2
    InitPlan 1
-     ->  Seq Scan on target_num (actual rows=1.00 loops=1)
-   ->  Parallel Foreign Scan on regtest_arrow (actual rows=0.00 loops=3)
-         Disabled: true
+     ->  Seq Scan on target_num (actual rows=1 loops=1)
+   ->  Parallel Foreign Scan on regtest_arrow (actual rows=0 loops=3)
          Filter: (decimal_num = (InitPlan 1).col1)
          Rows Removed by Filter: 103563
          referenced: id, int_num, float_num, half_num, decimal_num, date_num, time_num, timestamp_num
          Stats-Hint: (decimal_num = $0)  [loaded: 1, skipped: 3]
          file0: test_arrow_index.data (read: 51.50MB, size: 51.50MB)
-(12 rows)
+(11 rows)
 
 EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF,BUFFERS OFF)
 SELECT count(*)
@@ -288,8 +283,8 @@ SELECT count(*)
  WHERE decimal_num between -5000 and 5000;
                                                         QUERY PLAN                                                         
 ---------------------------------------------------------------------------------------------------------------------------
- Aggregate (actual rows=1.00 loops=1)
-   ->  Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=2.00 loops=1)
+ Aggregate (actual rows=1 loops=1)
+   ->  Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=2 loops=1)
          GPU Projection: pgstrom.nrows()
          GPU Scan Quals: ((decimal_num >= '-5000'::numeric) AND (decimal_num <= '5000'::numeric)) [exec: 932067 -> 500583]
          GPU Group Key: 
@@ -323,19 +318,18 @@ SELECT * FROM regtest_arrow_index_temp.regtest_arrow
  WHERE time_num=(SELECT time_num FROM regtest_arrow_index_temp.target_num);
                                               QUERY PLAN                                              
 ------------------------------------------------------------------------------------------------------
- Gather (actual rows=1.00 loops=1)
+ Gather (actual rows=1 loops=1)
    Workers Planned: 2
    Workers Launched: 2
    InitPlan 1
-     ->  Seq Scan on target_num (actual rows=1.00 loops=1)
-   ->  Parallel Foreign Scan on regtest_arrow (actual rows=0.33 loops=3)
-         Disabled: true
+     ->  Seq Scan on target_num (actual rows=1 loops=1)
+   ->  Parallel Foreign Scan on regtest_arrow (actual rows=0 loops=3)
          Filter: (time_num = (InitPlan 1).col1)
          Rows Removed by Filter: 103563
          referenced: id, int_num, float_num, half_num, decimal_num, date_num, time_num, timestamp_num
          Stats-Hint: (time_num = $0)  [loaded: 1, skipped: 3]
          file0: test_arrow_index.data (read: 51.50MB, size: 51.50MB)
-(12 rows)
+(11 rows)
 
 EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF,BUFFERS OFF)
 SELECT count(*)
@@ -343,8 +337,8 @@ SELECT count(*)
  WHERE time_num between '09:00:00' and '17:00:00';
                                                                         QUERY PLAN                                                                        
 ----------------------------------------------------------------------------------------------------------------------------------------------------------
- Aggregate (actual rows=1.00 loops=1)
-   ->  Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=2.00 loops=1)
+ Aggregate (actual rows=1 loops=1)
+   ->  Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=2 loops=1)
          GPU Projection: pgstrom.nrows()
          GPU Scan Quals: ((time_num >= '09:00:00'::time without time zone) AND (time_num <= '17:00:00'::time without time zone)) [exec: 621378 -> 333443]
          GPU Group Key: 
@@ -380,19 +374,18 @@ SELECT * FROM regtest_arrow_index_temp.regtest_arrow
 WHERE timestamp_num=(SELECT timestamp_num FROM regtest_arrow_index_temp.target_num);
                                               QUERY PLAN                                              
 ------------------------------------------------------------------------------------------------------
- Gather (actual rows=1.00 loops=1)
+ Gather (actual rows=1 loops=1)
    Workers Planned: 2
    Workers Launched: 2
    InitPlan 1
-     ->  Seq Scan on target_num (actual rows=1.00 loops=1)
-   ->  Parallel Foreign Scan on regtest_arrow (actual rows=0.33 loops=3)
-         Disabled: true
+     ->  Seq Scan on target_num (actual rows=1 loops=1)
+   ->  Parallel Foreign Scan on regtest_arrow (actual rows=0 loops=3)
          Filter: (timestamp_num = (InitPlan 1).col1)
          Rows Removed by Filter: 103563
          referenced: id, int_num, float_num, half_num, decimal_num, date_num, time_num, timestamp_num
          Stats-Hint: (timestamp_num = $0)  [loaded: 1, skipped: 3]
          file0: test_arrow_index.data (read: 51.50MB, size: 51.50MB)
-(12 rows)
+(11 rows)
 
 EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF,BUFFERS OFF)
 SELECT count(*)
@@ -400,8 +393,8 @@ SELECT count(*)
  WHERE timestamp_num between '2019-04-14 09:00:00' and '2023-05-23 17:00:00';
                                                                                                   QUERY PLAN                                                                                                  
 --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Aggregate (actual rows=1.00 loops=1)
-   ->  Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=2.00 loops=1)
+ Aggregate (actual rows=1 loops=1)
+   ->  Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=2 loops=1)
          GPU Projection: pgstrom.nrows()
          GPU Scan Quals: ((timestamp_num >= 'Sun Apr 14 09:00:00 2019'::timestamp without time zone) AND (timestamp_num <= 'Tue May 23 17:00:00 2023'::timestamp without time zone)) [exec: 621378 -> 410884]
          GPU Group Key: 
