@@ -27,6 +27,7 @@ using	arrowSchema		= std::shared_ptr<arrow::Schema>;
 using	arrowField		= std::shared_ptr<arrow::Field>;
 using	arrowBuilder	= std::shared_ptr<arrow::ArrayBuilder>;
 using	arrowArray		= std::shared_ptr<arrow::Array>;
+using	arrowMetadata	= std::shared_ptr<arrow::KeyValueMetadata>;
 
 #define Min(a,b)		((a) < (b) ? (a) : (b))
 #define Max(a,b)		((a) > (b) ? (a) : (b))
@@ -157,6 +158,7 @@ public:
 	arrow::Compression::type compression;	/* valid only if parquet-mode */
 	arrowBuilder	arrow_builder;
 	arrowArray		arrow_array;
+	arrowMetadata	metadata;
 	arrowFileWriteColumn(const char *__attname,
 						 const char *__typname,
 						 bool __stats_enabled,
@@ -169,6 +171,7 @@ public:
 		tag_column = false;
 		stats_enabled = __stats_enabled;
 		compression = __compression;
+		metadata = std::make_shared<arrow::KeyValueMetadata>();
 	}
 	virtual void	appendStats(std::shared_ptr<arrow::KeyValueMetadata> custom_metadata) = 0;
 	virtual void	putValue(VALUE datum) = 0;
@@ -1408,9 +1411,9 @@ __arrowFileWriteParseSchemaDefs(arrowFileWrite *fw_state, VALUE __schema_defs)
 		if (stats_enabled < 0)
 			stats_enabled = (fw_state->parquet_mode ? 1 : 0);
 		assert(stats_enabled == 0 || stats_enabled == 1);
-		if (strcasecmp(fw_state->ts_column, field_name) == 0)
+		if (fw_state->ts_column && strcasecmp(fw_state->ts_column, field_name) == 0)
 			ts_column = true;
-		if (strcasecmp(fw_state->tag_column, field_name) == 0)
+		if (fw_state->tag_column && strcasecmp(fw_state->tag_column, field_name) == 0)
 			tag_column = true;
 
 		if (strcasecmp(field_type, "bool") == 0)
@@ -1521,13 +1524,21 @@ __arrowFileWriteParseSchemaDefs(arrowFileWrite *fw_state, VALUE __schema_defs)
 																	  stats_enabled,
 																	  compression);
 		else if (strcasecmp(field_type, "ipaddr4") == 0)
+		{
 			arrow_column = std::make_shared<arrowFileWriteColumnIpAddr4>(field_name,
 																		 stats_enabled,
 																		 compression);
+			arrow_column->metadata->Append(std::string("pg_type"),
+										   std::string("inet"));
+		}
 		else if (strcasecmp(field_type, "ipaddr6") == 0)
+		{
 			arrow_column = std::make_shared<arrowFileWriteColumnIpAddr6>(field_name,
 																		 stats_enabled,
 																		 compression);
+			arrow_column->metadata->Append(std::string("pg_type"),
+										   std::string("inet"));
+		}
 		else
 			Elog("ArrowFileWrite: not a supported type '%s' for '%s'", field_type, field_name);
 		arrow_column->ts_column = ts_column;
@@ -1559,7 +1570,10 @@ arrowFileWrite__initialize(VALUE __self,
 		{
 			auto	column = fw_state->arrow_columns[i];
 			auto	builder = column->arrow_builder;
-			arrow_fields.push_back(arrow::field(column->attname, builder->type()));
+			arrow_fields.push_back(arrow::field(column->attname,
+												builder->type(),
+												true,	/* nullable */
+												column->metadata));
 		}
 		fw_state->arrow_schema = arrow::schema(arrow_fields);
 	}
