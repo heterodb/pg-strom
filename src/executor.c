@@ -2370,6 +2370,11 @@ pgstromSharedStateShutdownDSM(CustomScanState *node)
 	pgstromSharedState *dst_state;
 	EState			   *estate = node->ss.ps.state;
 
+	if (pts->conn)
+	{
+		xpuClientCloseSession(pts->conn);
+		pts->conn = NULL;
+	}
 	if (pts->br_state)
 		pgstromBrinIndexShutdownDSM(pts);
 	if (pts->gcache_desc)
