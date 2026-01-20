@@ -14,7 +14,7 @@ HAS_LIBARROW = $(shell pkgconf --exists arrow>/dev/null 2>&1 && echo -n yes)
 HAS_PARQUET = $(shell pkgconf --exists parquet>/dev/null 2>&1 && echo -n yes)
 
 ifeq ($(HAS_LIBARROW),yes)
-ALL_PROGS = vcf2arrow tsv2arrow arrow2csv
+ALL_PROGS = vcf2arrow tsv2arrow arrow2csv arrow2tsv
 ifeq ($(HAS_PG_CONFIG),yes)
 ALL_PROGS += pg2arrow
 endif
@@ -26,7 +26,8 @@ PG2ARROW_OBJS    = pg2arrow.o arrow_meta.o
 VCF2ARROW_OBJS   = vcf2arrow.o
 TSV2ARROW_OBJS   = tsv2arrow.o
 ARROW2CSV_OBJS   = arrow2csv.o arrow_meta.o
-CLEAN_OBJS = $(PG2ARROW_OBJS) $(TSV2ARROW_OBJS) \
+ARROW2TSV_OBJS   = arrow2tsv.o
+CLEAN_OBJS = $(PG2ARROW_OBJS) $(TSV2ARROW_OBJS) $(ARROW2TSV_OBJS) \
              $(ARROW2CSV_OBJS) $(VCF2ARROW_OBJS) $(ALL_PROGS)
 
 CFLAGS = -O2 -fPIC -g -Wall -I. -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64 \
@@ -49,11 +50,13 @@ PG2ARROW_LDFLAGS  += $(shell pkgconf --libs parquet)
 VCF2ARROW_LDFLAGS += $(shell pkgconf --libs parquet)
 TSV2ARROW_LDFLAGS += $(shell pkgconf --libs parquet)
 ARROW2CSV_LDFLAGS += $(shell pkgconf --libs parquet)
+ARROW2TSV_LDFLAGS += $(shell pkgconf --libs parquet)
 else
 PG2ARROW_LDFLAGS  += $(shell pkgconf --libs arrow)
 VCF2ARROW_LDFLAGS += $(shell pkgconf --libs arrow)
 TSV2ARROW_LDFLAGS += $(shell pkgconf --libs arrow)
 ARROW2CSV_LDFLAGS += $(shell pkgconf --libs arrow)
+ARROW2TSV_LDFLAGS += $(shell pkgconf --libs arrow)
 endif
 endif
 CPPFLAGS += -std=c++17 $(CFLAGS) -Wno-sign-compare
@@ -92,6 +95,16 @@ arrow2csv: $(ARROW2CSV_OBJS)
 	$(CXX) $(CPPFLAGS) -o $@ $(ARROW2CSV_OBJS) $(ARROW2CSV_LDFLAGS)
 
 install-arrow2csv: arrow2csv
+	mkdir -p $(DESTDIR)$(BINDIR) && \
+	install -m 0755 $< $(DESTDIR)$(BINDIR)
+
+#
+# Arrow2TSV
+#
+arrow2tsv: $(ARROW2TSV_OBJS)
+	$(CXX) $(CPPFLAGS) -o $@ $(ARROW2TSV_OBJS) $(ARROW2TSV_LDFLAGS)
+
+install-arrow2tsv: arrow2tsv
 	mkdir -p $(DESTDIR)$(BINDIR) && \
 	install -m 0755 $< $(DESTDIR)$(BINDIR)
 

@@ -15,6 +15,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <unistd.h>
+#include <arpa/inet.h>
 #include "float2.h"
 #include "arrow_defs.h"
 
@@ -374,7 +375,8 @@ print_create_table(std::shared_ptr<arrow::Schema> arrow_schema)
 }
 
 static void
-process_one_token(std::shared_ptr<arrow::Array> carray, int64_t rowid, bool in_quote)
+process_one_token(std::shared_ptr<Field> field,
+				  std::shared_ptr<arrow::Array> carray, int64_t rowid, bool in_quote)
 {
 	if (carray->IsNull(rowid))
 		return;
@@ -483,8 +485,30 @@ process_one_token(std::shared_ptr<arrow::Array> carray, int64_t rowid, bool in_q
 		}
 		case Type::FIXED_SIZE_BINARY: {
 			auto	arr = std::static_pointer_cast<arrow::FixedSizeBinaryArray>(carray);
+			auto	metadata = field->metadata();
+
+			for (int k=0; k < metadata->size(); k++)
+			{
+				if (metadata->key(k) == "pg_type" &&
+					metadata->value(k) == "inet" &&
+					(arr->byte_width() == 4 || arr->byte_width() == 16))
+				{
+					char	temp[80];
+
+					if (inet_ntop(arr->byte_width() == 4
+								  ? AF_INET
+								  : AF_INET6,
+								  arr->GetValue(rowid),
+								  temp, sizeof(temp)) != NULL)
+					{
+						printf("\"%s\"", temp);
+						goto found_special_inet;
+					}
+				}
+			}
 			__print_binary_token((const char *)arr->GetValue(rowid),
 								 arr->byte_width());
+		found_special_inet:
 			break;
 		}
 		case Type::DATE32: {
@@ -694,6 +718,7 @@ process_one_token(std::shared_ptr<arrow::Array> carray, int64_t rowid, bool in_q
 		case Type::LIST: {
 			auto	arr = std::static_pointer_cast<arrow::ListArray>(carray);
 			auto	sub_array = arr->values();
+			auto	dtype = field->type();
 			int32_t	start = arr->value_offset(rowid);
 			int32_t	end   = arr->value_offset(rowid+1);
 
@@ -702,7 +727,7 @@ process_one_token(std::shared_ptr<arrow::Array> carray, int64_t rowid, bool in_q
 			{
 				if (k == start)
 					std::cout << ",";
-				process_one_token(sub_array, k, in_quote);
+				process_one_token(dtype->field(0), sub_array, k, in_quote);
 			}
 			std::cout << "}";
 			break;
@@ -710,6 +735,7 @@ process_one_token(std::shared_ptr<arrow::Array> carray, int64_t rowid, bool in_q
 		case Type::LARGE_LIST: {
 			auto	arr = std::static_pointer_cast<arrow::LargeListArray>(carray);
 			auto	sub_array = arr->values();
+			auto	dtype = field->type();
 			int64_t	start = arr->value_offset(rowid);
 			int64_t	end   = arr->value_offset(rowid+1);
 
@@ -718,7 +744,7 @@ process_one_token(std::shared_ptr<arrow::Array> carray, int64_t rowid, bool in_q
 			{
 				if (k == start)
 					std::cout << ",";
-				process_one_token(sub_array, k, in_quote);
+				process_one_token(dtype->field(0), sub_array, k, in_quote);
 			}
 			std::cout << "}";
 			break;
@@ -726,6 +752,7 @@ process_one_token(std::shared_ptr<arrow::Array> carray, int64_t rowid, bool in_q
 		case Type::FIXED_SIZE_LIST: {
 			auto	arr = std::static_pointer_cast<arrow::FixedSizeListArray>(carray);
 			auto	sub_array = arr->values();
+			auto	dtype = field->type();
 			int32_t	unitsz = arr->value_length();
 			int64_t	start = rowid * unitsz;
 			int64_t	end = start + unitsz;
@@ -735,14 +762,16 @@ process_one_token(std::shared_ptr<arrow::Array> carray, int64_t rowid, bool in_q
 			{
 				if (k == start)
 					std::cout << ",";
-				process_one_token(sub_array, k, in_quote);
+				process_one_token(dtype->field(0), sub_array, k, in_quote);
 			}
 			std::cout << "}";
-			break;
+			break
+				;
 		}
 		case Type::STRUCT: {
 			auto	arr = std::static_pointer_cast<arrow::StructArray>(carray);
 			auto	st_type = std::static_pointer_cast<arrow::StructType>(arr->type());
+			auto	dtype = field->type();
 			int		nfields = st_type->num_fields();
 
 			std::cout << "\"(";
@@ -751,7 +780,7 @@ process_one_token(std::shared_ptr<arrow::Array> carray, int64_t rowid, bool in_q
 				auto	sub_array = arr->field(j);
 				if (j > 0)
 					std::cout << ",";
-				process_one_token(sub_array, rowid, true);
+				process_one_token(dtype->field(j), sub_array, rowid, true);
 			}
 			std::cout << ")\"";
 			break;
@@ -840,6 +869,7 @@ process_one_table(std::shared_ptr<arrow::Table> table)
 		assert(carray->num_chunks() == 1);
 		columns_array.push_back(carray->chunk(0));
 	}
+	assert(columns_array.size() == table->num_columns());
 
 	for (int64_t i=skip_offset; i < num_rows; i++)
 	{
@@ -849,12 +879,13 @@ process_one_table(std::shared_ptr<arrow::Table> table)
 
 		for (int64_t j=0; j < columns_array.size(); j++)
 		{
+			auto	field = table->field(j);
 			auto	carray = columns_array[j];
 
 			/* add delimiter */
 			if (j > 0)
 				fputc(csv_mode ? ',' : '\t', output_filp);
-			process_one_token(carray, i, false);
+			process_one_token(field, carray, i, false);
 		}
 		std::cout << std::endl;
 		if (skip_limit > 0)
