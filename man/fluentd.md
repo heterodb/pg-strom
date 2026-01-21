@@ -113,19 +113,23 @@ Therefore, the output destination file name and schema definition information (m
 @en:##Installation
 
 @ja{
-使用しているLinuxディストリビューション用の`fluentd`パッケージをインストールします。
+使用しているLinuxディストリビューション用の`fluent-package`パッケージをインストールします。
 また、arrow-fileプラグインのインストールには`rake-compiler`モジュールが必要ですので、予めインストールしておきます。
 
-詳しくは[こちら](https://docs.fluentd.org/installation/install-by-rpm)を参照してください。
+詳しくは[公式ドキュメント](https://docs.fluentd.org/installation/install-fluent-package/install-by-rpm-fluent-package)を参照してください。
 }
 @en{
-Install the `fluentd` package for Linux distribution you are using.
-The `rake-compiler` module is required to install the arrow-file plugin, so please install it before.
+Install the `fluent-package` package for the Linux distribution you are using.
+The `rake-compiler` module is required to install the arrow-file plugin, so please install it beforehand.
+
+For more details, please refer to the [official documentation](https://docs.fluentd.org/installation/install-fluent-package/install-by-rpm-fluent-package).
 }
 
 ```
-$ curl -fsSL https://toolbelt.treasuredata.com/sh/install-redhat-fluent-package5-lts.sh | sh
+# Red Hat / AlmaLinux / Rocky Linux (LTS版)
+$ curl -fsSL https://fluentd.cdn.cncf.io/sh/install-redhat-fluent-package6-lts.sh | sh
 
+# rake-compilerのインストール
 $ sudo /opt/fluent/bin/fluent-gem install rake-compiler
 ```
 
@@ -152,7 +156,7 @@ To confirm that the Fluentd plugin is installed, run the following command.
 
 ```
 $ /opt/fluent/bin/fluent-gem list | grep arrow
-fluent-plugin-arrow-file (0.3)
+fluent-plugin-arrow-file (0.5)
 ```
 
 @ja:##設定

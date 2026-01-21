@@ -186,10 +186,13 @@ The arrow-file plugin is categorized as Output plugin. It writes out a "chunk" o
 The arrow-file plugin writes to an Apache Arrow format file with the <code>tag</code> and <code>time</code> fields and each element of the <code>record</code> associative array as a column (some may be omitted).
 Therefore, the output destination file name and schema definition information (mapping of associative array elements to columns/types) are mandatory configuration parameters.</p>
 <h2 id="installation">Installation</h2>
-<p>Install the <code>fluentd</code> package for Linux distribution you are using.
-The <code>rake-compiler</code> module is required to install the arrow-file plugin, so please install it before.</p>
-<pre><code>$ curl -fsSL https://toolbelt.treasuredata.com/sh/install-redhat-fluent-package5-lts.sh | sh
+<p>Install the <code>fluent-package</code> package for the Linux distribution you are using.
+The <code>rake-compiler</code> module is required to install the arrow-file plugin, so please install it beforehand.</p>
+<p>For more details, please refer to the <a href="https://docs.fluentd.org/installation/install-fluent-package/install-by-rpm-fluent-package">official documentation</a>.</p>
+<pre><code># Red Hat / AlmaLinux / Rocky Linux (LTS版)
+$ curl -fsSL https://fluentd.cdn.cncf.io/sh/install-redhat-fluent-package6-lts.sh | sh
 
+# rake-compilerのインストール
 $ sudo /opt/fluent/bin/fluent-gem install rake-compiler
 </code></pre>
 <p>Next, download the source code for PG-Strom and build arrow-file plugin in the <code>fluentd</code> directory.</p>
@@ -200,7 +203,7 @@ $ sudo make FLUENT=1 install
 </code></pre>
 <p>To confirm that the Fluentd plugin is installed, run the following command.</p>
 <pre><code>$ /opt/fluent/bin/fluent-gem list | grep arrow
-fluent-plugin-arrow-file (0.3)
+fluent-plugin-arrow-file (0.5)
 </code></pre>
 <h2 id="configuration">Configuration</h2>
 <p>As mentioned above, the arrow-file plugin requires the output path of the file and the schema definition at least.</p>

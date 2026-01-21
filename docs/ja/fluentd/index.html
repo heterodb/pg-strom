@@ -180,11 +180,13 @@ Rubyで記述されたプラグインの追加により、ログデータの入�
 <p>arrow-fileプラグインは、<code>tag</code>、<code>time</code>の各フィールドと、<code>record</code>連想配列の各要素（一部を省略することも可能）を列として持つApache Arrow形式ファイルへの書き出しを行います。
 そのため、出力先のファイル名とスキーマ定義情報（連想配列の要素と列/型のマッピング）は必須の設定パラメータです。</p>
 <h2 id="_3">インストール</h2>
-<p>使用しているLinuxディストリビューション用の<code>fluentd</code>パッケージをインストールします。
+<p>使用しているLinuxディストリビューション用の<code>fluent-package</code>パッケージをインストールします。
 また、arrow-fileプラグインのインストールには<code>rake-compiler</code>モジュールが必要ですので、予めインストールしておきます。</p>
-<p>詳しくは<a href="https://docs.fluentd.org/installation/install-by-rpm">こちら</a>を参照してください。</p>
-<pre><code>$ curl -fsSL https://toolbelt.treasuredata.com/sh/install-redhat-fluent-package5-lts.sh | sh
+<p>詳しくは<a href="https://docs.fluentd.org/installation/install-fluent-package/install-by-rpm-fluent-package">公式ドキュメント</a>を参照してください。</p>
+<pre><code># Red Hat / AlmaLinux / Rocky Linux (LTS版)
+$ curl -fsSL https://fluentd.cdn.cncf.io/sh/install-redhat-fluent-package6-lts.sh | sh
 
+# rake-compilerのインストール
 $ sudo /opt/fluent/bin/fluent-gem install rake-compiler
 </code></pre>
 <p>次に、PG-Stromのソースコードをダウンロードし、<code>fluentd</code> ディレクトリ以下の物件をビルドします。</p>
@@ -195,7 +197,7 @@ $ sudo make FLUENT=1 install
 </code></pre>
 <p>Fluentdのプラグインがインストールされている事を確認するため、以下のコマンドを実行します。</p>
 <pre><code>$ /opt/fluent/bin/fluent-gem list | grep arrow
-fluent-plugin-arrow-file (0.3)
+fluent-plugin-arrow-file (0.5)
 </code></pre>
 <h2 id="_4">設定</h2>
 <p>前述の通り、arrow-fileプラグインを動作させるには、出力先のパス名とスキーマ定義を設定することが最低限必要です。</p>

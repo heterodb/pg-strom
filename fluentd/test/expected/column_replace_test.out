@@ -1,4 +1,4 @@
-#"new_time[timestamp[us]]","new_tag[string]","payload[string]"
+#"new_time[timestamp[us, tz=UTC]]","new_tag[string]","payload[string]"
 2000-02-29 23:59:09.000000,replaced_tag,success
 2000-02-29 23:59:09.000000,replaced_tag,success
 2000-02-29 23:59:09.000000,replaced_tag,success
