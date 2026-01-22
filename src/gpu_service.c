@@ -3647,6 +3647,14 @@ __loadKdsParquetMallocCallback(void *data, size_t bytesize)
 	return (void *)m_chunk->m_devptr;
 }
 
+static void
+__loadKdsParquetReleaseCallback(void *data)
+{
+	gpuMemChunk	  **p_chunk = (gpuMemChunk **)data;
+
+	gpuMemFree(*p_chunk);
+}
+
 static gpuMemChunk *
 gpuservLoadKdsParquet(gpuClient *gclient,
 					  kern_data_store *kds_head,
@@ -3655,13 +3663,14 @@ gpuservLoadKdsParquet(gpuClient *gclient,
 {
 	gpuMemChunk *m_chunk;
 	kern_data_store *kds;
-	const char	*error_message;
+	char		error_message[320];
 
 	kds = parquetReadOneRowGroup(pathname,
 								 kds_head,
 								 __loadKdsParquetMallocCallback,
+								 __loadKdsParquetReleaseCallback,
 								 &m_chunk,
-								 &error_message);
+								 error_message, sizeof(error_message));
 	if (!kds)
 	{
 		__gsLog("%s", error_message);

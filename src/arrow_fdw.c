@@ -4083,6 +4083,12 @@ __parquetFillupAllocBuffer(void *__priv, size_t sz)
 	return result;
 }
 
+static void
+__parquetFillupReleaseBuffer(void *__priv)
+{
+	/* do nothing */
+}
+
 static kern_data_store *
 parquetFillupRowGroup(Relation relation,
 					  Bitmapset *referenced,
@@ -4091,7 +4097,7 @@ parquetFillupRowGroup(Relation relation,
 {
 	kern_data_store *kds_head;
 	kern_data_store *kds;
-	const char		*error_message = NULL;
+	char		error_message[320];
 
 	/* prepare the KDS buffer */
 	resetLargeStringInfo(chunk_buffer);
@@ -4104,8 +4110,10 @@ parquetFillupRowGroup(Relation relation,
 	resetLargeStringInfo(chunk_buffer);
 	kds = parquetReadOneRowGroup(rb_state->af_state->filename,
 								 kds_head,
-								 __parquetFillupAllocBuffer, chunk_buffer,
-								 &error_message);
+								 __parquetFillupAllocBuffer,
+								 __parquetFillupReleaseBuffer,
+								 chunk_buffer,
+								 error_message, sizeof(error_message));
 	if (!kds)
 		elog(ERROR, "Unable to load row-group %d of the parquet file '%s': %s",
 			 rb_state->rb_index,
