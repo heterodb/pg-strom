@@ -1,4 +1,4 @@
-"ip1","ip2"
+#"ip1[fixed_size_binary[4]]","ip2[fixed_size_binary[16]]"
 "192.168.0.1","b085:fe52:e3c1:bc49:5fab:65de:64d8:d5b8"
 "0.0.0.0","::"
 "0.0.0.1","::1"
