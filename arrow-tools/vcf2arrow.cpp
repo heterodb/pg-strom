@@ -352,7 +352,7 @@ openVcfFileHeader(FILE *filp, const char *fname, long &line_no)
 													   default_compression);
 	/* fixed fields */
 	af_builder->arrow_columns.push_back(makeVcfFieldString("chrom"));
-	af_builder->arrow_columns.push_back(makeVcfFieldString("pos"));
+	af_builder->arrow_columns.push_back(makeVcfFieldInteger("pos"));
 	af_builder->arrow_columns.push_back(makeVcfFieldString("id"));
 	af_builder->arrow_columns.push_back(makeVcfFieldString("ref"));
 	af_builder->arrow_columns.push_back(makeVcfFieldString("alt"));
