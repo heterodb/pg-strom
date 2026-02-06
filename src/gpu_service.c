@@ -3642,8 +3642,9 @@ __loadKdsParquetMallocCallback(void *data, size_t bytesize)
 
 	if (!m_chunk)
 		return NULL;
+	(void)gpuMemoryPrefetchKDS((kern_data_store *)m_chunk->m_devptr,
+							   host_mlocation);
 	*p_chunk = m_chunk;
-
 	return (void *)m_chunk->m_devptr;
 }
 
@@ -4359,6 +4360,14 @@ gpuservHandleGpuTaskExec(gpuContext *gcontext,
 		if (!s_chunk)
 			return;
 		m_kds_src = s_chunk->m_devptr;
+		rc = gpuMemoryPrefetchKDS((kern_data_store *)m_kds_src,
+								  MY_MEMLOCATION_PER_THREAD);
+		if (rc != CUDA_SUCCESS)
+		{
+			gpuClientELog(gclient, "failed on gpuMemoryPrefetchKDS: %s",
+						  cuStrError(rc));
+			return;
+		}
 	}
 	else
 	{

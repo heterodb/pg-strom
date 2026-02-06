@@ -1019,6 +1019,7 @@ loadParquetFileRowGroup(kern_data_store *kds,
 		}
 	}
 	assert(kds->usage <= kds->length);
+	kds->length = kds->usage;
 }
 
 /*
