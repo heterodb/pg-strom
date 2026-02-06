@@ -236,7 +236,6 @@ lookupParquetFileMetadata(arrow::io::ReadableFile &filp, const char *fname)
 				{
 					/* wait for completion of the metadata setup */
 					__parquetFileMetadataMutexWait();
-					fprintf(stderr, "wakeup once!\n");
 				}
 			}
 		}
