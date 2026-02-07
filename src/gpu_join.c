@@ -1860,7 +1860,7 @@ build_explain_tlist_junks(codegen_context *context,
 			}
 		}
 		if (lc == NULL)
-			elog(INFO, "scan_relid=%d anum=%d tlist_dev=%s", pp_info->scan_relid, anum, nodeToString(context->tlist_dev));
+			elog(INFO, "scan_relid=%u anum=%d tlist_dev=%s", pp_info->scan_relid, anum, nodeToString(context->tlist_dev));
 		Assert(lc != NULL);
 	}
 #endif
