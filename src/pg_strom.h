@@ -985,6 +985,7 @@ extern void		pgstrom_init_gpu_sort(void);
 /*
  * arrow_fdw.c and arrow_read.c
  */
+extern int		arrow_metadata_cache_size_kb;		/* GUC */
 extern bool		baseRelIsArrowFdw(RelOptInfo *baserel);
 extern bool 	RelationIsArrowFdw(Relation frel);
 extern gpumask_t GetOptimalGpusForArrowFdw(PlannerInfo *root,
