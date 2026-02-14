@@ -294,6 +294,7 @@ public:
 		/* for vcf2arrow */
 		vcf_allele_policy = ' ';
 	}
+	virtual ~ArrowFileBuilderColumn() = default;
 	virtual void
 	appendStats(arrowMetadata custom_metadata)
 	{
