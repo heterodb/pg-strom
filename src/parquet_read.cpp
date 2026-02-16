@@ -28,6 +28,13 @@
 #include "arrow_defs.h"
 
 /*
+ * version check: libarrow/libparquet v23 is minimum requirement
+ */
+#if PARQUET_VERSION_MAJOR < 23
+#error libarrow/libparquet must be version 23 or later
+#endif
+
+/*
  * Error Reporting
  */
 #define __Elog(fmt,...)										\
@@ -138,7 +145,7 @@ __parquetFileMetadataReclaim(size_t additional_usage)
 }
 
 static std::shared_ptr<parquet::FileMetaData>
-__readParquetFileMetadata(arrow::io::ReadableFile &filp, const char *fname)
+__readParquetFileMetadata(std::shared_ptr<arrow::io::ReadableFile> filp, const char *fname)
 {
 	struct {
 		uint32_t	metadata_len;
@@ -148,7 +155,7 @@ __readParquetFileMetadata(arrow::io::ReadableFile &filp, const char *fname)
 	std::shared_ptr<arrow::Buffer> buffer;
 	/* fetch metadata length */
 	{
-		auto	rv = filp.GetSize();
+		auto	rv = filp->GetSize();
 		if (!rv.ok())
 			__Elog("failed on arrow::io::ReadableFile('%s')::GetSize: %s",
 				   fname, rv.status().ToString().c_str());
@@ -156,7 +163,7 @@ __readParquetFileMetadata(arrow::io::ReadableFile &filp, const char *fname)
 	}
 	/* read footer 8bytes */
 	{
-		auto	rv = filp.ReadAt(length-sizeof(foot), sizeof(foot), &foot);
+		auto	rv = filp->ReadAt(length-sizeof(foot), sizeof(foot), &foot);
 		if (!rv.ok())
 			__Elog("failed on arrow::io::ReadableFile('%s')::ReadAt: %s",
 				   fname, rv.status().ToString().c_str());
@@ -167,10 +174,10 @@ __readParquetFileMetadata(arrow::io::ReadableFile &filp, const char *fname)
 	}
 	/* read binary metadata */
 	{
-		auto	rv = filp.ReadAt(length -
-								 sizeof(foot) -
-								 foot.metadata_len,
-								 foot.metadata_len);
+		auto	rv = filp->ReadAt(length -
+								  sizeof(foot) -
+								  foot.metadata_len,
+								  foot.metadata_len);
 		if (!rv.ok())
 			__Elog("failed on arrow::io::ReadableFile('%s')::ReadAt: %s",
 				   fname, rv.status().ToString().c_str());
@@ -180,9 +187,9 @@ __readParquetFileMetadata(arrow::io::ReadableFile &filp, const char *fname)
 }
 
 static std::shared_ptr<parquet::FileMetaData>
-lookupParquetFileMetadata(arrow::io::ReadableFile &filp, const char *fname)
+lookupParquetFileMetadata(std::shared_ptr<arrow::io::ReadableFile> filp, const char *fname)
 {
-	int			fdesc = filp.file_descriptor();
+	int			fdesc = filp->file_descriptor();
 	uint32_t	hash, hindex;
 	struct stat stat_buf;
 	struct {
@@ -734,9 +741,8 @@ __parquetReadOneRowGroup(const char *filename,
 				   filename,
 				   rv.status().ToString().c_str());
 		parquet_filp = rv.ValueOrDie();
+		metadata = lookupParquetFileMetadata(parquet_filp, filename);
 	}
-	/* fetch file metadata */
-	metadata = lookupParquetFileMetadata(*parquet_filp, filename);
 
 	/*
 	 * Open a new Parquet File Reader dedicated for this thread, but
@@ -746,25 +752,25 @@ __parquetReadOneRowGroup(const char *filename,
 	 * ----
 	 * Open the Parquet File (with cached metadata)
 	 */
-	raw_file_reader = parquet::ParquetFileReader::OpenFile(std::string(filename),
-														   false,	/* memory_map */
-														   parquet::default_reader_properties(),
-														   metadata);
-	if (!raw_file_reader)
 	{
-		__Elog("failed on parquet::ParquetFileReader::Open('%s')", filename);
-		return NULL;
+		parquet::ReaderProperties	reader_props;
+		reader_props.set_buffer_size(8UL << 20);	/* default buffer size = 8MB */
+
+		raw_file_reader = parquet::ParquetFileReader::Open(parquet_filp,
+														   reader_props,
+														   metadata);
 	}
 
-	/*
-	 * Open the Arrow File Reader
-	 */
-	status = parquet::arrow::FileReader::Make(arrow::default_memory_pool(),
-											  std::move(raw_file_reader),
-											  &arrow_file_reader);
-	if (!status.ok())
-		__Elog("failed on parquet::arrow::FileReader::Make('%s'): %s",
-			   filename, status.ToString().c_str());
+	/* open the arrow file reader */
+	{
+		auto	rv = parquet::arrow::FileReader::Make(arrow::default_memory_pool(),
+													  std::move(raw_file_reader));
+		if (!rv.ok())
+			__Elog("failed on parquet::arrow::FileReader::Make('%s'): %s",
+				   filename,
+				   rv.status().ToString().c_str());
+		arrow_file_reader = std::move(rv.ValueOrDie());
+	}
 
 	/*
 	 * Read the row-group as Arrow Record-Batch
