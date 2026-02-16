@@ -731,7 +731,6 @@ __parquetReadOneRowGroup(const char *filename,
     std::unique_ptr<parquet::arrow::FileReader> arrow_file_reader = nullptr;
 	std::shared_ptr<parquet::FileMetaData> metadata = nullptr;
 	kern_data_store	   *kds = NULL;
-	arrow::Status		status;
 
 	/* open the parquet file */
 	{
@@ -777,9 +776,10 @@ __parquetReadOneRowGroup(const char *filename,
 	 */
 	if (row_group_id < arrow_file_reader->num_row_groups())
 	{
+		std::shared_ptr<arrow::Table> table;
 		std::vector<int>	referenced;
 		std::vector<int>	revmap;
-		std::shared_ptr<arrow::Table> table;
+		arrow::Status		status;
 
 		setupParquetFileReferenced(kds_head, arrow_file_reader.get(),
 								   referenced, revmap);
