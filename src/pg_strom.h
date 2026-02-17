@@ -3,8 +3,8 @@
  *
  * Header file of pg_strom module
  * --
- * Copyright 2011-2023 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014-2023 (C) PG-Strom Developers Team
+ * Copyright 2011-2026 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2026 (C) PG-Strom Developers Team
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the PostgreSQL License.
@@ -40,6 +40,7 @@
 #include "catalog/pg_am.h"
 #include "catalog/pg_amop.h"
 #include "catalog/pg_cast.h"
+#include "catalog/pg_collation_d.h"
 #include "catalog/pg_database.h"
 #include "catalog/pg_depend.h"
 #include "catalog/pg_foreign_table.h"
@@ -856,6 +857,10 @@ extern bool		gpuServiceGoingTerminate(void);
 extern void		gpuservBgWorkerMain(Datum arg);
 extern void		pgstrom_init_gpu_service(void);
 
+extern void		pgstrom_inc_perf_counter(int num);
+extern void		pgstrom_add_perf_counter(int num, const struct timeval *tv_base);
+extern void		pgstrom_print_perf_counter(void);
+
 /*
  * gpu_cache.c
  */
@@ -980,6 +985,7 @@ extern void		pgstrom_init_gpu_sort(void);
 /*
  * arrow_fdw.c and arrow_read.c
  */
+extern int		arrow_metadata_cache_size_kb;		/* GUC */
 extern bool		baseRelIsArrowFdw(RelOptInfo *baserel);
 extern bool 	RelationIsArrowFdw(Relation frel);
 extern gpumask_t GetOptimalGpusForArrowFdw(PlannerInfo *root,
@@ -999,8 +1005,8 @@ extern void		pgstromArrowFdwInitDSM(ArrowFdwState *arrow_state,
 extern void		pgstromArrowFdwAttachDSM(ArrowFdwState *arrow_state,
 										 pgstromSharedState *ps_state);
 extern void		pgstromArrowFdwShutdown(ArrowFdwState *arrow_state);
-extern void		pgstromArrowFdwExplain(ArrowFdwState *arrow_state,
-									   Relation frel,
+extern void		pgstromArrowFdwExplain(ScanState *ss,
+									   ArrowFdwState *arrow_state,
 									   ExplainState *es,
 									   List *dcontext);
 extern bool		kds_arrow_fetch_tuple(TupleTableSlot *slot,

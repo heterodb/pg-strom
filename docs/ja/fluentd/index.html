@@ -108,6 +108,8 @@
               </ul>
               <p class="caption"><span class="caption-text">リリースノート</span></p>
               <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v6.1/">PG-Strom v6.1</a>
+                  </li>
                   <li class="toctree-l1"><a class="reference internal" href="../release_v6.0/">PG-Strom v6.0</a>
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="../release_v5.2/">PG-Strom v5.2</a>
@@ -178,27 +180,27 @@ Rubyで記述されたプラグインの追加により、ログデータの入�
 <p>arrow-fileプラグインは、<code>tag</code>、<code>time</code>の各フィールドと、<code>record</code>連想配列の各要素（一部を省略することも可能）を列として持つApache Arrow形式ファイルへの書き出しを行います。
 そのため、出力先のファイル名とスキーマ定義情報（連想配列の要素と列/型のマッピング）は必須の設定パラメータです。</p>
 <h2 id="_3">インストール</h2>
-<p>使用しているLinuxディストリビューション用の<code>fluentd</code>パッケージをインストールします。
-また、arrow-fileプラグインのインストールには<code>rake-compiler</code>モジュールが必要ですので、予めインストールしておきます。</p>
-<p>詳しくは<a href="https://docs.fluentd.org/installation/install-by-rpm">こちら</a>を参照してください。</p>
-<pre><code>$ curl -fsSL https://toolbelt.treasuredata.com/sh/install-redhat-fluent-package5-lts.sh | sh
-
-$ sudo /opt/fluent/bin/fluent-gem install rake-compiler
+<p>使用しているLinuxディストリビューション用の<code>fluent-package</code>パッケージをインストールします。</p>
+<p>詳しくは<a href="https://docs.fluentd.org/installation/install-fluent-package">こちら</a>を参照してください。</p>
+<pre><code>$ curl -fsSL https://fluentd.cdn.cncf.io/sh/install-redhat-fluent-package6-lts.sh | sh
 </code></pre>
 <p>次に、PG-Stromのソースコードをダウンロードし、<code>fluentd</code> ディレクトリ以下の物件をビルドします。</p>
 <pre><code>$ git clone https://github.com/heterodb/pg-strom.git
 $ cd pg-strom/fluentd
-$ make FLUENT=1 gem
-$ sudo make FLUENT=1 install
+$ make gem
+$ sudo make install
 </code></pre>
 <p>Fluentdのプラグインがインストールされている事を確認するため、以下のコマンドを実行します。</p>
 <pre><code>$ /opt/fluent/bin/fluent-gem list | grep arrow
-fluent-plugin-arrow-file (0.3)
+fluent-plugin-arrow-file (0.5)
 </code></pre>
 <h2 id="_4">設定</h2>
 <p>前述の通り、arrow-fileプラグインを動作させるには、出力先のパス名とスキーマ定義を設定することが最低限必要です。</p>
-<p>これに加えて、Apache Arrowファイルの構造上、Record Batchと呼ばれるデータの固まりはある程度大きなサイズで区切っておいた方が、検索・集計処理を行う際の処理性能を引き出しやすいです。
-arrow-fileプラグインは、Bufferプラグインから渡されるchunkごとにRecord Batchを作成するため、Bufferプラグイン側のバッファサイズはこれに準じた設定を行うべきです。デフォルトでは 256MB のバッファサイズを取るように設定されています。</p>
+<p>FluentdのWriteプラグインの構造上、arrow-fileプラグインは、Bufferプラグインから渡されたデータチャンクを1個のRecord Batchとしてファイルに書き込みます（Parquet形式ではRow Groupと呼びますが、ほぼ同じ概念です）。
+検索・集計処理を行う際には、ある程度大きなサイズのRecord Batchを作っておいた方が処理性能を引き出しやすいですが、GPUメモリに収まりきらないようなサイズはPG-Strom利用の観点からは望ましくありません。
+arrow-fileプラグインは、Bufferプラグインから渡されるデータチャンクごとにRecord Batchを作成するため、Bufferプラグイン側のバッファサイズはこれに準じた設定を行うべきです。デフォルトでは 256MB のバッファサイズを取るように設定されています。必要に応じて256MB～2GB程度のバッファサイズを設定すべきでしょう。</p>
+<p>また、以前のバージョンのarrow-fileプラグインは、Bufferプラグインからデータチャンクが渡されるたびに、既に書き込まれたArrowファイルにRecord Batchを追記していましたが、v0.5以降では、1ファイル=1Record Batch (1Row Group)という構造になっています。
+これは、libarrowやlibparquetが追記をサポートしていない事と、生成されたファイルを使用する際に排他処理が必須になってしまう事が理由です。</p>
 <p>arrow-fileプラグインの設定パラメータは以下の通りです。</p>
 <dl>
 <dt><code>path</code> [type: <code>String</code> ] (必須パラメータ)</dt>
@@ -247,11 +249,9 @@ arrow-fileプラグインは、Bufferプラグインから渡されるchunkご�
 </tr>
 </tbody>
 </table>
-<p>書式文字列はチャンクを書き出すタイミングで評価され、同名のApache Arrow形式ファイルが存在する場合には、Record Batchを追記します。存在しない場合はApache Arrow形式ファイルを新規作成し、最初のRecord Batchを書き出します。</p>
-<p>ただし、既存のApache Arrowファイルのサイズが後述の<code>filesize_threshold</code>設定値を越えている場合は、既存ファイルをリネームした後、新規にファイルを作成します。</p>
-<pre><code>（例）`path /tmp/arrow_logs/my_logs_%y%m%d.%p.log`
-</code></pre>
-<p>出力先のApache Arrowファイルは、チャンクを書き出すたびにフッタ領域を更新して全てのRecord Batchをポイントします。したがって、生成されたApache Arrowファイルは即座に読み出すことができますが、アクセス競合を避けるためには<code>lockf(3)</code>を用いて排他処理を行う必要があります。</p>
+<p>書式文字列はデータチャンクを書き出すタイミングで評価され、その名前を持つApache Arrow形式ファイル（またはApache Parquet形式ファイル）を新規作成して、Record Batch（またはRow Group）を1個持つファイルを書き出します。
+同名のファイルが存在する場合、ファイルの末尾にシーケンス番号を付与するなどして、別名でのファイル作成を試みます。</p>
+<p>例）<code>path /tmp/arrow_logs/my_logs_%y%m%d.%p.log</code></p>
 <dl>
 <dt><code>schema_defs</code> [type: <code>String</code> ] (必須パラメータ)</dt>
 <dd><code>fluent-plugin-arrow-file</code>がログデータを出力する際の、Apache Arrow形式ファイルのスキーマ定義を指定します。</dd>
@@ -263,13 +263,15 @@ arrow-fileプラグインは、Bufferプラグインから渡されるchunkご�
 <li><code>&lt;column_name&gt;</code>は列の名前です。Fluentdからarrow-fileに渡される連想配列のキー値と一致している必要があります。</li>
 <li><code>&lt;column_type&gt;</code>は列のデータ型です。以下の表を参照してください。</li>
 <li><code>&lt;column_attrs&gt;</code>は列の付加属性です。現時点では以下の属性のみがサポートされています。<ul>
-<li><code>stat_enabled</code> ... 列の統計情報を収集し、Record Batchごとの最大値/最小値を<code>max_values=...</code>および<code>min_values=...</code>カスタムメタデータとして埋め込みます。</li>
+<li><code>stat_enabled</code> ... Arrow形式において、列の統計情報を収集し、Record Batchごとの最大値/最小値を<code>max_values=...</code>および<code>min_values=...</code>カスタムメタデータとして埋め込みます。Parquet形式では無視されます。</li>
+<li><code>stat_disabled</code> ... Parquet形式はデフォルトで列ごとの統計情報を採取しますが、それを無効化します。Apache形式では無視されます。</li>
+<li>圧縮オプション ... 列単位の圧縮アルゴリズムを指定する事ができます。選択可能なアルゴリズムは<code>snappy</code>、<code>gzip</code>、<code>brotli</code>、<code>zstd</code>、<code>lz4</code>、<code>lzo</code>、<code>bz2</code>、<code>none</code>（無圧縮）のいずれかです。</li>
 </ul>
 </li>
 </ul>
 </li>
 </ul>
-<p>（例）<code>schema_defs "ts=Timestamp;stat_enabled,dev_id=Uint32,temperature=Float32,humidity=Float32"</code></p>
+<p>（例）<code>schema_defs "ts=Timestamp;stat_enabled,dev_id=Uint32,temperature=Float32;bz2,humidity=Float32"</code></p>
 <p><strong><em>arrow-fileプラグインのサポートするデータ型</em></strong></p>
 <table>
 <thead>
@@ -328,9 +330,9 @@ arrow-fileプラグインは、Bufferプラグインから渡されるchunkご�
 <dt><code>tag_column</code> [type: <code>String</code> / default: なし]</dt>
 <dd>指定した列の値を（<code>record</code>連想配列からではなく）Fluentdから渡されたログのタグ値より取得します。</dd>
 <dd>通常、このオプションで指定する列は<code>Utf8</code>などの文字列型を持っています。</dd>
-<dt><code>filesize_threshold</code> [type: <code>Integer</code> / default: 10000]</dt>
-<dd><code>fluent-plugin-arrow-file</code>が出力先ファイルを切り替える閾値をMB単位で設定します。</dd>
-<dd>デフォルトではファイルサイズが約10GBを越えた辺りで出力先を切り替えます。</dd>
+<dt><code>format</code> [type: <code>String</code> / default: <code>arrow</code>]</dt>
+<dd><code>fluent-plugin-arrow-file</code>が出力するファイル形式を設定します。</dd>
+<dd><code>arrow</code>を指定するとApache Arrow形式に、<code>parquet</code>を指定するとApache Parquet形式となります。</dd>
 </dl>
 <h2 id="_5">使用例</h2>
 <p>簡単な例として、ローカルのApache Httpdサーバのログを監視し、それをフィールド毎にパースしてApache Arrow形式ファイルに書き込みます。</p>

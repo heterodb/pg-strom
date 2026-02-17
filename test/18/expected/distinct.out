@@ -1,0 +1,236 @@
+---
+--- Test for SELECT DISTINCT
+---
+SET search_path = public;
+SET enable_seqscan = off;
+SET max_parallel_workers_per_gather = 0;
+---
+--- Scan + Distinct
+---
+VACUUM ANALYZE;
+explain (verbose, costs off)
+select distinct s_city, s_nation
+  from supplier
+ where s_region = 'ASIA'
+ order by s_city, s_nation;
+                                                                                                                                                QUERY PLAN                                                                                                                                                 
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Sort
+   Output: s_city, s_nation
+   Sort Key: supplier.s_city, supplier.s_nation
+   ->  HashAggregate
+         Output: s_city, s_nation
+         Group Key: supplier.s_city, supplier.s_nation
+         ->  Custom Scan (GpuPreAgg) on public.supplier
+               Output: s_city, s_nation
+               GPU Projection: s_city, s_nation
+               GPU Scan Quals: (s_region = 'ASIA'::bpchar) [rows: 10000 -> 2003]
+               KVars-Slot: <slot=0, type='bpchar', expr='s_region', kv_off=0x0000>, <slot=1, type='bpchar', expr='s_city', kv_off=0x3400>, <slot=2, type='bpchar', expr='s_nation', kv_off=0x6800>, <slot=3, type='bpchar', expr='s_city'>, <slot=4, type='bpchar', expr='s_nation'>
+               KVecs-Buffer: nbytes: 39936, ndims: 2, items=[kvec0=<0x0000-33ff, type='bpchar', expr='s_region'>, kvec1=<0x3400-67ff, type='bpchar', expr='s_city'>, kvec2=<0x6800-9bff, type='bpchar', expr='s_nation'>]
+               LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=1, type='bpchar' resno=4(s_city)>, <slot=2, type='bpchar' resno=5(s_nation)>, <slot=0, type='bpchar' resno=6(s_region)>]}}
+               MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=1, offset=0x3400-67ff, type='bpchar', expr='s_city'>, <slot=2, offset=0x6800-9bff, type='bpchar', expr='s_nation'>]}}}
+               Scan Quals OpCode: {Func(bool)::bpchareq args=[{Var(bpchar): slot=0, expr='s_region'}, {Const(bpchar): value='ASIA'}]}
+               Group-By KeyHash OpCode: {HashValue args=[{SaveExpr: <slot=1, type='bpchar'> arg={Var(bpchar): kvec=0x3400-6800, expr='s_city'}}, {SaveExpr: <slot=2, type='bpchar'> arg={Var(bpchar): kvec=0x6800-9c00, expr='s_nation'}}]}
+               Group-By KeyLoad OpCode: {LoadVars(depth=-2): kvars=[<slot=3, type='bpchar' resno=1(s_city)>, <slot=4, type='bpchar' resno=2(s_nation)>]}
+               Group-By KeyComp OpCode: {Bool::AND args=[{Func(bool)::bpchareq args=[{Var(bpchar): slot=1, expr='s_city'}, {Var(bpchar): slot=3, expr='s_city'}]}, {Func(bool)::bpchareq args=[{Var(bpchar): slot=2, expr='s_nation'}, {Var(bpchar): slot=4, expr='s_nation'}]}]}
+               Partial Aggregation OpCode: {AggFuncs <vref[slot=1, expr='s_city'], vref[slot=2, expr='s_nation']> args=[{SaveExpr: <slot=1, type='bpchar'> arg={Var(bpchar): kvec=0x3400-6800, expr='s_city'}}, {SaveExpr: <slot=2, type='bpchar'> arg={Var(bpchar): kvec=0x6800-9c00, expr='s_nation'}}]}
+               Fallback-desc: [<dest='0', expr='s_city', depth=0:1>, <dest='1', expr='s_nation', depth=0:1>, <dest='2', expr='s_region', depth=0:0>]
+               CUDA Stack Size: 4000
+(21 rows)
+
+select distinct s_city, s_nation
+  from supplier
+ where s_region = 'ASIA'
+ order by s_city, s_nation;
+   s_city   |    s_nation     
+------------+-----------------
+ CHINA    0 | CHINA          
+ CHINA    1 | CHINA          
+ CHINA    2 | CHINA          
+ CHINA    3 | CHINA          
+ CHINA    4 | CHINA          
+ CHINA    5 | CHINA          
+ CHINA    6 | CHINA          
+ CHINA    7 | CHINA          
+ CHINA    8 | CHINA          
+ CHINA    9 | CHINA          
+ INDIA    0 | INDIA          
+ INDIA    1 | INDIA          
+ INDIA    2 | INDIA          
+ INDIA    3 | INDIA          
+ INDIA    4 | INDIA          
+ INDIA    5 | INDIA          
+ INDIA    6 | INDIA          
+ INDIA    7 | INDIA          
+ INDIA    8 | INDIA          
+ INDIA    9 | INDIA          
+ INDONESIA0 | INDONESIA      
+ INDONESIA1 | INDONESIA      
+ INDONESIA2 | INDONESIA      
+ INDONESIA3 | INDONESIA      
+ INDONESIA4 | INDONESIA      
+ INDONESIA5 | INDONESIA      
+ INDONESIA6 | INDONESIA      
+ INDONESIA7 | INDONESIA      
+ INDONESIA8 | INDONESIA      
+ INDONESIA9 | INDONESIA      
+ JAPAN    0 | JAPAN          
+ JAPAN    1 | JAPAN          
+ JAPAN    2 | JAPAN          
+ JAPAN    3 | JAPAN          
+ JAPAN    4 | JAPAN          
+ JAPAN    5 | JAPAN          
+ JAPAN    6 | JAPAN          
+ JAPAN    7 | JAPAN          
+ JAPAN    8 | JAPAN          
+ JAPAN    9 | JAPAN          
+ VIETNAM  0 | VIETNAM        
+ VIETNAM  1 | VIETNAM        
+ VIETNAM  2 | VIETNAM        
+ VIETNAM  3 | VIETNAM        
+ VIETNAM  4 | VIETNAM        
+ VIETNAM  5 | VIETNAM        
+ VIETNAM  6 | VIETNAM        
+ VIETNAM  7 | VIETNAM        
+ VIETNAM  8 | VIETNAM        
+ VIETNAM  9 | VIETNAM        
+(50 rows)
+
+--
+-- Join + Distinct
+--
+VACUUM ANALYZE;
+explain (verbose, costs off)
+select distinct c_nation, lo_orderpriority
+  from lineorder, customer
+ where lo_custkey = c_custkey
+   and c_region = 'AMERICA'
+   and lo_shipmode = 'AIR'
+ order by c_nation, lo_orderpriority;
+                                                                                                                                                                                                                                           QUERY PLAN                                                                                                                                                                                                                                           
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Sort
+   Output: customer.c_nation, lineorder.lo_orderpriority
+   Sort Key: customer.c_nation, lineorder.lo_orderpriority
+   ->  HashAggregate
+         Output: customer.c_nation, lineorder.lo_orderpriority
+         Group Key: customer.c_nation, lineorder.lo_orderpriority
+         ->  Custom Scan (GpuPreAgg) on public.lineorder
+               Output: customer.c_nation, lineorder.lo_orderpriority
+               GPU Projection: customer.c_nation, lineorder.lo_orderpriority
+               GPU Scan Quals: (lineorder.lo_shipmode = 'AIR'::bpchar) [rows: 6001105 -> 847356]
+               GPU Join Quals [1]: (lineorder.lo_custkey = customer.c_custkey) ... [nrows: 847356 -> 169245]
+               GPU Outer Hash [1]: lineorder.lo_custkey
+               GPU Inner Hash [1]: customer.c_custkey
+               KVars-Slot: <slot=0, type='bpchar', expr='lineorder.lo_shipmode', kv_off=0x0000>, <slot=1, type='bpchar', expr='customer.c_nation', kv_off=0x3400>, <slot=2, type='bpchar', expr='lineorder.lo_orderpriority', kv_off=0x6800>, <slot=3, type='bpchar', expr='customer.c_nation'>, <slot=4, type='bpchar', expr='lineorder.lo_orderpriority'>, <slot=5, type='int4', expr='lineorder.lo_custkey', kv_off=0x9c00>, <slot=6, type='int4', expr='customer.c_custkey', kv_off=0xb000>
+               KVecs-Buffer: nbytes: 50176, ndims: 3, items=[kvec0=<0x0000-33ff, type='bpchar', expr='lo_shipmode'>, kvec1=<0x3400-67ff, type='bpchar', expr='c_nation'>, kvec2=<0x6800-9bff, type='bpchar', expr='lo_orderpriority'>, kvec3=<0x9c00-afff, type='int4', expr='lo_custkey'>, kvec4=<0xb000-c3ff, type='int4', expr='c_custkey'>]
+               LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=5, type='int4' resno=3(lo_custkey)>, <slot=2, type='bpchar' resno=7(lo_orderpriority)>, <slot=0, type='bpchar' resno=17(lo_shipmode)>]}, items[1]={LoadVars(depth=1): kvars=[<slot=1, type='bpchar' resno=1(c_nation)>, <slot=6, type='int4' resno=2(c_custkey)>]}}
+               MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=2, offset=0x6800-9bff, type='bpchar', expr='lo_orderpriority'>, <slot=5, offset=0x9c00-afff, type='int4', expr='lo_custkey'>]}}, items[1]={MoveVars(depth=1): items=[<slot=1, offset=0x3400-67ff, type='bpchar', expr='c_nation'>, <offset=0x6800-9bff, type='bpchar', expr='lo_orderpriority'>]}}}
+               Scan Quals OpCode: {Func(bool)::bpchareq args=[{Var(bpchar): slot=0, expr='lo_shipmode'}, {Const(bpchar): value='AIR'}]}
+               Join Quals OpCode: {Packed items[1]={JoinQuals:  {Func(bool)::int4eq args=[{Var(int4): kvec=0x9c00-b000, expr='lo_custkey'}, {Var(int4): slot=6, expr='c_custkey'}]}}}
+               Join HashValue OpCode: {Packed items[1]={HashValue arg={Var(int4): kvec=0x9c00-b000, expr='lo_custkey'}}}
+               Group-By KeyHash OpCode: {HashValue args=[{SaveExpr: <slot=1, type='bpchar'> arg={Var(bpchar): kvec=0x3400-6800, expr='c_nation'}}, {SaveExpr: <slot=2, type='bpchar'> arg={Var(bpchar): kvec=0x6800-9c00, expr='lo_orderpriority'}}]}
+               Group-By KeyLoad OpCode: {LoadVars(depth=-2): kvars=[<slot=3, type='bpchar' resno=1(c_nation)>, <slot=4, type='bpchar' resno=2(lo_orderpriority)>]}
+               Group-By KeyComp OpCode: {Bool::AND args=[{Func(bool)::bpchareq args=[{Var(bpchar): slot=1, expr='c_nation'}, {Var(bpchar): slot=3, expr='c_nation'}]}, {Func(bool)::bpchareq args=[{Var(bpchar): slot=2, expr='lo_orderpriority'}, {Var(bpchar): slot=4, expr='lo_orderpriority'}]}]}
+               Partial Aggregation OpCode: {AggFuncs <vref[slot=1, expr='c_nation'], vref[slot=2, expr='lo_orderpriority']> args=[{SaveExpr: <slot=1, type='bpchar'> arg={Var(bpchar): kvec=0x3400-6800, expr='c_nation'}}, {SaveExpr: <slot=2, type='bpchar'> arg={Var(bpchar): kvec=0x6800-9c00, expr='lo_orderpriority'}}]}
+               Fallback-desc: [<dest='0', expr='c_nation', depth=1:2>, <dest='1', expr='lo_orderpriority', depth=0:2>, <dest='2', expr='lo_shipmode', depth=0:0>, <dest='3', expr='lo_custkey', depth=0:1>, <dest='4', expr='c_custkey', depth=1:1>]
+               CUDA Stack Size: 4048
+               ->  Custom Scan (GpuScan) on public.customer
+                     Output: customer.c_nation, customer.c_custkey
+                     GPU Projection: c_nation, c_custkey
+                     GPU Scan Quals: (c_region = 'AMERICA'::bpchar) [rows: 30000 -> 5992]
+                     KVars-Slot: <slot=0, type='bpchar', expr='c_region', kv_off=0x0000>, <slot=1, type='bpchar', expr='c_nation', kv_off=0x3400>, <slot=2, type='int4', expr='c_custkey', kv_off=0x6800>
+                     KVecs-Buffer: nbytes: 31744, ndims: 2, items=[kvec0=<0x0000-33ff, type='bpchar', expr='c_region'>, kvec1=<0x3400-67ff, type='bpchar', expr='c_nation'>, kvec2=<0x6800-7bff, type='int4', expr='c_custkey'>]
+                     LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=2, type='int4' resno=1(c_custkey)>, <slot=1, type='bpchar' resno=5(c_nation)>, <slot=0, type='bpchar' resno=6(c_region)>]}}
+                     MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=1, offset=0x3400-67ff, type='bpchar', expr='c_nation'>, <slot=2, offset=0x6800-7bff, type='int4', expr='c_custkey'>]}}}
+                     Scan Quals OpCode: {Func(bool)::bpchareq args=[{Var(bpchar): slot=0, expr='c_region'}, {Const(bpchar): value='AMERICA'}]}
+                     Projection OpCode: {Projection: layout=<1,2> args=[{SaveExpr: <slot=1, type='bpchar'> arg={Var(bpchar): kvec=0x3400-6800, expr='c_nation'}}, {SaveExpr: <slot=2, type='int4'> arg={Var(int4): kvec=0x6800-7c00, expr='c_custkey'}}]}
+                     Fallback-desc: [<dest='0', expr='c_nation', depth=0:1>, <dest='1', expr='c_custkey', depth=0:1>, <dest='2', expr='c_region', depth=0:0>]
+                     CUDA Stack Size: 3968
+(38 rows)
+
+select distinct c_nation, lo_orderpriority
+  from lineorder, customer
+ where lo_custkey = c_custkey
+   and c_region = 'AMERICA'
+   and lo_shipmode = 'AIR'
+ order by c_nation, lo_orderpriority;
+    c_nation     | lo_orderpriority 
+-----------------+------------------
+ ARGENTINA       | 1-URGENT       
+ ARGENTINA       | 2-HIGH         
+ ARGENTINA       | 3-MEDIUM       
+ ARGENTINA       | 4-NOT SPECI    
+ ARGENTINA       | 5-LOW          
+ BRAZIL          | 1-URGENT       
+ BRAZIL          | 2-HIGH         
+ BRAZIL          | 3-MEDIUM       
+ BRAZIL          | 4-NOT SPECI    
+ BRAZIL          | 5-LOW          
+ CANADA          | 1-URGENT       
+ CANADA          | 2-HIGH         
+ CANADA          | 3-MEDIUM       
+ CANADA          | 4-NOT SPECI    
+ CANADA          | 5-LOW          
+ PERU            | 1-URGENT       
+ PERU            | 2-HIGH         
+ PERU            | 3-MEDIUM       
+ PERU            | 4-NOT SPECI    
+ PERU            | 5-LOW          
+ UNITED STATES   | 1-URGENT       
+ UNITED STATES   | 2-HIGH         
+ UNITED STATES   | 3-MEDIUM       
+ UNITED STATES   | 4-NOT SPECI    
+ UNITED STATES   | 5-LOW          
+(25 rows)
+
+--
+-- partial distinct
+--
+VACUUM ANALYZE;
+explain (verbose, costs off)
+select distinct on (p_type) p_type, p_color, p_size
+  into pg_temp.test01g
+  from part
+ where p_color in ('lemon', 'green', 'plum');
+                                                                                                                                                                                                    QUERY PLAN                                                                                                                                                                                                    
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ HashAggregate
+   Output: p_type, p_color, p_size
+   Group Key: part.p_type
+   ->  Custom Scan (GpuPreAgg) on public.part
+         Output: p_type, p_color, p_size
+         GPU Projection: p_type, p_color, p_size
+         GPU Scan Quals: ((p_color)::text = ANY ('{lemon,green,plum}'::text[])) [rows: 200000 -> 6260]
+         KVars-Slot: <slot=0, type='text', expr='NULL::text'>, <slot=1, type='text', expr='p_color', kv_off=0x0000>, <slot=2, type='text', expr='p_type', kv_off=0x3400>, <slot=3, type='text', expr='p_type'>, <slot=4, type='numeric', expr='p_size', kv_off=0x6800>
+         KVecs-Buffer: nbytes: 55296, ndims: 2, items=[kvec0=<0x0000-33ff, type='text', expr='p_color'>, kvec1=<0x3400-67ff, type='text', expr='p_type'>, kvec2=<0x6800-d7ff, type='numeric', expr='p_size'>]
+         LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=1, type='text' resno=6(p_color)>, <slot=2, type='text' resno=7(p_type)>, <slot=4, type='numeric' resno=8(p_size)>]}}
+         MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=1, offset=0x0000-33ff, type='text', expr='p_color'>, <slot=2, offset=0x3400-67ff, type='text', expr='p_type'>, <slot=4, offset=0x6800-d7ff, type='numeric', expr='p_size'>]}}}
+         Scan Quals OpCode: {ScalarArrayOpAny: elem=<slot=0, type='text'> args=[{Const(array): value='{lemon,green,plum}'}, {Func(bool)::texteq args=[{Var(text): slot=1, expr='p_color'}, {Var(text): slot=0, expr='NULL::text'}]}]}
+         Group-By KeyHash OpCode: {HashValue arg={SaveExpr: <slot=2, type='text'> arg={Var(text): kvec=0x3400-6800, expr='p_type'}}}
+         Group-By KeyLoad OpCode: {LoadVars(depth=-2): kvars=[<slot=3, type='text' resno=1(p_type)>]}
+         Group-By KeyComp OpCode: {Func(bool)::texteq args=[{Var(text): slot=2, expr='p_type'}, {Var(text): slot=3, expr='p_type'}]}
+         Partial Aggregation OpCode: {AggFuncs <vref[slot=2, expr='p_type'], vref[slot=1, expr='p_color'], vref[slot=4, expr='p_size']> args=[{SaveExpr: <slot=2, type='text'> arg={Var(text): kvec=0x3400-6800, expr='p_type'}}, {SaveExpr: <slot=1, type='text'> arg={Var(text): kvec=0x0000-3400, expr='p_color'}}, {SaveExpr: <slot=4, type='numeric'> arg={Var(numeric): kvec=0x6800-d800, expr='p_size'}}]}
+         Fallback-desc: [<dest='0', expr='p_type', depth=0:1>, <dest='1', expr='p_color', depth=0:1>, <dest='2', expr='p_size', depth=0:1>]
+         CUDA Stack Size: 4000
+(18 rows)
+
+select distinct on (p_type) p_type, p_color, p_size
+  into pg_temp.test01g
+  from part
+ where p_color in ('lemon', 'green', 'plum');
+SET pg_strom.enabled = off;
+select distinct on (p_type) p_type, p_color, p_size
+  into pg_temp.test01c
+  from part
+ where p_color in ('lemon', 'green', 'plum');
+SELECT p_type FROM pg_temp.test01g EXCEPT SELECT p_type FROM pg_temp.test01c;
+ p_type 
+--------
+(0 rows)
+
+SELECT p_type FROM pg_temp.test01g EXCEPT SELECT p_type FROM pg_temp.test01g;
+ p_type 
+--------
+(0 rows)
+

@@ -3,8 +3,8 @@
  *
  * Routines to collect GPU device information.
  * ----
- * Copyright 2011-2023 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014-2023 (C) PG-Strom Developers Team
+ * Copyright 2011-2026 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2026 (C) PG-Strom Developers Team
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the PostgreSQL License.
@@ -936,7 +936,7 @@ pgstrom_print_gpu_properties(const char *manual_config)
 			}
 
 			vfs_array = __fetchJsonField(json, "vfs");
-			if (disk_array != 0)
+			if (vfs_array != 0)
 			{
 				Datum	vfs;
 

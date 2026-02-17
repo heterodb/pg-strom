@@ -3,8 +3,8 @@
  *
  * Core implementation of GPU/DPU device code
  * ----
- * Copyright 2011-2023 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014-2023 (C) PG-Strom Developers Team
+ * Copyright 2011-2026 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2026 (C) PG-Strom Developers Team
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the PostgreSQL License.
@@ -412,7 +412,7 @@ pgfn_VarExpr(XPU_PGFUNCTION_ARGS)
 			memcpy(__result, __xdatum, expr_ops->xpu_type_sizeof);
 		assert(XPU_DATUM_ISNULL(__result) || __result->expr_ops == expr_ops);
 	}
-	else
+	else if (kcxt->kvecs_curr_buffer)
 	{
 		const kvec_datum_t *kvecs = (kvec_datum_t *)(kcxt->kvecs_curr_buffer +
 													 kexp->u.v.var_offset);
@@ -426,6 +426,13 @@ pgfn_VarExpr(XPU_PGFUNCTION_ARGS)
 			assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
 			return false;
 		}
+	}
+	else
+	{
+		/* in case of RIGHT OUTER JOIN, slots in shallower depth should
+		 * have NULL values.
+		 */
+		__result->expr_ops = NULL;
 	}
 	return true;
 }
@@ -1818,14 +1825,13 @@ ExecMoveKernelVariables(kern_context *kcxt,
 				}
 			}
 		}
-		else
+		else if (kcxt->kvecs_curr_buffer)
 		{
 			/* kvec-buffer -> kvec-buffer */
 			const kvec_datum_t *src_kvec;
 			kvec_datum_t	   *dst_kvec;
 			uint32_t			src_kvec_id = kcxt->kvecs_curr_id;
 
-			assert(kcxt->kvecs_curr_buffer != NULL);
 			assert(kcxt->kvecs_curr_id < KVEC_UNITSZ);
 			src_kvec = (const kvec_datum_t *)(kcxt->kvecs_curr_buffer +
 											  vm_desc->vm_offset);
@@ -1844,6 +1850,16 @@ ExecMoveKernelVariables(kern_context *kcxt,
 					return false;
 				}
 			}
+		}
+		else
+		{
+			/*
+			 * in case of RIGHT OUTER JOIN, source kvec-buffer does not exist
+			 * because they should be filled-up by NULL.
+			 */
+			kvec_datum_t	   *dst_kvec = (kvec_datum_t *)(dst_kvec_buffer +
+															vm_desc->vm_offset);
+			dst_kvec->isnull[dst_kvec_id] = true;
 		}
 	}
 	return true;

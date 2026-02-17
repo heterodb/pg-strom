@@ -4,8 +4,8 @@
  * GPU accelerated parallel relations join based on hash-join or
  * nested-loop logic.
  * --
- * Copyright 2011-2023 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014-2023 (C) PG-Strom Developers Team
+ * Copyright 2011-2026 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2026 (C) PG-Strom Developers Team
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the PostgreSQL License.
@@ -951,7 +951,9 @@ loadGpuJoinRightOuter(kern_context *kcxt,
 	uint32_t	count;
 	uint32_t	index;
 	uint32_t	wr_pos;
+	bool		tuple_is_valid = false;
 	kern_tupitem *tupitem = NULL;
+	const kern_expression *kexp;
 
 	if (WARP_WRITE_POS(wp,depth) >= WARP_READ_POS(wp,depth) + get_local_size())
 	{
@@ -982,25 +984,35 @@ loadGpuJoinRightOuter(kern_context *kcxt,
 			   kds_in->format == KDS_FORMAT_HASH);
 		tupitem = KDS_GET_TUPITEM(kds_in, index);
 	}
-
 	/*
-	 * load the inner tuple and fill up other outer slots by NULLs
+	 * Load the inner tuple and check JOIN qualifier in this depth.
+	 * Note that 'kcxt->kvecs_curr_buffer = NULL' means the shallower depth
+	 * all have NULL values.
 	 */
-	wr_pos = WARP_WRITE_POS(wp,depth);
-	wr_pos += pgstrom_stair_sum_binary(tupitem != NULL, &count);
 	if (tupitem != NULL)
 	{
-		const kern_expression *kexp;
+		int		status;
 
-		for (int __depth=0; __depth < depth; __depth++)
-		{
-			kexp = SESSION_KEXP_LOAD_VARS(kcxt->session, __depth);
-			ExecLoadVarsMinimalTuple(kcxt, kexp, __depth, kds_in, NULL);
-		}
+		kcxt->kvecs_curr_buffer = NULL;
 		kexp = SESSION_KEXP_LOAD_VARS(kcxt->session, depth);
 		ExecLoadVarsMinimalTuple(kcxt, kexp, depth, kds_in, tupitem);
 
-		kexp = SESSION_KEXP_MOVE_VARS(kcxt->session, depth);
+		kexp = SESSION_KEXP_JOIN_QUALS(kcxt->session, depth);
+		if (ExecGpuJoinQuals(kcxt, kexp, &status))
+			tuple_is_valid = (status > 0);
+		else
+			assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
+		//TODO: Handle GPU-Fallback case
+	}
+	/* error checks */
+	if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
+		return -1;
+	wr_pos = WARP_WRITE_POS(wp,depth);
+	wr_pos += pgstrom_stair_sum_binary(tuple_is_valid, &count);
+	if (tuple_is_valid)
+	{
+		const kern_expression *kexp = SESSION_KEXP_MOVE_VARS(kcxt->session, depth);
+
 		if (!ExecMoveKernelVariables(kcxt,
 									 kexp,
 									 dst_kvecs_buffer,

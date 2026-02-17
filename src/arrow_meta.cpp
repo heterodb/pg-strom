@@ -3,8 +3,8 @@
  *
  * Routines to handle Apache Arrow/Parquet metadata
  * ----
- * Copyright 2011-2021 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014-2021 (C) PG-Strom Developers Team
+ * Copyright 2011-2026 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2026 (C) PG-Strom Developers Team
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the PostgreSQL License.
@@ -3261,6 +3261,21 @@ __readParquetMinMaxStats(ArrowFieldNode *field,
 			max_datum = std::to_string(__stat->max());
 			break;
 		}
+		case parquet::Type::BYTE_ARRAY: {
+			auto __stat = std::dynamic_pointer_cast<const parquet::ByteArrayStatistics>(stats);
+			auto cdescr = __stat->descr();
+
+			assert(cdescr->physical_type() == stats->physical_type());
+			if (cdescr->converted_type() == parquet::ConvertedType::type::UTF8 ||
+				(cdescr->logical_type() && cdescr->logical_type()->is_string()))
+			{
+				auto	__min = __stat->min();
+				auto	__max = __stat->max();
+				min_datum = std::string(reinterpret_cast<const char*>(__min.ptr), __min.len);
+				max_datum = std::string(reinterpret_cast<const char*>(__max.ptr), __max.len);
+			}
+			break;
+		}
 		case parquet::Type::FIXED_LEN_BYTE_ARRAY: {
 			auto __stat = std::dynamic_pointer_cast<const parquet::FLBAStatistics>(stats);
 			auto cdescr = __stat->descr();
@@ -3328,74 +3343,52 @@ __arrowCompressionTypeFromMetadata(arrow::Compression::type code)
  * __readParquetRowGroupMetadata
  */
 static void
-__readParquetRowGroupMetadata(ArrowMessage *rbatch_message,
-							  ArrowBlock   *rbatch_block,
-							  std::unique_ptr<parquet::RowGroupMetaData> rg_meta,
-							  ArrowMetadataVersion metadata_version,
-							  int64_t next_rowgroup_offset)
+__readParquetRowGroupColumnChunk(std::vector<ArrowFieldNode> &field_node_array,
+								 const parquet::RowGroupMetaData &rg_meta,
+								 const parquet::arrow::SchemaManifest &manifest,
+								 const parquet::arrow::SchemaField &sfield)
 {
-	int64_t		bodyLength = 0;
+	ArrowFieldNode fnode;
 
-	/*
-	 * RowGroup is similar to RecordBatch Message in Arrow
-	 */
-	INIT_ARROW_NODE(rbatch_message, Message);
-	rbatch_message->version = metadata_version;
-	rbatch_message->bodyLength = (next_rowgroup_offset - rg_meta->file_offset());
-
-	/*
-	 * ColumnChunkMetaData is tranformed as if FieldNodes/Buffers
-	 */
-	ArrowRecordBatch   *rbatch = &rbatch_message->body.recordBatch;
-
-	INIT_ARROW_NODE(rbatch, RecordBatch);
-	rbatch->length = rg_meta->num_rows();
-	rbatch->_num_nodes = rg_meta->num_columns();
-	rbatch->nodes = (ArrowFieldNode *)
-		__palloc(sizeof(ArrowFieldNode) * rbatch->_num_nodes);
-	for (int j=0; j < rg_meta->num_columns(); j++)
+	INIT_ARROW_NODE(&fnode, FieldNode);
+	fnode.length = rg_meta.num_rows();
+	//FIXME: fnode.null_count should be 'bool nullable'
+	fnode.null_count = (sfield.field->nullable() ? 1 : 0);
+	if (sfield.is_leaf())
 	{
-		auto	col_meta = rg_meta->ColumnChunk(j);
-		auto	field = &rbatch->nodes[j];
-		auto	stats = col_meta->statistics();
-		auto	encodings = col_meta->encodings();
-		auto	encoding_stats = col_meta->encoding_stats();
+		auto	cc_meta = rg_meta.ColumnChunk(sfield.column_index);
+		auto	stats = cc_meta->statistics();
+		auto	encodings = cc_meta->encodings();
+		auto	encoding_stats = cc_meta->encoding_stats();
 
-		INIT_ARROW_NODE(field, FieldNode);
-		field->length = col_meta->num_values();
-		if (stats)
-		{
-			if (stats->HasNullCount())
-				field->null_count = stats->null_count();
-			if (stats->HasMinMax())
-				__readParquetMinMaxStats(field, stats);
-		}
+		if (stats && stats->HasMinMax())
+			__readParquetMinMaxStats(&fnode, stats);
 		/*
 		 * Some additional Parquet specific attrobutes for dump only
 		 */
-		field->parquet.dictionary_page_offset  = col_meta->dictionary_page_offset();
-		field->parquet.data_page_offset        = col_meta->data_page_offset();
-		field->parquet.index_page_offset       = col_meta->index_page_offset();
-		field->parquet.total_compressed_size   = col_meta->total_compressed_size();
-		field->parquet.total_uncompressed_size = col_meta->total_uncompressed_size();
-		field->parquet.compression_type        =
-			__arrowCompressionTypeFromMetadata(col_meta->compression());
-		field->parquet._num_encodings = encodings.size();
-		if (field->parquet._num_encodings > 0)
+		fnode.parquet.dictionary_page_offset  = cc_meta->dictionary_page_offset();
+		fnode.parquet.data_page_offset        = cc_meta->data_page_offset();
+		fnode.parquet.index_page_offset       = cc_meta->index_page_offset();
+		fnode.parquet.total_compressed_size   = cc_meta->total_compressed_size();
+		fnode.parquet.total_uncompressed_size = cc_meta->total_uncompressed_size();
+		fnode.parquet.compression_type        =
+			__arrowCompressionTypeFromMetadata(cc_meta->compression());
+		fnode.parquet._num_encodings = encodings.size();
+		if (fnode.parquet._num_encodings > 0)
 		{
-			field->parquet.encodings = (int16_t *)
-				__palloc(sizeof(int16_t) * field->parquet._num_encodings);
-			for (int k=0; k < field->parquet._num_encodings; k++)
-				field->parquet.encodings[k] = (int16_t)encodings[k];
+			fnode.parquet.encodings = (int16_t *)
+				__palloc(sizeof(int16_t) * fnode.parquet._num_encodings);
+			for (int k=0; k < fnode.parquet._num_encodings; k++)
+				fnode.parquet.encodings[k] = (int16_t)encodings[k];
 		}
-		field->parquet._num_encoding_stats = encoding_stats.size();
-		if (field->parquet._num_encoding_stats > 0)
+		fnode.parquet._num_encoding_stats = encoding_stats.size();
+		if (fnode.parquet._num_encoding_stats > 0)
 		{
-			field->parquet.encoding_stats = (ParquetEncodingStats *)
-				__palloc(sizeof(ParquetEncodingStats) * field->parquet._num_encoding_stats);
-			for (int k=0; k < field->parquet._num_encoding_stats; k++)
+			fnode.parquet.encoding_stats = (ParquetEncodingStats *)
+				__palloc(sizeof(ParquetEncodingStats) * fnode.parquet._num_encoding_stats);
+			for (int k=0; k < fnode.parquet._num_encoding_stats; k++)
 			{
-				auto	dst = &field->parquet.encoding_stats[k];
+				auto	dst = &fnode.parquet.encoding_stats[k];
 				auto	src = encoding_stats[k];
 
 				dst->page_type = (int16_t)src.page_type;
@@ -3403,17 +3396,122 @@ __readParquetRowGroupMetadata(ArrowMessage *rbatch_message,
 				dst->count     = src.count;
 			}
 		}
-		bodyLength = Max(bodyLength, (col_meta->data_page_offset() +
-									  col_meta->total_compressed_size()));
 	}
+	field_node_array.push_back(fnode);
+	/*
+	 * Add nested fields if any
+	 */
+	for (int k=0; k < sfield.children.size(); k++)
+	{
+		__readParquetRowGroupColumnChunk(field_node_array,
+										 rg_meta, manifest,
+										 sfield.children[k]);
+	}
+}
+
+static void
+__readParquetRowGroupMetadata(ArrowMessage *rbatch_message,
+							  ArrowBlock   *rbatch_block,
+							  ArrowMetadataVersion metadata_version,
+							  const parquet::RowGroupMetaData &rg_meta,
+							  const parquet::arrow::SchemaManifest &manifest)
+{
+	std::vector<ArrowFieldNode> field_node_array;
+
+	for (int j=0; j < manifest.schema_fields.size(); j++)
+	{
+		__readParquetRowGroupColumnChunk(field_node_array,
+										 rg_meta,
+										 manifest,
+										 manifest.schema_fields[j]);
+	}
+	/*
+	 * RowGroup is similar to RecordBatch Message in Arrow
+	 */
+	INIT_ARROW_NODE(rbatch_message, Message);
+	rbatch_message->version = metadata_version;
+	rbatch_message->bodyLength = rg_meta.total_compressed_size();
 
 	/*
-	 * Block (whole Row-Group)
+	 * ColumnChunkMetaData is tranformed as if FieldNodes/Buffers
+	 */
+	ArrowRecordBatch   *rbatch = &rbatch_message->body.recordBatch;
+
+	INIT_ARROW_NODE(rbatch, RecordBatch);
+	rbatch->length = rg_meta.num_rows();
+	rbatch->_num_nodes = field_node_array.size(); //rg_meta->num_columns();
+	rbatch->nodes = (ArrowFieldNode *)
+		__palloc(sizeof(ArrowFieldNode) * rbatch->_num_nodes);
+	for (int j=0; j < field_node_array.size(); j++)
+		rbatch->nodes[j] = field_node_array[j];
+
+	/*
+	 * Block (whole Row-Group; actually it is not referenced)
 	 */
 	INIT_ARROW_NODE(rbatch_block, Block);
-	rbatch_block->offset = rg_meta->file_offset();
-	rbatch_block->metaDataLength = (next_rowgroup_offset - bodyLength);
-	rbatch_block->bodyLength = bodyLength;
+	rbatch_block->offset = rg_meta.file_offset();
+	rbatch_block->metaDataLength = 0;
+	rbatch_block->bodyLength = rg_meta.total_compressed_size();
+}
+
+/*
+ * __readParquetFileRawMetadata
+ */
+static std::shared_ptr<parquet::FileMetaData>
+__readParquetFileRawMetadata(std::shared_ptr<arrow::io::ReadableFile> rfilp,
+							 parquet::arrow::SchemaManifest *manifest)
+{
+	struct {
+		uint32_t	metadata_len;
+		char		signature[4];
+	} foot;
+	size_t			file_length;
+	std::shared_ptr<arrow::Buffer> buffer;
+	/* fetch metadata length */
+	{
+		auto	rv = rfilp->GetSize();
+		if (!rv.ok())
+			Elog("failed on arrow::io::ReadableFile::GetSize: %s",
+				 rv.status().ToString().c_str());
+		file_length = rv.ValueOrDie();
+	}
+	/* read footer 8bytes */
+	{
+		auto	rv = rfilp->ReadAt(file_length-sizeof(foot), sizeof(foot), &foot);
+		if (!rv.ok())
+			Elog("failed on arrow::io::ReadableFile::ReadAt: %s",
+				 rv.status().ToString().c_str());
+		if (rv.ValueOrDie() != sizeof(foot) ||
+			foot.metadata_len + sizeof(foot) > file_length ||
+			memcmp(foot.signature, PARQUET_SIGNATURE, PARQUET_SIGNATURE_SZ) != 0)
+			Elog("parquet signature check failed");
+    }
+	/* read binary metadata */
+	{
+		auto	rv = rfilp->ReadAt(file_length -
+								   sizeof(foot) -
+								   foot.metadata_len,
+								   foot.metadata_len);
+		if (!rv.ok())
+			Elog("failed on arrow::io::ReadableFile::ReadAt: %s",
+				 rv.status().ToString().c_str());
+		buffer = rv.ValueOrDie();
+	}
+	auto	metadata = parquet::FileMetaData::Make(buffer->data(), &foot.metadata_len);
+	/* also, setup SchemaManifest */
+	{
+		parquet::ArrowReaderProperties arrow_props;
+		arrow::Status	status;
+
+		status = parquet::arrow::SchemaManifest::Make(metadata->schema(),
+													  metadata->key_value_metadata(),
+													  arrow_props,	/* default attributes */
+													  manifest);
+		if (!status.ok())
+			Elog("failed on parquet::arrow::SchemaManifest::Make: %s",
+				 status.ToString().c_str());
+	}
+	return metadata;
 }
 
 /*
@@ -3424,13 +3522,12 @@ __readParquetFileMetadata(std::shared_ptr<arrow::io::ReadableFile> rfilp,
 						  ArrowFileInfo *af_info)
 {
 	ArrowFooter *footer = &af_info->footer;
-	auto	parquet_reader = parquet::ParquetFileReader::Open(rfilp);
-	auto	file_meta = parquet_reader->metadata();
-	auto	file_size = rfilp->GetSize().ValueOrDie();
+	parquet::arrow::SchemaManifest manifest;
+	auto		metadata = __readParquetFileRawMetadata(rfilp, &manifest);
 
 	INIT_ARROW_NODE(footer, Footer);
 	/* Parquet file version */
-	switch (file_meta->version())
+	switch (metadata->version())
 	{
 		case parquet::ParquetVersion::PARQUET_1_0:
 			footer->version = ArrowMetadataVersion__Parquet_V1_0;
@@ -3442,43 +3539,35 @@ __readParquetFileMetadata(std::shared_ptr<arrow::io::ReadableFile> rfilp,
 			footer->version = ArrowMetadataVersion__Parquet_V2_6;
 			break;
 		default:
-			Elog("unknown Parquet version code (%d)", (int)file_meta->version());
+			Elog("unknown Parquet version code (%d)", (int)metadata->version());
 	}
-
 	/*
 	 * Read Schema definition
 	 */
-	__readParquetSchemaMetadata(&footer->schema, file_meta->schema());
-
+	__readParquetSchemaMetadata(&footer->schema, metadata->schema());
 	/*
-	 * For each Row-Groups
+	 * Read Row-Groups for each
 	 */
-	if (file_meta->num_row_groups() > 0)
+	if (metadata->num_row_groups() > 0)
 	{
-		auto	ngroups = file_meta->num_row_groups();
-		int64_t	meta_file_offset = (file_size - (PARQUET_SIGNATURE_SZ
-												 + sizeof(uint32_t)
-												 + file_meta->size()));
+		auto	ngroups = metadata->num_row_groups();
 		af_info->recordBatches = (ArrowMessage *)
 			__palloc(sizeof(ArrowMessage) * ngroups);
 		footer->recordBatches = (ArrowBlock *)
 			__palloc(sizeof(ArrowBlock) * ngroups);
 		for (int i=0; i < ngroups; i++)
 		{
-			int64_t		next_rowgroup_offset = (i+1 < ngroups
-												? file_meta->RowGroup(i+1)->file_offset()
-												: meta_file_offset);
 			__readParquetRowGroupMetadata(&af_info->recordBatches[i],
 										  &footer->recordBatches[i],
-										  file_meta->RowGroup(i),
 										  footer->version,
-										  next_rowgroup_offset);
+										  *metadata->RowGroup(i),
+										  manifest);
 		}
 		af_info->_num_recordBatches = ngroups;
 		footer->_num_recordBatches = ngroups;
 	}
 	/* key-value metadata */
-	auto	file_key_value = file_meta->key_value_metadata();
+	auto	file_key_value = metadata->key_value_metadata();
 	if (file_key_value)
 	{
 		int		nitems = file_key_value->size();

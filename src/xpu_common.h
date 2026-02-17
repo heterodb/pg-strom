@@ -3,8 +3,8 @@
  *
  * Common header portion for both of GPU and DPU device code
  * --
- * Copyright 2011-2023 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014-2023 (C) PG-Strom Developers Team
+ * Copyright 2011-2026 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2026 (C) PG-Strom Developers Team
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the PostgreSQL License.
@@ -13,6 +13,7 @@
 #define XPU_COMMON_H
 #include <alloca.h>
 #include <assert.h>
+#include <byteswap.h>
 #include <limits.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -218,6 +219,11 @@ __store_int128_packed(int128_packed_t *addr, int128_t ival)
 {
 	addr->u64_lo = (uint64_t)(ival & ULONG_MAX);
 	addr->u64_hi = (uint64_t)((ival >> 64) & ULONG_MAX);
+}
+INLINE_FUNCTION(int128_t)
+__bswap_int128_packed(const int128_packed_t *addr)
+{
+	return ((int128_t)bswap_64(addr->u64_lo) << 64) | ((int128_t)bswap_64(addr->u64_hi));
 }
 #include "float2.h"
 

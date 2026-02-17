@@ -15,6 +15,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <unistd.h>
+#include <arpa/inet.h>
 #include "float2.h"
 #include "arrow_defs.h"
 
@@ -374,7 +375,8 @@ print_create_table(std::shared_ptr<arrow::Schema> arrow_schema)
 }
 
 static void
-process_one_token(std::shared_ptr<arrow::Array> carray, int64_t rowid, bool in_quote)
+process_one_token(std::shared_ptr<Field> field,
+				  std::shared_ptr<arrow::Array> carray, int64_t rowid, bool in_quote)
 {
 	if (carray->IsNull(rowid))
 		return;
@@ -483,8 +485,30 @@ process_one_token(std::shared_ptr<arrow::Array> carray, int64_t rowid, bool in_q
 		}
 		case Type::FIXED_SIZE_BINARY: {
 			auto	arr = std::static_pointer_cast<arrow::FixedSizeBinaryArray>(carray);
+			auto	metadata = field->metadata();
+
+			for (int k=0; k < metadata->size(); k++)
+			{
+				if (metadata->key(k) == "pg_type" &&
+					metadata->value(k) == "inet" &&
+					(arr->byte_width() == 4 || arr->byte_width() == 16))
+				{
+					char	temp[80];
+
+					if (inet_ntop(arr->byte_width() == 4
+								  ? AF_INET
+								  : AF_INET6,
+								  arr->GetValue(rowid),
+								  temp, sizeof(temp)) != NULL)
+					{
+						printf("\"%s\"", temp);
+						goto found_special_inet;
+					}
+				}
+			}
 			__print_binary_token((const char *)arr->GetValue(rowid),
 								 arr->byte_width());
+		found_special_inet:
 			break;
 		}
 		case Type::DATE32: {
@@ -521,6 +545,7 @@ process_one_token(std::shared_ptr<arrow::Array> carray, int64_t rowid, bool in_q
 		case Type::TIMESTAMP: {
 			auto	arr = std::static_pointer_cast<arrow::TimestampArray>(carray);
 			auto	ts_type = std::static_pointer_cast<arrow::TimestampType>(arr->type());
+			auto	ts_tz = ts_type->timezone();
 			time_t	tval = arr->Value(rowid);
 			int		subsec;
 			struct tm __tm;
@@ -528,56 +553,59 @@ process_one_token(std::shared_ptr<arrow::Array> carray, int64_t rowid, bool in_q
 			switch (ts_type->unit())
 			{
 				case TimeUnit::SECOND:
-					gmtime_r(&tval, &__tm);
-					printf("%04d-%02d-%02d %02d:%02d:%02d",
-						   __tm.tm_year + 1900,
-						   __tm.tm_mon + 1,
-						   __tm.tm_mday,
-						   __tm.tm_hour,
-						   __tm.tm_min,
-						   __tm.tm_sec);
+					subsec = 0;
 					break;
 				case TimeUnit::MILLI:
 					subsec = tval % 1000;
-					tval /= 1000;
-					gmtime_r(&tval, &__tm);
-					printf("%04d-%02d-%02d %02d:%02d:%02d.%03u",
-						   __tm.tm_year + 1900,
-						   __tm.tm_mon + 1,
-						   __tm.tm_mday,
-						   __tm.tm_hour,
-						   __tm.tm_min,
-						   __tm.tm_sec,
-						   subsec);
+                    tval /= 1000;
 					break;
 				case TimeUnit::MICRO:
 					subsec = tval % 1000000;
 					tval /= 1000000;
-					gmtime_r(&tval, &__tm);
-					printf("%04d-%02d-%02d %02d:%02d:%02d.%06u",
-						   __tm.tm_year + 1900,
-						   __tm.tm_mon + 1,
-						   __tm.tm_mday,
-						   __tm.tm_hour,
-						   __tm.tm_min,
-						   __tm.tm_sec,
-						   subsec);
 					break;
 				case TimeUnit::NANO:
 					subsec = tval % 1000000000;
 					tval /= 1000000000;
-					gmtime_r(&tval, &__tm);
-					printf("%04d-%02d-%02d %02d:%02d:%02d.%09u",
-						   __tm.tm_year + 1900,
-						   __tm.tm_mon + 1,
-						   __tm.tm_mday,
-						   __tm.tm_hour,
-						   __tm.tm_min,
-						   __tm.tm_sec,
-						   subsec);
 					break;
 				default:
-					Elog("unknown Arrow::Timestamp unit");
+                    Elog("unknown Arrow::Timestamp unit");
+			}
+			/* adjust timestamp by timezone, if valid */
+			if (ts_tz.empty())
+				 gmtime_r(&tval, &__tm);
+			else
+			{
+				static std::string	last_tz;
+
+				if (last_tz.empty() || ts_tz != last_tz)
+				{
+					if (setenv("TZ", ts_tz.c_str(), 1) != 0)
+						Elog("unable set 'TZ' to '%s'", ts_tz.c_str());
+					tzset();
+					last_tz = ts_tz;
+				}
+				localtime_r(&tval, &__tm);
+			}
+			printf("%04d-%02d-%02d %02d:%02d:%02d",
+				   __tm.tm_year + 1900,
+				   __tm.tm_mon + 1,
+				   __tm.tm_mday,
+				   __tm.tm_hour,
+				   __tm.tm_min,
+				   __tm.tm_sec);
+			switch (ts_type->unit())
+			{
+				case TimeUnit::MILLI:
+					printf(".%03u", subsec);
+					break;
+				case TimeUnit::MICRO:
+					printf(".%06u", subsec);
+					break;
+				case TimeUnit::NANO:
+					printf(".%09u", subsec);
+					break;
+				default:
+					break;
 			}
 			break;
 		}
@@ -690,6 +718,7 @@ process_one_token(std::shared_ptr<arrow::Array> carray, int64_t rowid, bool in_q
 		case Type::LIST: {
 			auto	arr = std::static_pointer_cast<arrow::ListArray>(carray);
 			auto	sub_array = arr->values();
+			auto	dtype = field->type();
 			int32_t	start = arr->value_offset(rowid);
 			int32_t	end   = arr->value_offset(rowid+1);
 
@@ -698,7 +727,7 @@ process_one_token(std::shared_ptr<arrow::Array> carray, int64_t rowid, bool in_q
 			{
 				if (k == start)
 					std::cout << ",";
-				process_one_token(sub_array, k, in_quote);
+				process_one_token(dtype->field(0), sub_array, k, in_quote);
 			}
 			std::cout << "}";
 			break;
@@ -706,6 +735,7 @@ process_one_token(std::shared_ptr<arrow::Array> carray, int64_t rowid, bool in_q
 		case Type::LARGE_LIST: {
 			auto	arr = std::static_pointer_cast<arrow::LargeListArray>(carray);
 			auto	sub_array = arr->values();
+			auto	dtype = field->type();
 			int64_t	start = arr->value_offset(rowid);
 			int64_t	end   = arr->value_offset(rowid+1);
 
@@ -714,7 +744,7 @@ process_one_token(std::shared_ptr<arrow::Array> carray, int64_t rowid, bool in_q
 			{
 				if (k == start)
 					std::cout << ",";
-				process_one_token(sub_array, k, in_quote);
+				process_one_token(dtype->field(0), sub_array, k, in_quote);
 			}
 			std::cout << "}";
 			break;
@@ -722,6 +752,7 @@ process_one_token(std::shared_ptr<arrow::Array> carray, int64_t rowid, bool in_q
 		case Type::FIXED_SIZE_LIST: {
 			auto	arr = std::static_pointer_cast<arrow::FixedSizeListArray>(carray);
 			auto	sub_array = arr->values();
+			auto	dtype = field->type();
 			int32_t	unitsz = arr->value_length();
 			int64_t	start = rowid * unitsz;
 			int64_t	end = start + unitsz;
@@ -731,14 +762,16 @@ process_one_token(std::shared_ptr<arrow::Array> carray, int64_t rowid, bool in_q
 			{
 				if (k == start)
 					std::cout << ",";
-				process_one_token(sub_array, k, in_quote);
+				process_one_token(dtype->field(0), sub_array, k, in_quote);
 			}
 			std::cout << "}";
-			break;
+			break
+				;
 		}
 		case Type::STRUCT: {
 			auto	arr = std::static_pointer_cast<arrow::StructArray>(carray);
 			auto	st_type = std::static_pointer_cast<arrow::StructType>(arr->type());
+			auto	dtype = field->type();
 			int		nfields = st_type->num_fields();
 
 			std::cout << "\"(";
@@ -747,7 +780,7 @@ process_one_token(std::shared_ptr<arrow::Array> carray, int64_t rowid, bool in_q
 				auto	sub_array = arr->field(j);
 				if (j > 0)
 					std::cout << ",";
-				process_one_token(sub_array, rowid, true);
+				process_one_token(dtype->field(j), sub_array, rowid, true);
 			}
 			std::cout << ")\"";
 			break;
@@ -836,6 +869,7 @@ process_one_table(std::shared_ptr<arrow::Table> table)
 		assert(carray->num_chunks() == 1);
 		columns_array.push_back(carray->chunk(0));
 	}
+	assert(columns_array.size() == table->num_columns());
 
 	for (int64_t i=skip_offset; i < num_rows; i++)
 	{
@@ -843,14 +877,15 @@ process_one_table(std::shared_ptr<arrow::Table> table)
 		if (skip_limit == 0)
 			return false;
 
-		for (auto elem = columns_array.begin(); elem != columns_array.end(); elem++)
+		for (int64_t j=0; j < columns_array.size(); j++)
 		{
-			auto	carray = (*elem);
+			auto	field = table->field(j);
+			auto	carray = columns_array[j];
 
 			/* add delimiter */
-			if (elem != columns_array.begin())
+			if (j > 0)
 				fputc(csv_mode ? ',' : '\t', output_filp);
-			process_one_token(carray, i, false);
+			process_one_token(field, carray, i, false);
 		}
 		std::cout << std::endl;
 		if (skip_limit > 0)

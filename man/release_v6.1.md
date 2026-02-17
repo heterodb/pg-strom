@@ -1,7 +1,7 @@
 @ja:#PG-Strom v6.1リリース
 @en:#PG-Strom v6.1 Release
 
-<div style="text-align: right;">PG-Strom Development Team (30th-Oct-2025)</div>
+<div style="text-align: right;">PG-Strom Development Team (18th-Nov-2025)</div>
 
 @ja:##概要
 @en:##Overview
@@ -17,7 +17,7 @@ PG-Strom v6.1における主要な変更は点は以下の通りです。
 }
 
 @en{
-Major changes in PG-Strom v6.0 are as follows:
+Major changes in PG-Strom v6.1 are as follows:
 
 - Support of Apache Parquet files.
 - Migration to libarrow/libparquet, from own implementation.
@@ -314,17 +314,34 @@ This is because disabling this parameter is a prerequisite for running the final
 @ja:##累積的なバグの修正
 @en:##Cumulative bug fixes
 
+- [#974] ExplainForeignScan() didn't deliver ancestors, then get_parameter() trapped by assertion
+- [#968] pg2arrow didn't assign timezone for Timestamp
+- [#966] GPU-based RIGHT/FULL OUTER JOIN may fetch datum from non-exists source kvec buffer.
+- [#964] wrong AggPath pathtarget attached on GPU-PreAgg
+- [#963] wrong json variable references
+- [#956] pg2arrow: wrong composite type binary reader logic
+- [#955] __lookupCompositePGType refered different system catalog if no pg_type hint
+- [#954] pg2arrow --set didn't work correctly
+- [#953] PG18 changed TupleDesc layout, thus, it is not legal to change tupdesc->natts
+- [#967] GPU-PreAgg with OUTER-JOIN didn't back the final result
 - [#948] gpupreagg: allows to embed grouping-key and aggregate-functions in expressions
 - [#947] OpenSession had unintentional 1sec wait if other worker already did the final command.
 - [#938] arrow_meta.cpp has wrong type cast (TimeType as TimestampType)
 - [#937] parquet: prevent parquet::arrow::FileReader::ReadRowGroup() calls in concurrent multi-threading
-- [#937] parquet_read: double-linked list was re-designed based on C++ template
 - [#934] fix build issue related to libarrow/libparquet on RHEL8
 - [#931] allows to build in CUDA 13.0
+- [#929] Hetedodb-extra is marked as recommends, for OSS only installation
 - [#921] an empty inner relation with RIGHT OUTER JOIN makes GPU kernel launch failure
 - [#919] allows to build PG-Strom towards PostgreSQL v18
 - [#918] incorrect GPU-Join using numeric join key
 - [#916] improvement of pinned-inner-buffer memory management
+- [#xxx] force CPU-based Agg-node if no grouping-key aggregation
+- [#xxx] fix label of cuMemRangeGetAttribute() argument
+- [#xxx] has_aggfuncs was not set correctly
+- [#xxx] gpupreagg: corrupted catalog definition for MAX(timestamp/timestamptz)
+- [#xxx] arrow_fdw: ANALYZE didn't fetch any fields of Parquet files
+- [#xxx] arrow_fdw: ForeignPath didn't add parallel_workers, even if parallel_aware is true.
+- [#xxx] arrow_fdw: stat datum for Date/Timestamp epoch drifting
 - [#xxx] fix: LockHeldByMe() was changed at PG17
 - [#xxx] adjust kds_nslots on partitioned inner pinned buffer
 - [#xxx] pushdown of Result node just over the GPU-PreAgg node
@@ -333,3 +350,5 @@ This is because disabling this parameter is a prerequisite for running the final
 - [#xxx] const ColumnChunkMetaData::statistics() potentially returns NULL
 - [#xxx] __dlist_foreach() may goes into infinite loop in c++ code
 - [#xxx] arrow_fdw wrong 'files' option parse, infinite loop by strtok
+- [#xxx] arrow_fdw: chunk_buffer as StringInfoData cannot expand more than 1GB
+- [#xxx] parquetReadArrowTable put Decimal values on misaligned address

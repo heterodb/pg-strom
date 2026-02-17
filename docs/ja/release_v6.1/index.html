@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="author" content="PG-Strom Development Team" />
+      <link rel="shortcut icon" href="../img/favicon.ico" />
+    <title>PG-Strom v6.1 - PG-Strom Manual</title>
+    <link rel="stylesheet" href="../css/theme.css" />
+    <link rel="stylesheet" href="../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+        <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet" />
+        <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet" />
+        <link href="../custom.css" rel="stylesheet" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "PG-Strom v6.1";
+        var mkdocs_page_input_path = "release_v6.1.md";
+        var mkdocs_page_url = null;
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+          <a href=".." class="icon icon-home"> PG-Strom Manual
+        </a><div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" />
+  </form>
+  [<strong>Japanese</strong> | <a href="../../release_v6.1/"    style="color: #cccccc">English</a>]
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="..">はじめに</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../install/">インストール</a>
+                </li>
+              </ul>
+              <p class="caption"><span class="caption-text">利用ガイド</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../operations/">基本的な操作</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../brin/">BRINインデックス</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../partition/">パーティション</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../postgis/">GPU版PostGIS</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../gpusort/">GPUソート</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../troubles/">トラブルシューティング</a>
+                  </li>
+              </ul>
+              <p class="caption"><span class="caption-text">先進機能</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../ssd2gpu/">GPUダイレクトSQL</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../arrow_fdw/">Apache Arrow</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../gpucache/">GPUキャッシュ</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../pinned_buffer/">Pinned Inner Buffer</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../fluentd/">Fluentd連携</a>
+                  </li>
+              </ul>
+              <p class="caption"><span class="caption-text">リファレンス</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../ref_types/">データ型</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../ref_devfuncs/">関数と演算子</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../ref_sqlfuncs/">SQLオブジェクト</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../ref_params/">GUCパラメータ</a>
+                  </li>
+              </ul>
+              <p class="caption"><span class="caption-text">リリースノート</span></p>
+              <ul class="current">
+                  <li class="toctree-l1 current"><a class="reference internal current" href="#">PG-Strom v6.1</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#_1">概要</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#_2">動作環境</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#apache-parquet">Apache Parquetファイルの対応</a>
+        <ul>
+    <li class="toctree-l3"><a class="reference internal" href="#libarrowlibparquet">独自実装からlibarrow/libparquetへの移行</a>
+    </li>
+        </ul>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#select-into-direct">SELECT INTO Directモード</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#_3">その他の変更点</a>
+        <ul>
+    <li class="toctree-l3"><a class="reference internal" href="#gpu">GPUメモリフットプリントの削減</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#pg2arrow-flatten">pg2arrowの--flattenオプション</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#pg_stromcpu_fallback">pg_strom.cpu_fallbackのデフォルト値</a>
+    </li>
+        </ul>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#_4">累積的なバグの修正</a>
+    </li>
+    </ul>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v6.0/">PG-Strom v6.0</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v5.2/">PG-Strom v5.2</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v5.1/">PG-Strom v5.1</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v5.0/">PG-Strom v5.0</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v3.0/">PG-Strom v3.0</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v2.3/">PG-Strom v2.3</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v2.2/">PG-Strom v2.2</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v2.0/">PG-Strom v2.0</a>
+                  </li>
+              </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="..">PG-Strom Manual</a>
+        
+      </nav>
+      <div class="wy-nav-content">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
+          <li class="breadcrumb-item">リリースノート</li>
+      <li class="breadcrumb-item active">PG-Strom v6.1</li>
+    <li class="wy-breadcrumbs-aside">
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
+              
+                <h1 id="pg-strom-v61">PG-Strom v6.1リリース</h1>
+<div style="text-align: right;">PG-Strom Development Team (18th-Nov-2025)</div>
+
+<h2 id="_1">概要</h2>
+<p>PG-Strom v6.1における主要な変更は点は以下の通りです。</p>
+<ul>
+<li>Apache Parquetファイルの対応</li>
+<li>libarrow/libparquetの利用（独自実装からの移行）</li>
+<li>SELECT INTO Directモード</li>
+<li>GPUメモリフットプリントの削減</li>
+<li>累積的なバグの修正</li>
+</ul>
+<h2 id="_2">動作環境</h2>
+<ul>
+<li>PostgreSQL v15以降</li>
+<li>CUDA Toolkit 13 以降</li>
+<li>CUDA ToolkitのサポートするLinuxディストリビューション</li>
+<li>Intel x86 64bit アーキテクチャ(x86_64)</li>
+<li>NVIDIA GPU CC 7.5 以降 (Turing以降)</li>
+</ul>
+<h2 id="apache-parquet">Apache Parquetファイルの対応</h2>
+<p>PG-Strom v6.1ではApache Parquetファイルの読み出しに対応しました。</p>
+<p>Arrow_Fdw外部テーブルのオプションでParquetファイルを指定する事で、Arrowファイルと同様に読み出す事ができるようになりました。
+複数ファイルを指定する場合、同じスキーマ定義を持つファイルであれば混在する事も可能です。</p>
+<p>Apache Parquet形式は、Apache Arrowとよく似た特徴を持つ列指向の構造化データ形式ですが、多様な圧縮オプションを持ち、比較的低速なストレージからデータを読み出す際の帯域がボトルネックとなるケースで有用です。
+現在のところ、圧縮データの展開にはCPU上で動作するlibparquetを利用しているためにParquetファイルに対してはGPU-Direct SQLを使用する事ができません。（ストライピング構成のNVME-SSDなど、PCI-Eバスの帯域をフルに活用できる高速なストレージを利用する場合は、引き続きApache Arrowの利用を推奨します）</p>
+<p>利用方法は以下の通りです。外部テーブルのオプション<code>file</code>や<code>files</code>、<code>dir</code>でApache Parquetファイルを指定します。</p>
+<pre><code>postgres=# IMPORT FOREIGN SCHEMA weather FROM SERVER arrow_fdw
+                            INTO public OPTIONS (file '/tmp/weather.parquet');
+IMPORT FOREIGN SCHEMA
+
+postgres=# EXPLAIN SELECT count(*), avg(&quot;MinTemp&quot;), avg(&quot;MaxTemp&quot;) FROM weather WHERE &quot;WindDir9am&quot; like '%N%';
+                                     QUERY PLAN
+-------------------------------------------------------------------------------------
+ Custom Scan (GpuPreAgg) on weather  (cost=100.23..100.25 rows=1 width=72)
+   GPU Projection: pgstrom.nrows(), pgstrom.pavg(&quot;MinTemp&quot;), pgstrom.pavg(&quot;MaxTemp&quot;)
+   GPU Scan Quals: (&quot;WindDir9am&quot; ~~ '%N%'::text) [plan: 366 -&gt; 366]
+   GPU Group Key:
+   referenced: &quot;MinTemp&quot;, &quot;MaxTemp&quot;, &quot;WindDir9am&quot;
+   file0: /tmp/weather.parquet (read: 0B, size: 20.51KB)
+   Scan-Engine: VFS with GPU0
+(7 rows)
+
+postgres=# SELECT count(*), avg(&quot;MinTemp&quot;), avg(&quot;MaxTemp&quot;)
+             FROM weather
+            WHERE &quot;WindDir9am&quot; like '%N%';
+ count |        avg         |        avg
+-------+--------------------+--------------------
+   164 | 6.6121951219512205 | 19.833536585365856
+(1 row)
+</code></pre>
+<p>同一のスキーマ構造を持つファイルであれば、Apache ArrowとParquetの混在も可能です。</p>
+<pre><code>postgres=# IMPORT FOREIGN SCHEMA f_ssbm_part FROM SERVER arrow_fdw
+                            INTO public OPTIONS (files '/tmp/ssmb_part.arrow,/tmp/ssmb_part.parquet');
+IMPORT FOREIGN SCHEMA
+
+postgres=# EXPLAIN ANALYZE
+           SELECT count(*), p_color, max(p_size)
+             FROM f_ssbm_part
+            WHERE p_mfgr LIKE 'MFGR#%'
+            GROUP BY p_color;
+                                                                  QUERY PLAN
+-----------------------------------------------------------------------------------------------------------------------------------------------
+ Gather  (cost=4116.93..4142.39 rows=200 width=72) (actual time=173.977..174.230 rows=92 loops=1)
+   Workers Planned: 2
+   Workers Launched: 2
+   -&gt;  Parallel Custom Scan (GpuPreAgg) on f_ssbm_part  (cost=3116.93..3118.39 rows=200 width=72) (actual time=58.952..59.007 rows=31 loops=3)
+         GPU Projection: pgstrom.nrows(), pgstrom.pmax((p_size)::double precision), p_color
+         GPU Scan Quals: (p_mfgr ~~ 'MFGR#%'::text) [plan: 3600000 -&gt; 7500, exec: 3600000 -&gt; 3600000]
+         GPU Group Key: p_color
+         referenced: p_mfgr, p_color, p_size
+         file0: /tmp/ssmb_part.arrow (read: 54.65MB, size: 176.95MB)
+         file1: /tmp/ssmb_part.parquet (read: 0B, size: 17.62MB)
+         Scan-Engine: VFS with GPU0; vfs=6996, ntuples=3600000
+ Planning Time: 0.276 ms
+ Execution Time: 174.388 ms
+(13 rows)
+</code></pre>
+<h3 id="libarrowlibparquet">独自実装からlibarrow/libparquetへの移行</h3>
+<p>PG-StromがApache Arrow形式に対応したのは2019年リリースのv2.2ですが、この頃はC言語で利用可能なライブラリの品質がまだ十分ではなく、Apache Arrow形式ファイルの読み出しを独自に実装していました。
+その後、数年を経てApache Arrow形式が多くの分野で利用されるようになり、また圧縮データの展開を含むApache Parquet形式にも対応するため、本バージョン以降のPG-Stromではlibarrow/libparquetを利用して実装されています。</p>
+<p>周辺コマンドのlibarrow/libparquet対応も順次進めており、以下のモジュールに関しては対応が完了しています。
+- Arrow_Fdw (PG-Strom本体)
+- pg2arrow
+- arrow2csv
+- tsv2arrow</p>
+<p>以下のモジュールに関しても、順次対応を進めていく予定です。
+- pcap2arrow
+- vcf2arrow
+- fluentd(arrow-file)プラグイン</p>
+<h2 id="select-into-direct">SELECT INTO Directモード</h2>
+<p>ETLなどでよく見られるワークロードですが、元となるテーブルをスキャンしその結果を別のテーブルに挿入するケースでは、GPUでのSQL処理の後でPostgreSQLでの処理をバイパスできるケースがあります。本バージョンの新機能であるSELECT INTO Directモードは、そのような場合にGPUでの処理結果をPostgreSQLでの処理をバイパスして直接ストレージに書き込む事で、大量データの書き込みを高速化します。</p>
+<p>以下の例は、lineorderテーブル(316GB)をスキャンした結果をCREATE TABLE ASを用いて新しいテーブルへ書き込む例です。
+<code>Gather</code>や<code>Custom Scan (GpuScan)</code>のactual rows=0となっていますが、<code>SELECT-INTO Direct</code>が有効で1106653ブロック(8.44GB)文を書き込んだと表示されています。
+これはバグではなく、<code>Custom Scan (GpuScan)</code>の処理結果をPostgreSQLバックエンドへ返す事なくストレージに書き込んでいるため、Gatherノードを通過した結果行は0件であったという事を意味しています。</p>
+<pre><code>postgres=# explain analyze create unlogged table lineorder_1995_ship as select * from lineorder where lo_orderdate between 19950101 and 19951231 and lo_shipmode='RAIL';
+                                                                                                                               QUERY PLAN
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Gather  (cost=1100.00..9514869.83 rows=48077662 width=103) (actual time=27233.307..27236.331 rows=0 loops=1)
+   Workers Planned: 2
+   Workers Launched: 2
+   -&gt;  Parallel Custom Scan (GpuScan) on lineorder  (cost=100.00..4706103.63 rows=20032359 width=103) (actual time=27182.877..27182.880 rows=0 loops=3)
+         GPU Projection: lo_orderkey, lo_linenumber, lo_custkey, lo_partkey, lo_suppkey, lo_orderdate, lo_orderpriority, lo_shippriority, lo_quantity, lo_extendedprice, lo_ordertotalprice, lo_discount, lo_revenue, lo_supplycost, lo_tax, lo_commit_date, lo_shipmode
+         GPU Scan Quals: ((lo_orderdate &gt;= 19950101) AND (lo_orderdate &lt;= 19951231) AND (lo_shipmode = 'RAIL'::bpchar)) [plan: 2400012000 -&gt; 20032360, exec: 2400012063 -&gt; 52012672]
+         Scan-Engine: GPU-Direct with 2 GPUs &lt;0,1&gt;; direct=41379519, ntuples=2400012063
+         SELECT-INTO Direct: enabled, nblocks=1106653 (8.44GB)
+ Planning Time: 0.286 ms
+ Execution Time: 27247.873 ms
+(10 rows)
+</code></pre>
+<p>SELECT INTO Directモードは以下のような場合に発動します。</p>
+<ul>
+<li>SELECT INTOまたはCREATE TABLE ASでテーブルを新しく作成する場合<ul>
+<li>したがって、トランザクションはACCESS EXCLUSIVEロックを持っている事が保証されます</li>
+</ul>
+</li>
+<li>テーブルがUNLOGGEDテーブルである場合<ul>
+<li>したがって、トランザクションログを書き込む必要はありません。</li>
+</ul>
+</li>
+<li>テーブルのアクセスメソッドが<code>heap</code>（PostgreSQLの標準）である場合</li>
+<li><code>pg_strom.cpu_fallback = off</code> であること。<ul>
+<li>TOAST化の必要な可変長データが存在する場合、PG-StromはCPU fallbackで処理するため、書き込むべきデータが全てPostgreSQL Blockにインライン格納できるものである事が保証されます。</li>
+</ul>
+</li>
+<li><code>pg_strom.enable_select_into_direct = on</code>であること。</li>
+</ul>
+<p><code>pg_strom.enable_select_into_direct</code>パラメータを使って、意図的にSELECT INTO Directモードを無効化する事もできます。
+その場合、以下のように<code>Custom Scan (GpuScan)</code>の処理結果を1行ごとに<code>Gather</code>が受け取り、最終的に、PostgreSQLのテーブルアクセスメソッドを通じてディスクに書き込みが行われますが、GPU-ServiceからUNIXドメインソケットを介してPostgreSQLバックエンドに処理結果を転送したり、それを1行ごとに取り出してメモリ上でコピー・整形するための処理コストにより、処理時間が伸びています。</p>
+<pre><code>postgres=# set pg_strom.enable_select_into_direct = off;
+SET
+postgres=# explain analyze create unlogged table lineorder_1995_ship_normal as select * from lineorder where lo_orderdate between 19950101 and 19951231 and lo_shipmode='RAIL';
+                                                                                                                               QUERY PLAN
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Gather  (cost=1100.00..9514869.83 rows=48077662 width=103) (actual time=28.196..9550.290 rows=52012672 loops=1)
+   Workers Planned: 2
+   Workers Launched: 2
+   -&gt;  Parallel Custom Scan (GpuScan) on lineorder  (cost=100.00..4706103.63 rows=20032359 width=103) (actual time=30.414..10766.055 rows=17337557 loops=3)
+         GPU Projection: lo_orderkey, lo_linenumber, lo_custkey, lo_partkey, lo_suppkey, lo_orderdate, lo_orderpriority, lo_shippriority, lo_quantity, lo_extendedprice, lo_ordertotalprice, lo_discount, lo_revenue, lo_supplycost, lo_tax, lo_commit_date, lo_shipmode
+         GPU Scan Quals: ((lo_orderdate &gt;= 19950101) AND (lo_orderdate &lt;= 19951231) AND (lo_shipmode = 'RAIL'::bpchar)) [plan: 2400012000 -&gt; 20032360, exec: 2400012063 -&gt; 52012672]
+         Scan-Engine: GPU-Direct with 2 GPUs &lt;0,1&gt;; direct=41379519, ntuples=2400012063
+ Planning Time: 0.577 ms
+ Execution Time: 63814.360 ms
+(9 rows)
+</code></pre>
+<h2 id="_3">その他の変更点</h2>
+<h3 id="gpu">GPUメモリフットプリントの削減</h3>
+<p>GPU-Joinで巨大なテーブル同士のJOINを実行する際に、最もシビアな制約条件となるのは、INNER側テーブルをハッシュ表に読み込んだ際にGPUメモリに収まるかどうかという点です。
+従来は、PostgreSQLのHeapTupleDataデータ構造を元にハッシュ値やポインタなどを付加したデータ構造を用いており、INNER側テーブル１行あたりペイロード以外に48バイトの領域が必要でした。通常、INNER側テーブルは必要な行だけが読み出されるため、ペイロードよりもヘッダの方がGPUメモリを消費するといった状況も珍しくありませんでした。</p>
+<p>本バージョンでは、PostgreSQLのMinimalTupleDataデータ構造を元にして不要なデータを捨象し、また単にパディングとして未使用になっていたエリアにハッシュ値などのデータを詰め込む事で、INNER側テーブル１行あたりペイロード以外の所用データ量を24バイトに圧縮しました。
+これはとりわけ大容量のテーブル同士のJOINにおいて有用で、例えば、あるテスト用クエリにおいては従来INNER側テーブルが85GBを要していたGPUメモリ消費を61GBにまで削減する事ができました。（28%削減）</p>
+<p>ハードウェア的なGPUメモリサイズを越えない範囲に収めるというのは非常に重要で、例えば、80GBのDRAMを持つNVIDIA H100では85GBのハッシュ表をロードする事はできず、INNERテーブルを2分割してGPU-Joinを2周する必要がありましたが、これをGPUメモリの範囲に収める事で、GPU-Joinを1周するだけで巨大テーブルのJOINを完了できることを意味します。</p>
+<h3 id="pg2arrow-flatten">pg2arrowの<code>--flatten</code>オプション</h3>
+<p>PostgreSQLが一度に出力できる列は1600個に制限されていますが、非常にスケールの大きなデータセットをApache ArrowまたはParquet形式で出力する場合、この制限が問題となる事があります。
+これまでは、主クエリの結果を元にパラメータとして副クエリを実行し、その結果をクライアント側（pg2arrow）で結合する事で1600列以上のApache Arrow形式を出力する<code>--inner-join</code>および<code>--outer-join</code>オプションを提供していました。しかし、この方法は極めて低速で、大規模なデータセットの出力にはかなりの困難を伴うものでした。</p>
+<p>そこで、クエリが複数列の内容をパックした複合型を含む場合、それらを複合型のフィールドとして扱うのではなく、複合型を展開してそれらのサブフィールドを「列」としてApache ArrowまたはParquet形式で書き込むためのオプションが<code>--flatten</code>です。</p>
+<p>例えば、3000個の列を持つようなデータセットをダンプしたい場合、100列ずつを複合型としてパックしてそれをクライアント側（pg2arrow）で展開するという方法をとれば、そのクエリは30個の複合型を出力しているに過ぎませんので、PostgreSQLの制限には抵触しません。</p>
+<p>この機能により<code>--inner-join</code>および<code>--outer-join</code>オプションは不要となったため、本バージョンより削除されました。</p>
+<h3 id="pg_stromcpu_fallback"><code>pg_strom.cpu_fallback</code>のデフォルト値</h3>
+<p><code>pg_strom.cpu_fallback</code>のデフォルト値が<code>notice</code>から<code>off</code>へ変更されました。</p>
+<p>これは、本パラメータの無効化が、GPU-PreAggの最終マージをGPU上で実行する事、GPU-JoinにPinned-Inner-Buffer機能を有効化する事、さらにSELECT INTO Directモードを有効化するための前提条件となっているためです。</p>
+<h2 id="_4">累積的なバグの修正</h2>
+<ul>
+<li>[#974] ExplainForeignScan() didn't deliver ancestors, then get_parameter() trapped by assertion</li>
+<li>[#968] pg2arrow didn't assign timezone for Timestamp</li>
+<li>[#966] GPU-based RIGHT/FULL OUTER JOIN may fetch datum from non-exists source kvec buffer.</li>
+<li>[#964] wrong AggPath pathtarget attached on GPU-PreAgg</li>
+<li>[#963] wrong json variable references</li>
+<li>[#956] pg2arrow: wrong composite type binary reader logic</li>
+<li>[#955] __lookupCompositePGType refered different system catalog if no pg_type hint</li>
+<li>[#954] pg2arrow --set didn't work correctly</li>
+<li>[#953] PG18 changed TupleDesc layout, thus, it is not legal to change tupdesc-&gt;natts</li>
+<li>[#967] GPU-PreAgg with OUTER-JOIN didn't back the final result</li>
+<li>[#948] gpupreagg: allows to embed grouping-key and aggregate-functions in expressions</li>
+<li>[#947] OpenSession had unintentional 1sec wait if other worker already did the final command.</li>
+<li>[#938] arrow_meta.cpp has wrong type cast (TimeType as TimestampType)</li>
+<li>[#937] parquet: prevent parquet::arrow::FileReader::ReadRowGroup() calls in concurrent multi-threading</li>
+<li>[#934] fix build issue related to libarrow/libparquet on RHEL8</li>
+<li>[#931] allows to build in CUDA 13.0</li>
+<li>[#929] Hetedodb-extra is marked as recommends, for OSS only installation</li>
+<li>[#921] an empty inner relation with RIGHT OUTER JOIN makes GPU kernel launch failure</li>
+<li>[#919] allows to build PG-Strom towards PostgreSQL v18</li>
+<li>[#918] incorrect GPU-Join using numeric join key</li>
+<li>[#916] improvement of pinned-inner-buffer memory management</li>
+<li>[#xxx] force CPU-based Agg-node if no grouping-key aggregation</li>
+<li>[#xxx] fix label of cuMemRangeGetAttribute() argument</li>
+<li>[#xxx] has_aggfuncs was not set correctly</li>
+<li>[#xxx] gpupreagg: corrupted catalog definition for MAX(timestamp/timestamptz)</li>
+<li>[#xxx] arrow_fdw: ANALYZE didn't fetch any fields of Parquet files</li>
+<li>[#xxx] arrow_fdw: ForeignPath didn't add parallel_workers, even if parallel_aware is true.</li>
+<li>[#xxx] arrow_fdw: stat datum for Date/Timestamp epoch drifting</li>
+<li>[#xxx] fix: LockHeldByMe() was changed at PG17</li>
+<li>[#xxx] adjust kds_nslots on partitioned inner pinned buffer</li>
+<li>[#xxx] pushdown of Result node just over the GPU-PreAgg node</li>
+<li>[#xxx] simple Result has no outer-plan</li>
+<li>[#xxx] nogroup aggregation might crash on mergeGpuPreAggGroupByBuffer</li>
+<li>[#xxx] const ColumnChunkMetaData::statistics() potentially returns NULL</li>
+<li>[#xxx] __dlist_foreach() may goes into infinite loop in c++ code</li>
+<li>[#xxx] arrow_fdw wrong 'files' option parse, infinite loop by strtok</li>
+<li>[#xxx] arrow_fdw: chunk_buffer as StringInfoData cannot expand more than 1GB</li>
+<li>[#xxx] parquetReadArrowTable put Decimal values on misaligned address</li>
+</ul>
+              
+            </div>
+          </div><footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
+        <a href="../ref_params/" class="btn btn-neutral float-left" title="GUCパラメータ"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+        <a href="../release_v6.0/" class="btn btn-neutral float-right" title="PG-Strom v6.0">Next <span class="icon icon-circle-arrow-right"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+          
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="Versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+    
+      <span><a href="../ref_params/" style="color: #fcfcfc">&laquo; Previous</a></span>
+    
+    
+      <span><a href="../release_v6.0/" style="color: #fcfcfc">Next &raquo;</a></span>
+    
+  </span>
+</div>
+    <script src="../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "..";</script>
+    <script src="../js/theme_extra.js"></script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/main.js"></script>
+    <script>
+        jQuery(function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        });
+    </script>
+
+</body>
+</html>

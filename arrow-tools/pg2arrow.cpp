@@ -119,6 +119,7 @@ static const char  *dump_schema_tablename = NULL;	/* --schema-name */
 static bool			shows_progress = false;			/* --progress */
 static int			verbose;						/* --verbose */
 static std::vector<configOption *>	pgsql_config_options;	/* --set */
+static std::vector<configOption *>	pgsql_command_params;	/* --param */
 
 // ------------------------------------------------
 // Other static variables
@@ -194,6 +195,17 @@ public:
 		arrow_builder->Reset();
 		if (arrow_array)
 			arrow_array = nullptr;
+	}
+	virtual	~pgsqlBinaryHandler()
+	{
+		/* NOTE:
+		 * This class has virtual functions but does not require custom destruction.
+		 * However, without a virtual destructor, '-Wnon-virtual-dtor' warns that
+		 * deleting through a base pointer may cause undefined behavior.
+		 * We do NOT delete instances via base pointers in this design,
+		 * but the virtual destructor is added intentionally to silence the warning
+		 * and avoid future maintenance pitfalls.
+		 */
 	}
 };
 
@@ -903,8 +915,83 @@ public:
 class pgsqlTextHandler final : public pgsqlBinaryVarlenaHandler
 {
 public:
+	static constexpr size_t	STATS_VALUE_LEN = 60;
+	bool	stats_is_valid;
+	char	stats_min_value[STATS_VALUE_LEN+1];
+	char	stats_max_value[STATS_VALUE_LEN+1];
+	int		stats_min_len;
+	int		stats_max_len;
+	void	enableStats(void)
+	{
+		this->stats_enabled = true;
+	}
+	void	updateStats(const char *addr, int sz)
+	{
+		int		__len, rv;
+
+		if (!addr)
+			return;
+		if (!stats_is_valid)
+		{
+			__len = Min(sz, STATS_VALUE_LEN);
+			memcpy(stats_min_value, addr, __len);
+			memcpy(stats_max_value, addr, __len);
+			stats_min_value[__len] = '\0';
+			stats_max_value[__len] = '\0';
+			stats_min_len = __len;
+			stats_max_len = __len;
+			stats_is_valid = true;
+		}
+		else
+		{
+			__len = Min(sz, stats_min_len);
+			rv = memcmp(addr, stats_min_value, __len);
+			if (rv < 0 || (rv == 0 && stats_min_len > sz))
+			{
+				__len = Min(sz, STATS_VALUE_LEN);
+				memcpy(stats_min_value, addr, __len);
+				stats_min_value[__len] = '\0';
+			}
+			__len = Min(sz, stats_max_len);
+			rv = memcmp(addr, stats_max_value, __len);
+			if (rv > 0 || (rv == 0 && stats_max_len < sz))
+			{
+				__len = Min(sz, STATS_VALUE_LEN);
+				memcpy(stats_max_value, addr, __len);
+				stats_max_value[__len] = '\0';
+			}
+		}
+	}
+	bool	appendStats(std::shared_ptr<arrow::KeyValueMetadata> custom_metadata)
+	{
+		bool	retval = stats_is_valid;
+
+		if (stats_is_valid)
+		{
+			/* NOTE: we cannot ',' character to use it for delimiter. */
+			char   *pos;
+
+			pos = strchr(stats_min_value, ',');
+			if (pos)
+				*pos = '\0';
+			pos = strchr(stats_max_value, ',');
+			if (pos)
+			{
+				pos[0] = (*pos + 1);
+				pos[1] = '\0';
+			}
+			custom_metadata->Append(std::string("min_max_stats.") + this->attname,
+									std::string(stats_min_value) +
+									std::string(",") +
+									std::string(stats_max_value));
+			stats_is_valid = false;
+		}
+		return retval;
+	}
 	std::string_view fetchBinary(const char *addr, int sz)
 	{
+		if (this->stats_enabled)
+			updateStats(addr, sz);
 		return std::string_view(addr, sz);
 	}
 	PGSQL_BINARY_PUT_VALUE_TEMPLATE(String)
@@ -1443,9 +1530,9 @@ pgsql_define_arrow_field(arrowField &arrow_field,
 		}
 		else if (strcmp(typname, "timestamptz") == 0)
 		{
-			//set timezone
 			builder = std::make_shared<arrow::TimestampBuilder>
-				(arrow::timestamp(arrow::TimeUnit::MICRO), pool);
+				(arrow::timestamp(arrow::TimeUnit::MICRO,
+								  std::string(server_timezone)), pool);
 			handler = std::make_shared<pgsqlTimestampHandler>();
 		}
 		else if (strcmp(typname, "interval") == 0)
@@ -2167,12 +2254,22 @@ pgsql_process_query_results(pgsqlHandlerVector &handlers)
 static void
 build_pgsql_command_list(void)
 {
+	std::string		sql_command(raw_pgsql_command);
+
+	/* apply --param setting, if any */
+	for (int k=0; k < pgsql_command_params.size(); k++)
+	{
+		configOption   *config = pgsql_command_params[k];
+		std::string		key = std::string("@(") + config->name + std::string(")");
+
+		__replace_string(sql_command, key, config->value);
+	}
+
 	assert(num_worker_threads > 0);
 	if (num_worker_threads == 1)
 	{
 		/* simple non-parallel case */
-		std::string	sql = std::string(raw_pgsql_command);
-		pgsql_command_list.push_back(sql);
+		pgsql_command_list.push_back(sql_command);
 	}
 	else if (ctid_target_table)
 	{
@@ -2206,7 +2303,7 @@ build_pgsql_command_list(void)
 				 ctid_target_table);
 		for (uint32_t __worker=0; __worker < num_worker_threads; __worker++)
 		{
-			std::string	query = std::string(raw_pgsql_command);
+			std::string	query = sql_command;
 
 			if (__worker == 0)
 				sprintf(buf, "%s.ctid < '(%ld,0)'::tid",
@@ -2238,7 +2335,7 @@ build_pgsql_command_list(void)
 			 token != NULL;
 			 token = strtok_r(NULL, ",", &pos))
 		{
-			std::string query = std::string(raw_pgsql_command);
+			std::string query = sql_command;
 
 			__replace_string(query,
 							 std::string("$(PARALLEL_KEY)"),
@@ -2252,7 +2349,7 @@ build_pgsql_command_list(void)
 		/* replace $(WORKER_ID) and $(N_WORKERS) */
 		for (int __worker=0; worker_id < num_worker_threads; __worker++)
 		{
-			std::string	query = std::string(raw_pgsql_command);
+			std::string	query = sql_command;
 
 			__replace_string(query,
 							 std::string("$(WORKER_ID)"),
@@ -2612,7 +2709,6 @@ static std::shared_ptr<parquet::WriterProperties>
 parquet_my_writer_props(void)
 {
 	parquet::WriterProperties::Builder builder;
-	auto	props = parquet::WriterProperties::Builder().build();
 
 	/* created-by pg2arrow */
 	builder.created_by(std::string("pg2arrow"));
@@ -2788,7 +2884,8 @@ static void usage(void)
 		<< "      --schema=FILENAME dump schema definition as CREATE TABLE statement\n"
 		<< "      --schema-name=NAME table name in the CREATE TABLE statement\n"
 		<< "      --progress       shows progress of the job\n"
-		<< "      --set=NAME:VALUE config option to set before SQL execution\n"
+		<< "      --set=NAME:VALUE set PostgreSQL server option before SQL execution\n"
+		<< "      --param=NAME:VALUE replace @(NAME) in SQL command by the VALUE\n"
 		<< "  -v, --verbose        shows verbose output\n"
 		<< "      --help           shows this message\n"
 		<< "\n"
@@ -2825,6 +2922,7 @@ parse_options(int argc, char * const argv[])
 		{"schema-name",     required_argument, NULL, 1005},
 		{"progress",        no_argument,       NULL, 1006},
 		{"set",             required_argument, NULL, 1007},
+		{"param",           required_argument, NULL, 1008},
 		{"verbose",         no_argument,       NULL, 'v'},
 		{"help",            no_argument,       NULL, 9999},
 		{NULL, 0, NULL, 0},
@@ -3032,6 +3130,19 @@ parse_options(int argc, char * const argv[])
 					config = new configOption(__trim(optarg),
 											  __trim(pos));
 					pgsql_config_options.push_back(config);
+				}
+				break;
+			case 1008:		/* --param */
+				{
+					char   *pos = strchr(optarg, ':');
+					configOption *config;
+
+					if (!pos)
+						Elog("command parameter must be --param=KEY:VALUE form");
+					*pos++ = '\0';
+					config = new configOption(__trim(optarg),
+											  __trim(pos));
+					pgsql_command_params.push_back(config);
 				}
 				break;
 			case 'v':		/* --verbose */

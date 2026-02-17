@@ -2,7 +2,7 @@
 --- Test for apache_arrow with index
 ---
 -- \t on
--- SET pg_strom.regression_test_mode = on;
+SET pg_strom.regression_test_mode = on;
 SET client_min_messages = error;
 DROP SCHEMA IF EXISTS regtest_arrow_index_temp CASCADE;
 CREATE SCHEMA regtest_arrow_index_temp;
@@ -40,16 +40,16 @@ INSERT INTO arrow_index_data (
 CREATE TABLE target_num AS SELECT * FROM arrow_index_data WHERE id=500000;
 \getenv arrow_test_data_dir_path ARROW_TEST_DATA_DIR
 \set test_arrow_index_path :arrow_test_data_dir_path '/test_arrow_index.data'
-\! $PG2ARROW_CMD -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY date_num' -o $ARROW_TEST_DATA_DIR/test_arrow_index.data --stat=date_num
+\! $PG2ARROW_CMD -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY date_num' -o $ARROW_TEST_DATA_DIR/test_arrow_index.data --stat=date_num > /dev/null 2>&1
 IMPORT FOREIGN SCHEMA regtest_arrow
   FROM SERVER arrow_fdw
   INTO regtest_arrow_index_temp
 OPTIONS (file :'test_arrow_index_path');
-EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF,BUFFERS OFF)
 SELECT * FROM regtest_arrow_index_temp.regtest_arrow
  WHERE date_num=(SELECT date_num FROM regtest_arrow_index_temp.target_num);
-                                              QUERY PLAN                                              
-------------------------------------------------------------------------------------------------------
+                                                   QUERY PLAN                                                    
+-----------------------------------------------------------------------------------------------------------------
  Gather (actual rows=269 loops=1)
    Workers Planned: 2
    Workers Launched: 2
@@ -59,24 +59,25 @@ SELECT * FROM regtest_arrow_index_temp.regtest_arrow
          Filter: (date_num = (InitPlan 1).col1)
          Rows Removed by Filter: 103473
          referenced: id, int_num, float_num, half_num, decimal_num, date_num, time_num, timestamp_num
-         Stats-Hint: (date_num = $0)  [loaded: 1, skipped: 3]
+         Stats-Hint: (date_num OPERATOR(pg_catalog.=) 'Param(PARAM_EXEC, ID: 1)'::text)  [loaded: 1, skipped: 3]
          file0: test_arrow_index.data (read: 51.50MB, size: 51.50MB)
 (11 rows)
 
-EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF,BUFFERS OFF)
 SELECT count(*)
   FROM regtest_arrow
  WHERE date_num between '2019-04-14' and '2023-05-23';
-                                                     QUERY PLAN                                                     
---------------------------------------------------------------------------------------------------------------------
- Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=1 loops=1)
-   GPU Projection: pgstrom.nrows()
-   GPU Scan Quals: ((date_num >= '04-14-2019'::date) AND (date_num <= '05-23-2023'::date)) [exec: 621378 -> 374353]
-   GPU Group Key: 
-   referenced: date_num
-   Stats-Hint: (date_num >= '04-14-2019'::date), (date_num <= '05-23-2023'::date)  [loaded: 2, skipped: 2]
-   file0: test_arrow_index.data (read: 3906.44KB, size: 51.50MB)
-(7 rows)
+                                                        QUERY PLAN                                                        
+--------------------------------------------------------------------------------------------------------------------------
+ Aggregate (actual rows=1 loops=1)
+   ->  Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=2 loops=1)
+         GPU Projection: pgstrom.nrows()
+         GPU Scan Quals: ((date_num >= '04-14-2019'::date) AND (date_num <= '05-23-2023'::date)) [exec: 621378 -> 374353]
+         GPU Group Key: 
+         referenced: date_num
+         Stats-Hint: (date_num >= '04-14-2019'::date), (date_num <= '05-23-2023'::date)  [loaded: 2, skipped: 2]
+         file0: test_arrow_index.data (read: 3906.25KB, size: 51.50MB)
+(8 rows)
 
 SELECT count(*)
   FROM regtest_arrow
@@ -97,12 +98,12 @@ SELECT count(*)
 
 RESET pg_strom.enabled;
 -- ORDER BY int_num
-\! $PG2ARROW_CMD -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY int_num' -o $ARROW_TEST_DATA_DIR/test_arrow_index.data --stat=int_num
-EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+\! $PG2ARROW_CMD -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY int_num' -o $ARROW_TEST_DATA_DIR/test_arrow_index.data --stat=int_num > /dev/null 2>&1
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF,BUFFERS OFF)
 SELECT * FROM regtest_arrow_index_temp.regtest_arrow
  WHERE int_num=(SELECT int_num FROM regtest_arrow_index_temp.target_num);
-                                              QUERY PLAN                                              
-------------------------------------------------------------------------------------------------------
+                                                   QUERY PLAN                                                   
+----------------------------------------------------------------------------------------------------------------
  Gather (actual rows=1 loops=1)
    Workers Planned: 2
    Workers Launched: 2
@@ -112,24 +113,25 @@ SELECT * FROM regtest_arrow_index_temp.regtest_arrow
          Filter: (int_num = (InitPlan 1).col1)
          Rows Removed by Filter: 103563
          referenced: id, int_num, float_num, half_num, decimal_num, date_num, time_num, timestamp_num
-         Stats-Hint: (int_num = $0)  [loaded: 1, skipped: 3]
+         Stats-Hint: (int_num OPERATOR(pg_catalog.=) 'Param(PARAM_EXEC, ID: 1)'::text)  [loaded: 1, skipped: 3]
          file0: test_arrow_index.data (read: 51.50MB, size: 51.50MB)
 (11 rows)
 
-EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF,BUFFERS OFF)
 SELECT count(*)
   FROM regtest_arrow
  WHERE int_num between -50000 and 50000;
-                                            QUERY PLAN                                            
---------------------------------------------------------------------------------------------------
- Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=1 loops=1)
-   GPU Projection: pgstrom.nrows()
-   GPU Scan Quals: ((int_num >= '-50000'::integer) AND (int_num <= 50000)) [exec: 310689 -> 2941]
-   GPU Group Key: 
-   referenced: int_num
-   Stats-Hint: (int_num >= '-50000'::integer), (int_num <= 50000)  [loaded: 1, skipped: 3]
-   file0: test_arrow_index.data (read: 3906.44KB, size: 51.50MB)
-(7 rows)
+                                               QUERY PLAN                                               
+--------------------------------------------------------------------------------------------------------
+ Aggregate (actual rows=1 loops=1)
+   ->  Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=1 loops=1)
+         GPU Projection: pgstrom.nrows()
+         GPU Scan Quals: ((int_num >= '-50000'::integer) AND (int_num <= 50000)) [exec: 310689 -> 2941]
+         GPU Group Key: 
+         referenced: int_num
+         Stats-Hint: (int_num >= '-50000'::integer), (int_num <= 50000)  [loaded: 1, skipped: 3]
+         file0: test_arrow_index.data (read: 3906.25KB, size: 51.50MB)
+(8 rows)
 
 SELECT count(*)
   FROM regtest_arrow
@@ -150,12 +152,12 @@ SELECT count(*)
 
 RESET pg_strom.enabled;
 -- ORDER BY float
-\! $PG2ARROW_CMD -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY float_num' -o $ARROW_TEST_DATA_DIR/test_arrow_index.data --stat=float_num
-EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+\! $PG2ARROW_CMD -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY float_num' -o $ARROW_TEST_DATA_DIR/test_arrow_index.data --stat=float_num > /dev/null 2>&1
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF,BUFFERS OFF)
 SELECT * FROM regtest_arrow_index_temp.regtest_arrow
  WHERE float_num=(SELECT float_num FROM regtest_arrow_index_temp.target_num);
-                                              QUERY PLAN                                              
-------------------------------------------------------------------------------------------------------
+                                                    QUERY PLAN                                                    
+------------------------------------------------------------------------------------------------------------------
  Gather (actual rows=1 loops=1)
    Workers Planned: 2
    Workers Launched: 2
@@ -165,24 +167,25 @@ SELECT * FROM regtest_arrow_index_temp.regtest_arrow
          Filter: (float_num = (InitPlan 1).col1)
          Rows Removed by Filter: 103563
          referenced: id, int_num, float_num, half_num, decimal_num, date_num, time_num, timestamp_num
-         Stats-Hint: (float_num = $0)  [loaded: 1, skipped: 3]
+         Stats-Hint: (float_num OPERATOR(pg_catalog.=) 'Param(PARAM_EXEC, ID: 1)'::text)  [loaded: 1, skipped: 3]
          file0: test_arrow_index.data (read: 51.50MB, size: 51.50MB)
 (11 rows)
 
-EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF,BUFFERS OFF)
 SELECT count(*)
   FROM regtest_arrow
  WHERE float_num between -2000 and 2000;
-                                                            QUERY PLAN                                                             
------------------------------------------------------------------------------------------------------------------------------------
- Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=1 loops=1)
-   GPU Projection: pgstrom.nrows()
-   GPU Scan Quals: ((float_num >= '-2000'::double precision) AND (float_num <= '2000'::double precision)) [exec: 310689 -> 200036]
-   GPU Group Key: 
-   referenced: float_num
-   Stats-Hint: (float_num >= '-2000'::double precision), (float_num <= '2000'::double precision)  [loaded: 1, skipped: 3]
-   file0: test_arrow_index.data (read: 7812.69KB, size: 51.50MB)
-(7 rows)
+                                                               QUERY PLAN                                                                
+-----------------------------------------------------------------------------------------------------------------------------------------
+ Aggregate (actual rows=1 loops=1)
+   ->  Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=1 loops=1)
+         GPU Projection: pgstrom.nrows()
+         GPU Scan Quals: ((float_num >= '-2000'::double precision) AND (float_num <= '2000'::double precision)) [exec: 310689 -> 200036]
+         GPU Group Key: 
+         referenced: float_num
+         Stats-Hint: (float_num >= '-2000'::double precision), (float_num <= '2000'::double precision)  [loaded: 1, skipped: 3]
+         file0: test_arrow_index.data (read: 7812.50KB, size: 51.50MB)
+(8 rows)
 
 SELECT count(*)
   FROM regtest_arrow
@@ -203,8 +206,8 @@ SELECT count(*)
 
 RESET pg_strom.enabled;
 -- ORDER BY half
-\! $PG2ARROW_CMD -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY half_num' -o $ARROW_TEST_DATA_DIR/test_arrow_index.data --stat=half_num
-EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+\! $PG2ARROW_CMD -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY half_num' -o $ARROW_TEST_DATA_DIR/test_arrow_index.data --stat=half_num > /dev/null 2>&1
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF,BUFFERS OFF)
 SELECT * FROM regtest_arrow_index_temp.regtest_arrow
  WHERE half_num=(SELECT half_num FROM regtest_arrow_index_temp.target_num);
                                               QUERY PLAN                                              
@@ -221,19 +224,20 @@ SELECT * FROM regtest_arrow_index_temp.regtest_arrow
          file0: test_arrow_index.data (read: 51.50MB, size: 51.50MB)
 (10 rows)
 
-EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF,BUFFERS OFF)
 SELECT count(*)
   FROM regtest_arrow
  WHERE half_num between -2000 and 2000;
-                                                            QUERY PLAN                                                            
-----------------------------------------------------------------------------------------------------------------------------------
- Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=1 loops=1)
-   GPU Projection: pgstrom.nrows()
-   GPU Scan Quals: ((half_num >= '-2000'::double precision) AND (half_num <= '2000'::double precision)) [exec: 1000000 -> 199782]
-   GPU Group Key: 
-   referenced: half_num
-   file0: test_arrow_index.data (read: 1953.31KB, size: 51.50MB)
-(6 rows)
+                                                               QUERY PLAN                                                               
+----------------------------------------------------------------------------------------------------------------------------------------
+ Aggregate (actual rows=1 loops=1)
+   ->  Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=1 loops=1)
+         GPU Projection: pgstrom.nrows()
+         GPU Scan Quals: ((half_num >= '-2000'::double precision) AND (half_num <= '2000'::double precision)) [exec: 1000000 -> 199782]
+         GPU Group Key: 
+         referenced: half_num
+         file0: test_arrow_index.data (read: 1953.12KB, size: 51.50MB)
+(7 rows)
 
 SELECT count(*)
   FROM regtest_arrow
@@ -254,12 +258,12 @@ SELECT count(*)
 
 RESET pg_strom.enabled;
 -- ORDER BY decimal
-\! $PG2ARROW_CMD -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY decimal_num' -o $ARROW_TEST_DATA_DIR/test_arrow_index.data --stat=decimal_num
-EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+\! $PG2ARROW_CMD -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY decimal_num' -o $ARROW_TEST_DATA_DIR/test_arrow_index.data --stat=decimal_num > /dev/null 2>&1
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF,BUFFERS OFF)
 SELECT * FROM regtest_arrow_index_temp.regtest_arrow
  WHERE decimal_num=(SELECT decimal_num FROM regtest_arrow_index_temp.target_num);
-                                              QUERY PLAN                                              
-------------------------------------------------------------------------------------------------------
+                                                     QUERY PLAN                                                     
+--------------------------------------------------------------------------------------------------------------------
  Gather (actual rows=0 loops=1)
    Workers Planned: 2
    Workers Launched: 2
@@ -269,24 +273,25 @@ SELECT * FROM regtest_arrow_index_temp.regtest_arrow
          Filter: (decimal_num = (InitPlan 1).col1)
          Rows Removed by Filter: 103563
          referenced: id, int_num, float_num, half_num, decimal_num, date_num, time_num, timestamp_num
-         Stats-Hint: (decimal_num = $0)  [loaded: 1, skipped: 3]
+         Stats-Hint: (decimal_num OPERATOR(pg_catalog.=) 'Param(PARAM_EXEC, ID: 1)'::text)  [loaded: 1, skipped: 3]
          file0: test_arrow_index.data (read: 51.50MB, size: 51.50MB)
 (11 rows)
 
-EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF,BUFFERS OFF)
 SELECT count(*)
   FROM regtest_arrow
  WHERE decimal_num between -5000 and 5000;
-                                                     QUERY PLAN                                                      
----------------------------------------------------------------------------------------------------------------------
- Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=1 loops=1)
-   GPU Projection: pgstrom.nrows()
-   GPU Scan Quals: ((decimal_num >= '-5000'::numeric) AND (decimal_num <= '5000'::numeric)) [exec: 932067 -> 500583]
-   GPU Group Key: 
-   referenced: decimal_num
-   Stats-Hint: (decimal_num >= '-5000'::numeric), (decimal_num <= '5000'::numeric)  [loaded: 3, skipped: 1]
-   file0: test_arrow_index.data (read: 15.26MB, size: 51.50MB)
-(7 rows)
+                                                        QUERY PLAN                                                         
+---------------------------------------------------------------------------------------------------------------------------
+ Aggregate (actual rows=1 loops=1)
+   ->  Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=2 loops=1)
+         GPU Projection: pgstrom.nrows()
+         GPU Scan Quals: ((decimal_num >= '-5000'::numeric) AND (decimal_num <= '5000'::numeric)) [exec: 932067 -> 500583]
+         GPU Group Key: 
+         referenced: decimal_num
+         Stats-Hint: (decimal_num >= '-5000'::numeric), (decimal_num <= '5000'::numeric)  [loaded: 3, skipped: 1]
+         file0: test_arrow_index.data (read: 15.26MB, size: 51.50MB)
+(8 rows)
 
 SELECT count(*)
   FROM regtest_arrow
@@ -307,12 +312,12 @@ SELECT count(*)
 
 RESET pg_strom.enabled;
 -- ORDER BY time
-\! $PG2ARROW_CMD -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY time_num' -o $ARROW_TEST_DATA_DIR/test_arrow_index.data --stat=time_num
-EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+\! $PG2ARROW_CMD -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY time_num' -o $ARROW_TEST_DATA_DIR/test_arrow_index.data --stat=time_num > /dev/null 2>&1
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF,BUFFERS OFF)
 SELECT * FROM regtest_arrow_index_temp.regtest_arrow
  WHERE time_num=(SELECT time_num FROM regtest_arrow_index_temp.target_num);
-                                              QUERY PLAN                                              
-------------------------------------------------------------------------------------------------------
+                                                   QUERY PLAN                                                    
+-----------------------------------------------------------------------------------------------------------------
  Gather (actual rows=1 loops=1)
    Workers Planned: 2
    Workers Launched: 2
@@ -322,24 +327,25 @@ SELECT * FROM regtest_arrow_index_temp.regtest_arrow
          Filter: (time_num = (InitPlan 1).col1)
          Rows Removed by Filter: 103563
          referenced: id, int_num, float_num, half_num, decimal_num, date_num, time_num, timestamp_num
-         Stats-Hint: (time_num = $0)  [loaded: 1, skipped: 3]
+         Stats-Hint: (time_num OPERATOR(pg_catalog.=) 'Param(PARAM_EXEC, ID: 1)'::text)  [loaded: 1, skipped: 3]
          file0: test_arrow_index.data (read: 51.50MB, size: 51.50MB)
 (11 rows)
 
-EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF,BUFFERS OFF)
 SELECT count(*)
   FROM regtest_arrow
  WHERE time_num between '09:00:00' and '17:00:00';
-                                                                     QUERY PLAN                                                                     
-----------------------------------------------------------------------------------------------------------------------------------------------------
- Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=1 loops=1)
-   GPU Projection: pgstrom.nrows()
-   GPU Scan Quals: ((time_num >= '09:00:00'::time without time zone) AND (time_num <= '17:00:00'::time without time zone)) [exec: 621378 -> 333443]
-   GPU Group Key: 
-   referenced: time_num
-   Stats-Hint: (time_num >= '09:00:00'::time without time zone), (time_num <= '17:00:00'::time without time zone)  [loaded: 2, skipped: 2]
-   file0: test_arrow_index.data (read: 7812.69KB, size: 51.50MB)
-(7 rows)
+                                                                        QUERY PLAN                                                                        
+----------------------------------------------------------------------------------------------------------------------------------------------------------
+ Aggregate (actual rows=1 loops=1)
+   ->  Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=2 loops=1)
+         GPU Projection: pgstrom.nrows()
+         GPU Scan Quals: ((time_num >= '09:00:00'::time without time zone) AND (time_num <= '17:00:00'::time without time zone)) [exec: 621378 -> 333443]
+         GPU Group Key: 
+         referenced: time_num
+         Stats-Hint: (time_num >= '09:00:00'::time without time zone), (time_num <= '17:00:00'::time without time zone)  [loaded: 2, skipped: 2]
+         file0: test_arrow_index.data (read: 7812.50KB, size: 51.50MB)
+(8 rows)
 
 SELECT count(*)
   FROM regtest_arrow
@@ -361,11 +367,13 @@ SELECT count(*)
 RESET pg_strom.enabled;
 -- ORDER BY timestamp
 \! $PG2ARROW_CMD -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY timestamp_num' -o $ARROW_TEST_DATA_DIR/test_arrow_index.data --stat=timestamp_num
-EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+pg2arrow: opened the output file '/home/onishi/pg-strom/test/data/test_arrow_index.data'
+pg2arrow: wrote on '/home/onishi/pg-strom/test/data/test_arrow_index.data' total 4 record-batches, 1000000 items
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF,BUFFERS OFF)
 SELECT * FROM regtest_arrow_index_temp.regtest_arrow
 WHERE timestamp_num=(SELECT timestamp_num FROM regtest_arrow_index_temp.target_num);
-                                              QUERY PLAN                                              
-------------------------------------------------------------------------------------------------------
+                                                      QUERY PLAN                                                      
+----------------------------------------------------------------------------------------------------------------------
  Gather (actual rows=1 loops=1)
    Workers Planned: 2
    Workers Launched: 2
@@ -375,24 +383,25 @@ WHERE timestamp_num=(SELECT timestamp_num FROM regtest_arrow_index_temp.target_n
          Filter: (timestamp_num = (InitPlan 1).col1)
          Rows Removed by Filter: 103563
          referenced: id, int_num, float_num, half_num, decimal_num, date_num, time_num, timestamp_num
-         Stats-Hint: (timestamp_num = $0)  [loaded: 1, skipped: 3]
+         Stats-Hint: (timestamp_num OPERATOR(pg_catalog.=) 'Param(PARAM_EXEC, ID: 1)'::text)  [loaded: 1, skipped: 3]
          file0: test_arrow_index.data (read: 51.50MB, size: 51.50MB)
 (11 rows)
 
-EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF,BUFFERS OFF)
 SELECT count(*)
   FROM regtest_arrow
  WHERE timestamp_num between '2019-04-14 09:00:00' and '2023-05-23 17:00:00';
-                                                                                               QUERY PLAN                                                                                               
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=1 loops=1)
-   GPU Projection: pgstrom.nrows()
-   GPU Scan Quals: ((timestamp_num >= 'Sun Apr 14 09:00:00 2019'::timestamp without time zone) AND (timestamp_num <= 'Tue May 23 17:00:00 2023'::timestamp without time zone)) [exec: 621378 -> 410884]
-   GPU Group Key: 
-   referenced: timestamp_num
-   Stats-Hint: (timestamp_num >= 'Sun Apr 14 09:00:00 2019'::timestamp without time zone), (timestamp_num <= 'Tue May 23 17:00:00 2023'::timestamp without time zone)  [loaded: 2, skipped: 2]
-   file0: test_arrow_index.data (read: 7812.69KB, size: 51.50MB)
-(7 rows)
+                                                                                                  QUERY PLAN                                                                                                  
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Aggregate (actual rows=1 loops=1)
+   ->  Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=2 loops=1)
+         GPU Projection: pgstrom.nrows()
+         GPU Scan Quals: ((timestamp_num >= 'Sun Apr 14 09:00:00 2019'::timestamp without time zone) AND (timestamp_num <= 'Tue May 23 17:00:00 2023'::timestamp without time zone)) [exec: 621378 -> 410884]
+         GPU Group Key: 
+         referenced: timestamp_num
+         Stats-Hint: (timestamp_num >= 'Sun Apr 14 09:00:00 2019'::timestamp without time zone), (timestamp_num <= 'Tue May 23 17:00:00 2023'::timestamp without time zone)  [loaded: 2, skipped: 2]
+         file0: test_arrow_index.data (read: 7812.50KB, size: 51.50MB)
+(8 rows)
 
 SELECT count(*)
   FROM regtest_arrow

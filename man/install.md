@@ -20,7 +20,7 @@ This chapter introduces the steps to install PG-Strom.
     - PG-Stromを実行するには少なくとも一個のGPUデバイスがシステム上に必要です。これらはCUDA Toolkitでサポートされており、computing capability が7.5以降のモデル（Turing世代以降）である必要があります。
     - [002: HW Validation List - List of supported GPU models](https://github.com/heterodb/pg-strom/wiki/002:-HW-Validation-List#list-of-supported-gpu-models)を参考にGPUを選定してください。
 - **Operating System**
-    - PG-Stromの実行には、CUDA Toolkitによりサポートされているx86_64アーキテクチャ向けのLinux OSが必要です。推奨環境はRed Hat Enterprise LinuxまたはRocky Linuxバージョン 9.x、または10.xです。
+    - PG-Stromの実行には、CUDA Toolkitによりサポートされているx86_64アーキテクチャ向けのLinux OSが必要です。推奨環境はRed Hat Enterprise LinuxまたはRocky Linuxバージョン 10.x、9.x、または8.xです。
     - GPUダイレクトSQL（cuFileドライバ）を利用するには、CUDA Toolkitに含まれるnvidia-fsドライバと、Mellanox OFED (OpenFabrics Enterprise Distribution) ドライバのインストールが必要です。
 - **PostgreSQL**
     - PG-Strom v6.1の実行にはPostgreSQLバージョン15以降が必要です。
@@ -38,7 +38,7 @@ This chapter introduces the steps to install PG-Strom.
     - PG-Strom requires at least one GPU device on the system, which is supported by CUDA Toolkit, has computing capability 7.5 (Turing generation) or later;
     - Please check at [002: HW Validation List - List of supported GPU models](https://github.com/heterodb/pg-strom/wiki/002:-HW-Validation-List#list-of-supported-gpu-models) for GPU selection.
 - **Operating System**
-    - PG-Strom requires Linux operating system for x86_64 architecture, and its distribution supported by CUDA Toolkit. Our recommendation is Red Hat Enterprise Linux or Rocky Linux version 9.x or 10.x series.
+    - PG-Strom requires Linux operating system for x86_64 architecture, and its distribution supported by CUDA Toolkit. Our recommendation is Red Hat Enterprise Linux or Rocky Linux version 10.x, 9.x or 8.x series.
     - GPU Direct SQL (with cuFile driver) needs the `nvidia-fs` driver distributed with CUDA Toolkit, and Mellanox OFED (OpenFabrics Enterprise Distribution) driver.
 - **PostgreSQL**
     - PG-Strom v6.1 requires PostgreSQL v15 or later.
@@ -93,12 +93,18 @@ Choose a Linux distribution which is supported by CUDA Toolkit, then install the
 Red Hat Enterprise Linux 8.x系列（Rocky Linux 8.x系列を含む）の場合、ソフトウェア構成は、ベース環境として「最小限のインストール」を選択し、さらに追加のソフトウェアとして「開発ツール」を選択してください。
 
 Red Hat Enterprise Linux 9.x系列（Rocky Linux 9.x系列を含む）の場合、ソフトウェア構成は、ベース環境として「最小限のインストール」を選択し、さらに追加のソフトウェアとして「標準」「開発ツール」を選択してください。
+
+Red Hat Enterprise Linux 10.x系列（Rocky Linux 10.x系列を含む）の場合、ソフトウェア構成は、ベース環境として「最小限のインストール」を選択し、さらに追加のソフトウェアとして「標準」「開発ツール」を選択してください。
 }
 @en{
 In case of Red Hat Enterprise Linux 8.x series (including Rocky Linux 8.x series), choose "Minimal installation" as base environment, and also check the "Development Tools" add-ons for the software selection
+
+In case of Red Hat Enterprise Linux 9.x series (including Rocky Linux 9.x series), choose "Minimal installation" as base environment, and also check the "Standard" and "Development Tools" add-ons for the software selection
+
+In case of Red Hat Enterprise Linux 10.x series (including Rocky Linux 10.x series), choose "Minimal installation" as base environment, and also check the "Standard" and "Development Tools" add-ons for the software selection
 }
 
-![RHEL9 Software Selection](./img/centos8_package_selection.png)
+![RHEL10 Software Selection](./img/rhel10_package_selection.png)
 
 @ja{
 サーバーへのOSインストール後、サードパーティーのパッケージをインストールするために、パッケージリポジトリの設定を行います。
@@ -128,32 +134,6 @@ If you didn't check the "Development Tools" at the installer, we can additionall
     the inbox graphic driver.
 }
 
-@ja:### nouveauドライバの無効化
-@en:### Disables nouveau driver
-
-@ja{
-NVIDIA製GPU向けオープンソースの互換ドライバであるnouveauドライバがロードされている場合、nvidiaドライバをロードする事ができません。
-この場合は、nouveauドライバの無効化設定を行った上でシステムを一度再起動してください。
-
-nouveauドライバを無効化するには、以下の設定を`/etc/modprobe.d/disable-nouveau.conf`という名前で保存し、`dracut`コマンドを実行してLinux kernelのブートイメージに反映します。
-その後、システムを一度再起動してください。
-}
-@en{
-When the nouveau driver, that is an open source compatible driver for NVIDIA GPUs, is loaded, it prevent to load the nvidia driver.
-In this case, reboot the operating system after a configuration to disable the nouveau driver.
-
-To disable the nouveau driver, put the following configuration onto `/etc/modprobe.d/disable-nouveau.conf`, and run `dracut` command to apply them on the boot image of Linux kernel.
-Then, restart the system once.
-}
-```
-# cat > /etc/modprobe.d/disable-nouveau.conf <<EOF
-blacklist nouveau
-options nouveau modeset=0
-EOF
-# dracut -f
-# shutdown -r now
-```
-
 @ja:### IOMMUの無効化
 @en:### Disables IOMMU
 
@@ -172,15 +152,14 @@ Prior to using GPUDirect Storage, it needs to disable the IOMMU configuration on
 Configure the kernel boot option according to the [NVIDIA GPUDirect Storage Installation and Troubleshooting Guide](https://docs.nvidia.com/gpudirect-storage/troubleshooting-guide/index.html#install-prereqs) description.
 }
 
-
 @ja{
 IOMMUを無効化するには、カーネル起動オプションに`amd_iommu=off` (AMD製CPUの場合)または、`intel_iommu=off` (Intel製CPUの場合)の設定を付加します。
 }
 @en{
 To disable IOMMU, add `amd_iommu=off` (for AMD CPU) or `intel_iommu=off` (for Intel CPU) to the kernel boot options.
 }
-@ja:#### RHEL9における設定
-@en:#### Configuration at RHEL9
+@ja:#### RHEL9/RHEL10における設定
+@en:#### Configuration at RHEL9/RHEL10
 
 @ja{
 以下のコマンドを実行し、カーネル起動オプションを追加してください。
@@ -226,6 +205,32 @@ Run the following commands to apply the configuration to the kernel bool options
 # shutdown -r now
 ```
 
+@ja:### nouveauドライバの無効化
+@en:### Disables nouveau driver
+
+@ja{
+NVIDIA製GPU向けオープンソースの互換ドライバであるnouveauドライバがロードされている場合、nvidiaドライバをロードする事ができません。
+この場合は、nouveauドライバの無効化設定を行った上でシステムを一度再起動してください。
+
+nouveauドライバを無効化するには、以下の設定を`/etc/modprobe.d/disable-nouveau.conf`という名前で保存し、`dracut`コマンドを実行してLinux kernelのブートイメージに反映します。
+その後、システムを一度再起動してください。
+}
+@en{
+When the nouveau driver, that is an open source compatible driver for NVIDIA GPUs, is loaded, it prevent to load the nvidia driver.
+In this case, reboot the operating system after a configuration to disable the nouveau driver.
+
+To disable the nouveau driver, put the following configuration onto `/etc/modprobe.d/disable-nouveau.conf`, and run `dracut` command to apply them on the boot image of Linux kernel.
+Then, restart the system once.
+}
+```
+# cat > /etc/modprobe.d/disable-nouveau.conf <<EOF
+blacklist nouveau
+options nouveau modeset=0
+EOF
+# dracut -f
+# shutdown -r now
+```
+
 @ja:### 追加リポジトリの有効化
 @en:### Enables extra repositories
 
@@ -254,6 +259,9 @@ EPELリポジトリの定義は `epel-release` パッケージにより提供さ
 }
 
 ```
+-- For RHEL10
+# dnf install https://dl.fedoraproject.org/pub/epel/epel-release-latest-10.noarch.rpm
+
 -- For RHEL9
 # dnf install https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm
 
@@ -276,10 +284,13 @@ To enable this repository, run the command below:
 }
 
 ```
+-- For RHEL10
+# subscription-manager repos --enable codeready-builder-for-rhel-10-x86_64-rpms
+
 -- For RHEL9
 # subscription-manager repos --enable codeready-builder-for-rhel-9-x86_64-rpms
 
--- For Rocky9
+-- For Rocky9/Rocky10
 # dnf config-manager --set-enabled crb
 
 -- For RHEL8
@@ -289,143 +300,206 @@ To enable this repository, run the command below:
 # dnf config-manager --set-enabled powertools
 ```
 
-@ja:##MOFEDドライバのインストール
-@en:##MOFED Driver Installation
+@ja:##DOCA(OFED)ドライバのインストール
+@en:##DOCA(OFED) Driver Installation
 
 @ja{
-MOFEDドライバは、[こちら](https://network.nvidia.com/products/infiniband-drivers/linux/mlnx_ofed/)からダウンロードする事ができます。
-本節では、MOFEDドライババージョン23.10のtgzアーカイブからのインストール例を紹介します。
+NVME-SSDからの直接データ読み出し（GPU-Direct SQL）を使用するには、DOCA(OFED)モジュールに含まれるnvmeドライバによって、OS標準のINBOXドライバを置き換える必要があります。
+本節では、DOCA(OFED)モジュールの導入方法を説明します。
+
+!!! Info
+    なお、DOCA(OFED)モジュールのうちLinux kernel driver部分はかつてMOFED (Mellanox Open Fabric Enterprise Driver)と呼ばれ、現在でも
+    [こちら](https://network.nvidia.com/products/infiniband-drivers/linux/mlnx_ofed/)からダウンロードする事ができます。
+    しかし、既に長期保守（Long Term Support）のモードに入っており、RHEL10など新しい環境へドライバが提供される見通しがないため、
+    PG-Stromのインストール手順としてはDOCA(OFED)パッケージの利用を推奨します。
+
+なお、DOCA(OFED)モジュールの公式インストール手順は[こちら](https://docs.nvidia.com/dgx/dgx-rhel8-install-guide/installing-dofed-steps.html)となります。
 }
 @en{
-You can download the latest MOFED driver from [here](https://network.nvidia.com/products/infiniband-drivers/linux/mlnx_ofed/).
+To use direct data from NVME-SSD to GPU (GPU-Direct SQL), you need to replace the operating system default inbox driver with the NVME drive distributed by DOCA (OFED) module.
+This section introduces the steps to install the DOCA (OFED) module.
 
-This section introduces the example of installation from the tgz archive of MOFED driver version 23.10.
+!!! Info
+   Note that the Linux kernel driver portion of the DOCA (OFED) module was formerly called MOFED (Mellanox Open Fabric Enterprise Driver),
+   and can still be downloaded from [here](https://network.nvidia.com/products/infiniband-drivers/linux/mlnx_ofed/). 
+   However, it has already entered Long Term Support mode, and there is no prospect of the driver being provided for newer environments
+   such as RHEL10. So, we recommend using the DOCA (OFED) package for the PG-Strom installation procedure.
+
+The official installation instructions for the DOCA (OFED) module can be found [here](https://docs.nvidia.com/dgx/dgx-rhel8-install-guide/installing-dofed-steps.html).
 }
 
-![MOFED Driver Selection](./img/mofed-download.png)
+@ja:***リポジトリ定義の追加***
+@en:***Add repository definition***
 
 @ja{
-MOFEDドライバのインストーラを実行するために、最低限`createrepo`および`perl`パッケージのインストールが必要です。
-
-次にtgzアーカイブを展開し、`mlnxofedinstall`スクリプトを実行します。この時、GPUDirect Storageのサポートを有効化するオプションを付加するのを忘れないでください。
+以下のようにDOCAのリポジトリ定義を追加します。
+RHEL8/9系列の場合、`${releasever_major}`および`${releasever_minor}`マクロが使用できないため、OSのバージョンを直接記入します。
 }
 @en{
-The installer software of MOFED driver requires the `createrepo` and `perl` packages at least.
+Add the DOCA repository definition as follows.
+For RHEL 8/9 series, the `${releasever_major}` and `${releasever_minor}` macros are not defined, so write the OS version directly.
+}
+@ja:RHEL10の場合の設定例
+@en:Example configuration for RHEL10
+```
+# cat > /etc/yum.repos.d/doca.repo <<EOF
+[doca]
+name=DOCA Online Repo
+baseurl=https://linux.mellanox.com/public/repo/doca/latest/rhel\${releasever_major}.\${releasever_minor}/\${basearch}/
+enabled=1
+gpgcheck=0
+EOF
+```
 
-After that, extract the tgz archive, then kick `mlnxofedinstall` script.
-Please don't forget the options to enable GPUDirect Storage features.
+@ja:RHEL9の場合の設定例
+@en:Example configuration for RHEL9
+```
+# cat > /etc/yum.repos.d/doca.repo <<EOF
+[doca]
+name=DOCA Online Repo
+baseurl=https://linux.mellanox.com/public/repo/doca/latest/rhel9.6/\${basearch}/
+enabled=1
+gpgcheck=0
+EOF
+```
+
+@ja:***DOCAパッケージのインストール***
+@en:***Installation of DOCA packages***
+
+@ja{
+NVIDIAから配布されているDOCAパッケージのうち、必要なものをインストールします。
+以下の例の通り、`kernel-module-extra-<KERNEL VERSION>`（インストール済みであるはず）と、`doca-ofed`および`doca-extra`をインストールしてください。
+}
+@en{
+Install the necessary components from the DOCA package distributed by NVIDIA.
+As shown in the example below, please install `kernel-module-extra-<KERNEL VERSION>` (which should already be installed), `doca-ofed`, and `doca-extra`.
+}
+```
+# dnf install -y kernel-modules-extra-$(uname -r)
+# dnf install -y doca-ofed doca-extra
+```
+
+@ja:***NVMEドライバのビルド***
+@en:***Building the NVME driver***
+@ja{
+NVIDIAから配布されているDOCA(OFED)パッケージにもnvmeドライバは含まれているのですが、
+このドライバはGPU-Direct Storageの有効化に必要な`--with-gds`オプション付きでビルド
+されていません。
+
+そのため、このままではGPU-Direct SQLを実行できないため、ドライバの再コンパイルを行います。
+手順はスクリプト化されており、以下のように`/opt/mellanox/doca/tools/doca-kernel-support`を
+実行します。
+}
+@en{
+Although the DOCA (OFED) package distributed by NVIDIA includes the NVMe driver,
+this driver is not built with the `--with-gds` option, which is necessary to enable GPU-Direct Storage.
+
+So, we need to recompiler the driver to turn on GPU-Direct SQL.
+The procedure is fully scripted and can be executed as follows: `/opt/mellanox/doca/tools/doca-kernel-support`.
 }
 
 ```
-# dnf install -y perl createrepo
-# tar zxvf MLNX_OFED_LINUX-23.10-2.1.3.1-rhel9.3-x86_64.tgz
-# cd MLNX_OFED_LINUX-23.10-2.1.3.1-rhel9.3-x86_64
-# ./mlnxofedinstall --with-nvmf --with-nfsrdma --add-kernel-support
+# /opt/mellanox/doca/tools/doca-kernel-support
+doca-kernel-support: Building under /tmp/DOCA.EhUCIyOzbU
+           :
+doca-kernel-support: Rebuilding kernel modules
+doca-kernel-support: Building mlnx-ofa_kernel under /tmp/DOCA.EhUCIyOzbU/build/mlnx-ofa_kernel with log /tmp/DOCA.EhUCIyOzbU/logs/mlnx-ofa_kernel.log
+doca-kernel-support: Building iser under /tmp/DOCA.EhUCIyOzbU/build/iser with log /tmp/DOCA.EhUCIyOzbU/logs/iser.log
+doca-kernel-support: Building isert under /tmp/DOCA.EhUCIyOzbU/build/isert with log /tmp/DOCA.EhUCIyOzbU/logs/isert.log
+doca-kernel-support: Building srp under /tmp/DOCA.EhUCIyOzbU/build/srp with log /tmp/DOCA.EhUCIyOzbU/logs/srp.log
+doca-kernel-support: Building mlnx-nfsrdma under /tmp/DOCA.EhUCIyOzbU/build/mlnx-nfsrdma with log /tmp/DOCA.EhUCIyOzbU/logs/mlnx-nfsrdma.log
+doca-kernel-support: Building mlnx-nvme under /tmp/DOCA.EhUCIyOzbU/build/mlnx-nvme with log /tmp/DOCA.EhUCIyOzbU/logs/mlnx-nvme.log
+doca-kernel-support: Building virtiofs under /tmp/DOCA.EhUCIyOzbU/build/virtiofs with log /tmp/DOCA.EhUCIyOzbU/logs/virtiofs.log
+doca-kernel-support: Building knem under /tmp/DOCA.EhUCIyOzbU/build/knem with log /tmp/DOCA.EhUCIyOzbU/logs/knem.log
+doca-kernel-support: Building xpmem under /tmp/DOCA.EhUCIyOzbU/build/xpmem with log /tmp/DOCA.EhUCIyOzbU/logs/xpmem.log
+doca-kernel-support: Building kernel-mft under /tmp/DOCA.EhUCIyOzbU/build/kernel-mft with log /tmp/DOCA.EhUCIyOzbU/logs/kernel-mft.log
+doca-kernel-support: Creating a rpm meta package:
+doca-kernel-support: Creating a package repository in /tmp/DOCA.EhUCIyOzbU/repo/usr/share/doca-host-25.07-0.9.7.0/Modules/6.12.0-55.41.1.el10_0.x86_64
+doca-kernel-support: Built single package: /tmp/DOCA.EhUCIyOzbU/doca-kernel-repo-25.07.0.9.7.0-1.kver.6.12.0.55.41.1.el10.0.x86.64.x86_64.rpm
+doca-kernel-support: Done
+Now you should install the generated single repository package to make its
+files available:
+
+  rpm -Uvh /tmp/DOCA.EhUCIyOzbU/doca-kernel-repo-25.07.0.9.7.0-1.kver.6.12.0.55.41.1.el10.0.x86.64.x86_64.rpm
+
+After installing the package, doca-kernel-6.12.0.55.41.1.el10.0.x86.64 metapackage should be available.
+
+Next steps could probably be:
+  dnf makecache
+
+Then, install ofed packages (e.g. doca-all, doca-ofed):
+        dnf install doca-ofed-userspace
+        dnf install --disablerepo=doca doca-kernel-6.12.0.55.41.1.el10.0.x86.64
+```
+@ja{
+スクリプトが正常終了すると、この次に行うべき処理を提示してくれます。
+まず、再ビルドしたkernel moduleを含むローカルリポジトリを構築するために`doca-kernel-<KERNEL_VERSION>`を
+インストールします。
+}
+@en{
+Once the script finishes successfully, it will suggest the next steps you should take.
+First, install `doca-kernel-<KERNEL_VERSION>` to build a local repository containing the rebuilt kernel module.
+}
+
+```
+[root@saba ~]# rpm -Uvh /tmp/DOCA.EhUCIyOzbU/doca-kernel-repo-25.07.0.9.7.0-1.kver.6.12.0.55.41.1.el10.0.x86.64.x86_64.rpm
+Verifying...                          ################################# [100%]
+Preparing...                          ################################# [100%]
+Updating / installing...
+   1:doca-kernel-repo-25.07.0.9.7.0-1.################################# [100%]
+```
+
+@ja{
+次いで、`doca-kernel-support`スクリプトの指示に従って`doca-kernel-<KERNEL_VERSION>`および、
+`kmod-mlnx-nvme`と`kmod-mlnx-nfsrdma`パッケージをインストールします。
+}
+@en{
+Next, install the `doca-kernel-<KERNEL_VERSION>`, `kmod-mlnx-nvme` and `kmod-mlnx-nfsrdma` packages
+according to the `doca-kernel-support` script output.
+}
+
+```
+# dnf makecache
+# dnf install doca-ofed-userspace
+# dnf install --disablerepo=doca doca-kernel-6.12.0.55.41.1.el10.0.x86.64
+# dnf install --disablerepo=doca kmod-mlnx-nvme kmod-mlnx-nfsrdma
+```
+
+@ja{
+`modinfo`コマンドを用いて`nvme`モジュールの情報を出力してみます。
+このカーネルモジュールが`extra/mlnx-nvme/host`ディレクトリ配下にインストールされていれば成功です。
+（OS標準のINBOXドライバは`kernel/drivers/nvme/host`配下に格納されています。）
+}
+@en{
+Confirm location of the `nvme` kernel module using `modinfo` command.
+It was successfull installed if this kernel module is installed at `extra/mlnx-nvme/host` directory.
+(The OS default INBOX driver is stored at `kernel/drivers/nvme/host`.)
+}
+
+```
+# modinfo nvme
+filename:       /lib/modules/6.12.0-55.41.1.el10_0.x86_64/extra/mlnx-nvme/host/nvme.ko
+description:    NVMe host PCIe transport driver
+version:        1.0
+license:        GPL
+author:         Matthew Wilcox <willy@linux.intel.com>
+rhelversion:    10.0
+srcversion:     951B0D9C33E4E9A9D30FF50
+alias:          pci:v*d*sv*sd*bc01sc08i02*
+alias:          pci:v0000106Bd00002005sv*sd*bc*sc*i*
+           :
+```
+
+@ja{
+`dracut`コマンドでブートイメージを更新し、新しい`nvme`ドライバを反映させるためにシステムを再起動します。
+}
+@en{
+Update the boot image using `dracut` command and restart the system to reflect the new `nvme` driver.
+}
+
+```
 # dracut -f
-```
-
-@ja{
-MOFEDドライバのビルドおよびインストール中、不足パッケージのインストールを要求される事があります。
-その場合、エラーメッセージを確認して要求されたパッケージの追加インストールを行ってください。
-}
-@en{
-During the build and installation of MOFED drivers, the installer may require additional packages.
-In this case, error message shall guide you the missing packages. So, please install them using `dnf` command.
-}
-
-```
-Error: One or more required packages for installing OFED-internal are missing.
-Please install the missing packages using your Linux distribution Package Management tool.
-Run:
-yum install kernel-rpm-macros
-Failed to build MLNX_OFED_LINUX for 5.14.0-362.8.1.el9_3.x86_64
-```
-
-@ja{
-MOFEDドライバのインストールが完了すると、nvmeドライバなど、OS標準のものが置き換えられているはずです。
-
-例えば以下の例では、OS標準の`nvme-rdma`ドライバ（`/lib/modules/<KERNEL_VERSION>/kernel/drivers/nvme/host/nvme-rdma.ko.xz`）ではなく、追加インストールされた`/lib/modules/<KERNEL_VERSION>/extra/mlnx-nvme/host/nvme-rdma.ko`が優先して使用されています。
-}
-@en{
-Once MOFED drivers got installed, it should replace several INBOX drivers like nvme driver.
-
-For example, the command below shows the `/lib/modules/<KERNEL_VERSION>/extra/mlnx-nvme/host/nvme-rdma.ko` that is additionally installed, instead of the INBOX `nvme-rdma` (`/lib/modules/<KERNEL_VERSION>/kernel/drivers/nvme/host/nvme-rdma.ko.xz`).
-}
-
-```
-$ modinfo nvme-rdma
-filename:       /lib/modules/5.14.0-427.18.1.el9_4.x86_64/extra/mlnx-nvme/host/nvme-rdma.ko
-license:        GPL v2
-rhelversion:    9.4
-srcversion:     16C0049F26768D6EA12771B
-depends:        nvme-core,rdma_cm,ib_core,nvme-fabrics,mlx_compat
-retpoline:      Y
-name:           nvme_rdma
-vermagic:       5.14.0-427.18.1.el9_4.x86_64 SMP preempt mod_unload modversions
-parm:           register_always:Use memory registration even for contiguous memory regions (bool)
-```
-
-@ja{
-既にロードされているカーネルモジュール（例: `nvme`）を置き換えるため、ここで一度システムのシャットダウンと再起動を行います。
-
-`mlnxofedinstall`スクリプトの完了後に、`dracut -f`を実行するのを忘れないでください。
-}
-@en{
-Then, shutdown the system and restart, to replace the kernel modules already loaded (like `nvme`).
-
-Please don't forget to run `dracut -f` after completion of the `mlnxofedinstall` script.
-}
-
-@ja{
-!!! Tips
-    **Linux kernelのバージョンアップとMOFEDドライバ**
-    
-    RHEL系列のディストリビューションにおいて、MODEDドライバはDKMS(Dynamic Kernel Module Support)を使用しません。
-    そのため、Linux kernelをバージョンアップした場合には、上記の手順を再度実行し、新しいLinux kernelに対応したMOFEDドライバを再インストールする必要があります。
-    
-    後述のCUDA Toolkitのインストールなど、パッケージ更新のタイミングでLinux kernelがアップデートされる事もありますが、その場合でも同様です。
-}
-@en{
-!!! Tips
-    **Linux kernel version up and MOFED driver**
-    
-    MODED drivers do not use DKMS (Dynamic Kernel Module Support) in RHEL series distributions.
-    Therefore, when the Linux kernel is upgraded, you will need to perform the above steps again to reinstall the MOFED driver that is compatible with the new Linux kernel.
-    
-    The Linux kernel may be updated together when another package is updated, such as when installing the CUDA Toolkit described below, but the same applies in that case.
-}
-
-@ja:### heterodb-swdcのインストール
-@en:### heterodb-swdc Installation
-
-@ja{
-PG-Stromほか関連パッケージは[HeteroDB Software Distribution Center](https://heterodb.github.io/swdc/)から配布されています。
-これらのソフトウェアを入手するために、HeteroDB-SWDCのリポジトリ定義をyumシステムに追加する必要があります。
-}
-@en{
-PG-Strom and related packages are distributed from [HeteroDB Software Distribution Center](https://heterodb.github.io/swdc/).
-You need to add a repository definition of HeteroDB-SWDC for you system to obtain these software.
-}
-
-@ja{
-HeteroDB-SWDCリポジトリの定義はheterodb-swdcパッケージにより提供されます。
-Webブラウザなどで[HeteroDB Software Distribution Center](https://heterodb.github.io/swdc/)へアクセスし、ページの先頭にリンクの記載されている`heterodb-swdc-1.3-1.el9.noarch.rpm`をダウンロードしてインストールしてください。（RHEL8の場合は`heterodb-swdc-1.3-1.el8.noarch.rpm`）
-heterodb-swdcパッケージがインストールされると、HeteroDB-SWDCからソフトウェアを入手するためのyumシステムへの設定が追加されます。
-}
-@en{
-`heterodb-swdc` package provides the repository definition of HeteroDB-SWDC.
-Access to the [HeteroDB Software Distribution Center](https://heterodb.github.io/swdc/) using Web browser, download the `heterodb-swdc-1.3-1.el9.noarch.rpm` on top of the file list, then install this package. (Use `heterodb-swdc-1.3-1.el8.noarch.rpm` for RHEL8)
-Once heterodb-swdc package gets installed, yum system configuration is updated to get software from the HeteroDB-SWDC repository.
-}
-@ja{
-以下のようにheterodb-swdcパッケージをインストールします。
-}
-@en{
-Install the `heterodb-swdc` package as follows.
-}
-
-```
-# dnf install https://heterodb.github.io/swdc/yum/rhel8-noarch/heterodb-swdc-1.2-1.el8.noarch.rpm
+# shutdown -r now
 ```
 
 @ja:## CUDA Toolkitのインストール
@@ -456,42 +530,31 @@ You can download the installation package for CUDA Toolkit from NVIDIA DEVELOPER
 
 @ja{
 『rpm(network)』を選択すると、リポジトリを登録し、ネットワーク経由でパッケージをインストールするためのシェルコマンドが表示されます。ガイダンス通りにインストールを進めてください。
+以下の例は、RHEL10にCUDA Toolkit 13をインストールするものです。
 }
 
 @en{
 Once you choose the "rpm(network)" option, it shows a few step-by-step shell commands to register the CUDA repository and install the packages.
 Run the installation according to the guidance.
+The example below shows the steps to install CUDA Toolkit 13 on RHEL10 environment.
 }
 
 ```
-# dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64/cuda-rhel9.repo
+# dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel10/x86_64/cuda-rhel10.repo
 # dnf clean all
-# dnf install cuda-toolkit-12-5
+# dnf install cuda-toolkit-13-0
+# dnf install nvidia-gds-13-0
 ```
 
 @ja{
 CUDA Toolkitのインストールに続いて、ドライバをインストールのためのコマンドが２種類表示されています。
 ここでは**オープンソース版のnvidia-driver**を使用してください。オープンソース版のみがGPUDirect Storage機能をサポートしており、PG-StromのGPU-Direct SQLは本機能を利用しています。
-
-!!! Tips
-    **Volta以前のGPUの利用について**
-    
-    オープンソース版nvidiaドライバは、Volta世代以前のGPUには対応していません。
-    したがって、VoltaまたはPascal世代のGPUでPG-Stromを利用する場合は、プロプラエタリ版のドライバであってもGPUDirect Storageに対応しているCUDA 12.2 Update 1を利用する必要があります。
-    CUDA 12.2 Update 1のパッケージは[こちら](https://developer.nvidia.com/cuda-12-2-1-download-archive?target_os=Linux&target_arch=x86_64&Distribution=RHEL&target_version=8&target_type=rpm_local)から入手する事ができます。
 }
 
 @en{
 Next to the installation of the CUDA Toolkit, two types of commands are introduced to install the nvidia driver.
 
 Please use the open source version of nvidia-driver here. Only the open source version supports the GPUDirect Storage feature, and PG-Strom's GPU-Direct SQL utilizes this feature.
-
-!!! Tips
-    **Use of Volta or former GPUs**
-    
-    The open source edition of the nvidia driver does not support Volta generation GPUs or former.
-    Therefore, if you want to use PG-Strom with Volta or Pascal generation GPUs, you need to use CUDA 12.2 Update 1, whose proprietary driver supports GPUDirect Storage.
-    The CUDA 12.2 Update 1 package can be obtained [here](https://developer.nvidia.com/cuda-12-2-1-download-archive?target_os=Linux&target_arch=x86_64&Distribution=RHEL&target_version=8&target_type=rpm_local).
 }
 
 @ja{
@@ -504,8 +567,10 @@ Please specify the same version name as the CUDA Toolkit version after the packa
 }
 
 ```
+-- For RHEL9
 # dnf module install nvidia-driver:open-dkms
-# dnf install nvidia-gds-12-5
+-- For RHEL10
+# dnf install nvidia-open
 ```
 
 @ja{
@@ -517,13 +582,12 @@ Once installation completed successfully, CUDA Toolkit is deployed at `/usr/loca
 }
 
 ```
-$ ls /usr/local/cuda/
-bin/                            gds/      nsightee_plugins/  targets/
-compute-sanitizer/              include@  nvml/              tools/
-CUDA_Toolkit_Release_Notes.txt  lib64@    nvvm/              version.json
-DOCS                            libnvvp/  README
-EULA.txt                        LICENSE   share/
-extras/                         man/      src/
+# ls /usr/local/cuda/
+bin                             extras   man               share
+compute-sanitizer               gds      nsightee_plugins  src
+CUDA_Toolkit_Release_Notes.txt  include  nvml              targets
+DOCS                            lib64    nvvm              tools
+EULA.txt                        LICENSE  README            version.json
 ```
 
 @ja{
@@ -535,23 +599,23 @@ Once installation gets completed, ensure the system recognizes the GPU devices c
 }
 
 ```
-$ nvidia-smi
-Mon Jun  3 09:56:41 2024
+# nvidia-smi
+Tue Oct 28 14:22:43 2025
 +-----------------------------------------------------------------------------------------+
-| NVIDIA-SMI 555.42.02              Driver Version: 555.42.02      CUDA Version: 12.5     |
-|-----------------------------------------+------------------------+----------------------+
+| NVIDIA-SMI 580.95.05              Driver Version: 580.95.05      CUDA Version: 13.0     |
++-----------------------------------------+------------------------+----------------------+
 | GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
 | Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
 |                                         |                        |               MIG M. |
 |=========================================+========================+======================|
-|   0  NVIDIA A100-PCIE-40GB          Off |   00000000:41:00.0 Off |                    0 |
-| N/A   58C    P0             66W /  250W |       1MiB /  40960MiB |      0%      Default |
+|   0  NVIDIA H100 PCIe               Off |   00000000:42:00.0 Off |                    0 |
+| N/A   37C    P0             48W /  350W |       0MiB /  81559MiB |      0%      Default |
 |                                         |                        |             Disabled |
 +-----------------------------------------+------------------------+----------------------+
 
 +-----------------------------------------------------------------------------------------+
 | Processes:                                                                              |
-|  GPU   GI   CI        PID   Type   Process name                              GPU Memory |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
 |        ID   ID                                                               Usage      |
 |=========================================================================================|
 |  No running processes found                                                             |
@@ -597,8 +661,8 @@ Run `gdscheck` tool to confirm the configuration for each storage devices, as fo
 
 ```
 # /usr/local/cuda/gds/tools/gdscheck -p
- GDS release version: 1.10.0.4
- nvidia_fs version:  2.20 libcufile version: 2.12
+ GDS release version: 1.15.1.6
+ nvidia_fs version:  2.26 libcufile version: 2.12
  Platform: x86_64
  ============
  ENVIRONMENT:
@@ -606,8 +670,9 @@ Run `gdscheck` tool to confirm the configuration for each storage devices, as fo
  =====================
  DRIVER CONFIGURATION:
  =====================
+ NVMe P2PDMA        : Unsupported
  NVMe               : Supported
- NVMeOF             : Supported
+ NVMeOF             : Unsupported
  SCSI               : Unsupported
  ScaleFlux CSD      : Unsupported
  NVMesh             : Unsupported
@@ -615,6 +680,7 @@ Run `gdscheck` tool to confirm the configuration for each storage devices, as fo
  IBM Spectrum Scale : Unsupported
  NFS                : Supported
  BeeGFS             : Unsupported
+ ScaTeFS            : Unsupported
  WekaFS             : Unsupported
  Userspace RDMA     : Unsupported
  --Mellanox PeerDirect : Disabled
@@ -624,6 +690,7 @@ Run `gdscheck` tool to confirm the configuration for each storage devices, as fo
  =====================
  CUFILE CONFIGURATION:
  =====================
+ properties.use_pci_p2pdma : false
  properties.use_compat_mode : true
  properties.force_compat_mode : false
  properties.gds_rdma_write_support : true
@@ -633,16 +700,19 @@ Run `gdscheck` tool to confirm the configuration for each storage devices, as fo
  properties.max_batch_io_timeout_msecs : 5
  properties.max_direct_io_size_kb : 16384
  properties.max_device_cache_size_kb : 131072
+ properties.per_buffer_cache_size_kb : 1024
  properties.max_device_pinned_mem_size_kb : 33554432
  properties.posix_pool_slab_size_kb : 4 1024 16384
- properties.posix_pool_slab_count : 128 64 32
+ properties.posix_pool_slab_count : 128 64 64
  properties.rdma_peer_affinity_policy : RoundRobin
  properties.rdma_dynamic_routing : 0
  fs.generic.posix_unaligned_writes : false
  fs.lustre.posix_gds_min_kb: 0
  fs.beegfs.posix_gds_min_kb: 0
+ fs.scatefs.posix_gds_min_kb: 0
  fs.weka.rdma_write_support: false
  fs.gpfs.gds_write_support: false
+ fs.gpfs.gds_async_support: true
  profile.nvtx : false
  profile.cufile_stats : 0
  miscellaneous.api_check_aggressive : false
@@ -656,14 +726,14 @@ Run `gdscheck` tool to confirm the configuration for each storage devices, as fo
  =========
  GPU INFO:
  =========
- GPU index 0 NVIDIA A100-PCIE-40GB bar:1 bar size (MiB):65536 supports GDS, IOMMU State: Disabled
+ GPU index 0 NVIDIA H100 PCIe bar:1 bar size (MiB):131072 supports GDS, IOMMU State: Disabled
  ==============
  PLATFORM INFO:
  ==============
  IOMMU: disabled
  Nvidia Driver Info Status: Supported(Nvidia Open Driver Installed)
- Cuda Driver Version Installed:  12050
- Platform: AS -2014CS-TR, Arch: x86_64(Linux 5.14.0-427.18.1.el9_4.x86_64)
+ Cuda Driver Version Installed:  13000
+ Platform: AS -2015CS-TNR, Arch: x86_64(Linux 6.12.0-55.41.1.el10_0.x86_64)
  Platform verification succeeded
 ```
 
@@ -781,6 +851,36 @@ In the JSON-formatted configuration, change the value of `"parallel_io"` in the 
 
 @ja:##HeteroDB 拡張モジュール
 @en:##HeteroDB extra modules
+
+@ja{
+PG-Stromほか関連パッケージは[HeteroDB Software Distribution Center](https://heterodb.github.io/swdc/)から配布されています。
+これらのソフトウェアを入手するために、HeteroDB-SWDCのリポジトリ定義をyumシステムに追加する必要があります。
+}
+@en{
+PG-Strom and related packages are distributed from [HeteroDB Software Distribution Center](https://heterodb.github.io/swdc/).
+You need to add a repository definition of HeteroDB-SWDC for you system to obtain these software.
+}
+
+@ja{
+HeteroDB-SWDCリポジトリの定義はheterodb-swdcパッケージにより提供されます。
+Webブラウザなどで[HeteroDB Software Distribution Center](https://heterodb.github.io/swdc/)へアクセスし、ページの先頭にリンクの記載されている`heterodb-swdc`パッケージをダウンロードしてインストールしてください。（RHEL10の場合は`heterodb-swdc-1.3-1.el10.noarch.rpm`）
+heterodb-swdcパッケージがインストールされると、HeteroDB-SWDCからソフトウェアを入手するためのyumシステムへの設定が追加されます。
+}
+@en{
+`heterodb-swdc` package provides the repository definition of HeteroDB-SWDC.
+Access to the [HeteroDB Software Distribution Center](https://heterodb.github.io/swdc/) using Web browser, download the `heterodb-swdc` package on top of the file list, then install this package. (Use `heterodb-swdc-1.3-1.el10.noarch.rpm` for RHEL10)
+Once heterodb-swdc package gets installed, yum system configuration is updated to get software from the HeteroDB-SWDC repository.
+}
+@ja{
+以下のようにheterodb-swdcパッケージをインストールします。
+}
+@en{
+Install the `heterodb-swdc` package as follows.
+}
+
+```
+# dnf install https://heterodb.github.io/swdc/yum/rhel10-noarch/heterodb-swdc-1.3-1.el10.noarch.rpm
+```
 
 @ja{
 `heterodb-extra`モジュールは、PG-Stromに以下の機能を追加します。
@@ -917,9 +1017,9 @@ Repository definitions are per PostgreSQL major version and Linux distribution. 
 - OS標準のPostgreSQLモジュールの無効化
 - PostgreSQLパッケージのインストール
 
-例えばPostgreSQL v16を使用する場合、PG-Stromのインストールには `postgresql16-server`および`postgresql16-devel`パッケージが必要です。
+例えばPostgreSQL v18を使用する場合、PG-Stromのインストールには`postgresql18-server`および`postgresql18-devel`パッケージが必要です。
 
-以下は、RHEL9においてPostgreSQL v16をインストールする手順の例です。
+以下は、RHEL10においてPostgreSQL v18をインストールする手順の例です。
 }
 @en{
 You can install PostgreSQL as following steps:
@@ -927,21 +1027,26 @@ You can install PostgreSQL as following steps:
 - Installation of yum repository definition.
 - Disables the distribution's default PostgreSQL module
 - Installation of PostgreSQL packages.
+
+When PostgreSQL v18 is used for instance, installation of PG-Strom requires `postgresql18-server` and `postgresql18-devel` packages.
+
+Below is the steps to install PostgreSQL v18 for RHEL10.
 }
 
 ```
-# dnf install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-x86_64/pgdg-redhat-repo-latest.noarch.rpm
-# dnf -y module disable postgresql
-# dnf install -y postgresql16-devel postgresql16-server
+# dnf install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-10-x86_64/pgdg-redhat-repo-latest.noarch.rpm
+# dnf install -y postgresql18-devel postgresql18-server
 ```
 
 @ja{
 !!! Note
-    Red Hat Enterprise Linuxの場合、パッケージ名`postgresql`がディストリビューション標準のものと競合してしまい、PGDG提供のパッケージをインストールする事ができません。そのため、`dnf -y module disable postgresql` コマンドを用いてディストリビューション標準の`postgresql`モジュールを無効化します。
+    Red Hat Enterprise Linux 8.xまたは9.xの場合、パッケージ名`postgresql`がディストリビューション標準のものと競合してしまい、PGDG提供のパッケージをインストールする事ができません。そのため、`dnf -y module disable postgresql` コマンドを用いてディストリビューション標準の`postgresql`モジュールを無効化します。
+    AppStream機能が改良されたたため、Red Hat Enterprise Linux 10系列においてこの操作は不要です。
 }
 @en{
 !!! Note
-    On the Red Hat Enterprise Linux, the package name `postgresql` conflicts to the default one at the distribution, thus, unable to install the packages from PGDG. So, disable the `postgresql` module by the distribution, using `dnf -y module disable postgresql`.
+    On the Red Hat Enterprise Linux 8.x or 9.x, the package name `postgresql` conflicts to the default one at the distribution, thus, unable to install the packages from PGDG. So, disable the `postgresql` module by the distribution, using `dnf -y module disable postgresql`.
+    The AppStream feature was improved, Red Hat Enterprise Linux 10.x does not need this operation.
 }
 @ja:##libarrow/libparquetのインストール
 @en:##libarrow/libparquet Installation
@@ -990,18 +1095,18 @@ PG-Strom and related packages are distributed from [HeteroDB Software Distributi
 If you repository definition has been added, not many tasks are needed.
 }
 @ja{
-基盤となるPostgreSQLのバージョンごとに別個のPG-StromのRPMパッケージが準備されており、PostgreSQL v15用であれば`pg_strom-PG15`パッケージを、PostgreSQL v16用であれば`pg_strom-PG16`パッケージをインストールします。
+基盤となるPostgreSQLのバージョンごとに別個のPG-StromのRPMパッケージが準備されており、PostgreSQL v17用であれば`pg_strom-PG17`パッケージを、PostgreSQL v18用であれば`pg_strom-PG18`パッケージをインストールします。
 
 これは、PostgreSQL拡張モジュールのバイナリ互換性に伴う制約です。
 }
 @en{
-We provide individual RPM packages of PG-Strom for each PostgreSQL major version. `pg_strom-PG15` package is built for PostgreSQL v15, and `pg_strom-PG16` is also built for PostgreSQL v16.
+We provide individual RPM packages of PG-Strom for each PostgreSQL major version. `pg_strom-PG17` package is built for PostgreSQL v17, and `pg_strom-PG18` is also built for PostgreSQL v18.
 
 It is a restriction due to binary compatibility of extension modules for PostgreSQL.
 }
 
 ```
-# dnf install -y pg_strom-PG16
+# dnf install -y pg_strom-PG18
 ```
 
 @ja{
@@ -1060,8 +1165,8 @@ Elsewhere, give `PG_CONFIG=...` parameter on `make` command to tell the full pat
 
 ```
 $ cd pg-strom/src
-$ make PG_CONFIG=/usr/pgsql-16/bin/pg_config
-$ sudo make install PG_CONFIG=/usr/pgsql-16/bin/pg_config
+$ make PG_CONFIG=/usr/pgsql-18/bin/pg_config
+$ sudo make install PG_CONFIG=/usr/pgsql-18/bin/pg_config
 ```
 
 @ja:### インストール後の設定
@@ -1084,34 +1189,11 @@ If you install `postgresql-alternatives` package, this default path can be refer
 }
 ```
 # su - postgres
-$ /usr/pgsql-16/bin/initdb -D /var/lib/pgdata/
-The files belonging to this database system will be owned by user "postgres".
-This user must also own the server process.
-
-The database cluster will be initialized with locale "en_US.UTF-8".
-The default database encoding has accordingly been set to "UTF8".
-The default text search configuration will be set to "english".
-
-Data page checksums are disabled.
-
-fixing permissions on existing directory /var/lib/pgdata ... ok
-creating subdirectories ... ok
-selecting dynamic shared memory implementation ... posix
-selecting default max_connections ... 100
-selecting default shared_buffers ... 128MB
-selecting default time zone ... Asia/Tokyo
-creating configuration files ... ok
-running bootstrap script ... ok
-performing post-bootstrap initialization ... ok
-syncing data to disk ... ok
-
-initdb: warning: enabling "trust" authentication for local connections
-You can change this by editing pg_hba.conf or using the option -A, or
---auth-local and --auth-host, the next time you run initdb.
-
+$ /usr/pgsql-18/bin/initdb -D /var/lib/pgsql/18/data
+            :
 Success. You can now start the database server using:
 
-    pg_ctl -D /var/lib/pgdata/ -l logfile start
+    /usr/pgsql-18/bin/pg_ctl -D /var/lib/pgsql/18/data -l logfile start
 ```
 
 @ja:### postgresql.confの編集
@@ -1218,25 +1300,30 @@ The example below recognized two NVIDIA A100 (PCIE; 40GB), and displays the clos
 }
 
 ```
-# systemctl start postgresql-16
-# journalctl -u postgresql-16
-Jun 02 17:28:45 buri.heterodb.com postgres[20242]: 2024-06-02 17:28:45.989 JST [20242] LOG:  HeteroDB Extra module loaded [api_version=20240418,cufile=off,nvme_strom=off,githash=3ffc65428c07bb3c9d0e5c75a2973389f91dfcd4]
-Jun 02 17:28:45 buri.heterodb.com postgres[20242]: 2024-06-02 17:28:45.989 JST [20242] LOG:  HeteroDB License: { "version" : 2, "serial_nr" : "HDB-TRIAL", "issued_at" : "2024-06-02", "expired_at" : "2099-12-31", "nr_gpus" : 1, "gpus" : [ { "uuid" : "GPU-13943bfd-5b30-38f5-0473-78979c134606" } ]}
-Jun 02 17:28:45 buri.heterodb.com postgres[20242]: 2024-06-02 17:28:45.989 JST [20242] LOG:  PG-Strom version 5.12.el9 built for PostgreSQL 16 (githash: )
-Jun 02 17:28:48 buri.heterodb.com postgres[20242]: 2024-06-02 17:28:48.114 JST [20242] LOG:  PG-Strom binary built for CUDA 12.4 (CUDA runtime 12.5)
-Jun 02 17:28:48 buri.heterodb.com postgres[20242]: 2024-06-02 17:28:48.114 JST [20242] WARNING:  The CUDA version where this PG-Strom module binary was built for (12.4) is newer than the CUDA runtime version on this platform (12.5). It may lead unexpected behavior, and upgrade of CUDA toolkit is recommended.
-Jun 02 17:28:48 buri.heterodb.com postgres[20242]: 2024-06-02 17:28:48.114 JST [20242] LOG:  PG-Strom: GPU0 NVIDIA A100-PCIE-40GB (108 SMs; 1410MHz, L2 40960kB), RAM 39.50GB (5120bits, 1.16GHz), PCI-E Bar1 64GB, CC 8.0
-Jun 02 17:28:48 buri.heterodb.com postgres[20242]: 2024-06-02 17:28:48.117 JST [20242] LOG:  [0000:41:00:0] GPU0 (NVIDIA A100-PCIE-40GB; GPU-13943bfd-5b30-38f5-0473-78979c134606)
-Jun 02 17:28:48 buri.heterodb.com postgres[20242]: 2024-06-02 17:28:48.117 JST [20242] LOG:  [0000:81:00:0] nvme6 (NGD-IN2500-080T4-C) --> GPU0 [dist=9]
-Jun 02 17:28:48 buri.heterodb.com postgres[20242]: 2024-06-02 17:28:48.117 JST [20242] LOG:  [0000:82:00:0] nvme3 (INTEL SSDPF2KX038TZ) --> GPU0 [dist=9]
-Jun 02 17:28:48 buri.heterodb.com postgres[20242]: 2024-06-02 17:28:48.117 JST [20242] LOG:  [0000:c2:00:0] nvme1 (INTEL SSDPF2KX038TZ) --> GPU0 [dist=9]
-Jun 02 17:28:48 buri.heterodb.com postgres[20242]: 2024-06-02 17:28:48.117 JST [20242] LOG:  [0000:c6:00:0] nvme4 (Corsair MP600 CORE) --> GPU0 [dist=9]
-Jun 02 17:28:48 buri.heterodb.com postgres[20242]: 2024-06-02 17:28:48.117 JST [20242] LOG:  [0000:c3:00:0] nvme5 (INTEL SSDPF2KX038TZ) --> GPU0 [dist=9]
-Jun 02 17:28:48 buri.heterodb.com postgres[20242]: 2024-06-02 17:28:48.117 JST [20242] LOG:  [0000:c1:00:0] nvme0 (INTEL SSDPF2KX038TZ) --> GPU0 [dist=9]
-Jun 02 17:28:48 buri.heterodb.com postgres[20242]: 2024-06-02 17:28:48.117 JST [20242] LOG:  [0000:c4:00:0] nvme2 (NGD-IN2500-080T4-C) --> GPU0 [dist=9]
-Jun 02 17:28:48 buri.heterodb.com postgres[20242]: 2024-06-02 17:28:48.217 JST [20242] LOG:  redirecting log output to logging collector process
-Jun 02 17:28:48 buri.heterodb.com postgres[20242]: 2024-06-02 17:28:48.217 JST [20242] HINT:  Future log output will appear in directory "log".
-Jun 02 17:28:48 buri.heterodb.com systemd[1]: Started PostgreSQL 16 database server.
+# systemctl start postgresql-18
+# journalctl -u postgresql-18
+# journalctl -u postgresql-18
+Oct 28 16:17:16 saba.heterodb.in systemd[1]: Starting postgresql-18.service - PostgreSQL 18 database server...
+Oct 28 16:17:16 saba.heterodb.in postgres[4325]: 2025-10-28 16:17:16.574 JST [4325] LOG:  HeteroDB Extra module loaded [api_version=20250316,cufile=on,nvme_strom=off,nvidia-fs=on,githash=d5044aceca80aecee04c7c1a662c066122986291]
+Oct 28 16:17:16 saba.heterodb.in postgres[4325]: 2025-10-28 16:17:16.574 JST [4325] LOG:  HeteroDB License: { "version" : 2, "serial_nr" : "HDB-TRIAL", "issued_at" : "2025-10-28", "expired_at" : "2099-12-31", "nr_gpus" : 1, "gpus" : [ { "uuid" : "GPU-156b86ad-864c-d97d-4729-5c3405d8...
+Oct 28 16:17:16 saba.heterodb.in postgres[4325]: 2025-10-28 16:17:16.574 JST [4325] LOG:  PG-Strom version 6.1.0.el9 built for PostgreSQL 18 (githash: )
+Oct 28 16:17:17 saba.heterodb.in postgres[4325]: 2025-10-28 16:17:17.011 JST [4325] LOG:  PG-Strom binary built for CUDA 12.9 (CUDA runtime 13.0)
+Oct 28 16:17:17 saba.heterodb.in postgres[4325]: 2025-10-28 16:17:17.011 JST [4325] LOG:  PG-Strom: GPU0 NVIDIA H100 PCIe (114 SMs; 1755MHz, L2 51200kB), RAM 79.18GB (5120bits, 1.52GHz), CC 9.0
+Oct 28 16:17:17 saba.heterodb.in postgres[4325]: 2025-10-28 16:17:17.012 JST [4325] LOG:  [0000:42:00:0] GPU0 (NVIDIA H100 PCIe; GPU-156b86ad-864c-d97d-4729-5c3405d88e76)
+Oct 28 16:17:17 saba.heterodb.in postgres[4325]: 2025-10-28 16:17:17.012 JST [4325] LOG:  [0000:09:00:0] nvme8 (SAMSUNG MZ1LB960HAJQ-00007) --> GPU0 [dist=130]
+Oct 28 16:17:17 saba.heterodb.in postgres[4325]: 2025-10-28 16:17:17.012 JST [4325] LOG:  [0000:c5:00:0] nvme2 (INTEL SSDPF2KX038TZ) --> GPU0 [dist=130]
+Oct 28 16:17:17 saba.heterodb.in postgres[4325]: 2025-10-28 16:17:17.012 JST [4325] LOG:  [0000:88:00:0] nvme4 (INTEL SSDPF2KX038TZ) --> GPU0 [dist=130]
+Oct 28 16:17:17 saba.heterodb.in postgres[4325]: 2025-10-28 16:17:17.012 JST [4325] LOG:  [0000:c3:00:0] nvme1 (INTEL SSDPF2KX038TZ) --> GPU0 [dist=130]
+Oct 28 16:17:17 saba.heterodb.in postgres[4325]: 2025-10-28 16:17:17.012 JST [4325] LOG:  [0000:c7:00:0] nvme6 (INTEL SSDPF2KX038TZ) --> GPU0 [dist=130]
+Oct 28 16:17:17 saba.heterodb.in postgres[4325]: 2025-10-28 16:17:17.012 JST [4325] LOG:  [0000:c1:00:0] nvme0 (INTEL SSDPF2KX038TZ) --> GPU0 [dist=130]
+Oct 28 16:17:17 saba.heterodb.in postgres[4325]: 2025-10-28 16:17:17.012 JST [4325] LOG:  [0000:41:00:0] mlx5_0 (MT4125) --> GPU0 [dist=130]
+Oct 28 16:17:17 saba.heterodb.in postgres[4325]: 2025-10-28 16:17:17.013 JST [4325] LOG:  [0000:82:00:0] nvme3 (INTEL SSDPF2KX038TZ) --> GPU0 [dist=130]
+Oct 28 16:17:17 saba.heterodb.in postgres[4325]: 2025-10-28 16:17:17.013 JST [4325] LOG:  [0000:01:00:0] nvme5 (INTEL SSDPF2KX038TZ) --> GPU0 [dist=130]
+Oct 28 16:17:17 saba.heterodb.in postgres[4325]: 2025-10-28 16:17:17.013 JST [4325] LOG:  [0000:41:00:1] mlx5_1 (MT4125) --> GPU0 [dist=130]
+Oct 28 16:17:17 saba.heterodb.in postgres[4325]: 2025-10-28 16:17:17.013 JST [4325] LOG:  [0000:84:00:0] nvme7 (INTEL SSDPF2KX038TZ) --> GPU0 [dist=130]
+Oct 28 16:17:17 saba.heterodb.in postgres[4325]: 2025-10-28 16:17:17.142 JST [4325] LOG:  redirecting log output to logging collector process
+Oct 28 16:17:17 saba.heterodb.in postgres[4325]: 2025-10-28 16:17:17.142 JST [4325] HINT:  Future log output will appear in directory "log".
+Oct 28 16:17:17 saba.heterodb.in systemd[1]: Started postgresql-18.service - PostgreSQL 18 database server.
 ```
 
 @ja:### PG-Stromエクステンションの作成
@@ -1289,15 +1376,15 @@ This section introduces the steps to install PostGIS module. Skip it on your dem
 
 @ja{
 PostgreSQLと同様に、PostgreSQL Global Development GroupのyumリポジトリからPostGISモジュールをインストールする事ができます。
-以下の例は、PostgreSQL v16向けにビルドされたPostGIS v3.4をインストールするものです。
+以下の例は、PostgreSQL v18向けにビルドされたPostGIS v3.6をインストールするものです。
 }
 @en{
 PostGIS module can be installed from the yum repository by PostgreSQL Global Development Group, like PostgreSQL itself.
-The example below shows the command to install PostGIS v3.4 built for PostgreSQL v16.
+The example below shows the command to install PostGIS v3.6 built for PostgreSQL v18.
 }
 
 ```
-# dnf install postgis34_16
+# dnf install postgis36_18
 ```
 
 @ja{
@@ -1333,8 +1420,8 @@ Next, install the `heterodb-extra` package.
 A `.deb` package for Ubuntu Linux is provided, so please obtain the latest version from the [SWDC](https://heterodb.github.io/swdc/).
 }
 ```
-$ wget https://heterodb.github.io/swdc/deb/heterodb-extra_5.4-1_amd64.deb
-$ sudo dpkg -i heterodb-extra_5.4-1_amd64.deb
+$ wget https://heterodb.github.io/swdc/deb/heterodb-extra_6.7-1_amd64.deb
+$ sudo dpkg -i heterodb-extra_6.7-1_amd64.deb
 ```
 
 @ja{

@@ -3,8 +3,8 @@
  *
  * A background worker process that handles any interactions with GPU
  * ----
- * Copyright 2011-2023 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014-2023 (C) PG-Strom Developers Team
+ * Copyright 2011-2026 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2026 (C) PG-Strom Developers Team
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the PostgreSQL License.
@@ -122,6 +122,12 @@ typedef struct
 #define MAX_ASYNC_TASKS_BITS	10
 #define MAX_ASYNC_TASKS_MASK	((1UL<<MAX_ASYNC_TASKS_BITS)-1)
 	pg_atomic_uint64	max_async_tasks;
+	/*
+	 * A common debug counter infrastructure
+	 */
+#define MAX_DEBUG_PERF_COUNTER	12
+	pg_atomic_uint32	debug_perf_mask;
+	pg_atomic_uint64	debug_perf_counter[MAX_DEBUG_PERF_COUNTER];
 } gpuServSharedState;
 
 /*
@@ -249,6 +255,58 @@ gpuserv_ready_accept(void)
 {
 	return (gpuserv_shared_state &&
 			gpuserv_shared_state->gpuserv_ready_accept);
+}
+
+/*
+ * pgstrom_inc_perf_counter
+ */
+void
+pgstrom_inc_perf_counter(int num)
+{
+	if (gpuserv_shared_state && num >= 0 && num < MAX_DEBUG_PERF_COUNTER)
+	{
+		pg_atomic_add_fetch_u64(&gpuserv_shared_state->debug_perf_counter[num], 1);
+		pg_atomic_fetch_or_u32(&gpuserv_shared_state->debug_perf_mask, (1U<<num));
+	}
+}
+
+/*
+ * pgstrom_add_perf_counter
+ */
+void
+pgstrom_add_perf_counter(int num, const struct timeval *tv_base)
+{
+	if (gpuserv_shared_state && num >= 0 && num < MAX_DEBUG_PERF_COUNTER)
+	{
+		struct timeval	tv_curr;
+		uint64_t		tval;
+
+		gettimeofday(&tv_curr, NULL);
+		tval = ((uint64_t)(tv_curr.tv_sec  - tv_base->tv_sec) * 1000000L +
+				(uint64_t)(tv_curr.tv_usec - tv_base->tv_usec));
+		pg_atomic_add_fetch_u64(&gpuserv_shared_state->debug_perf_counter[num], tval);
+		pg_atomic_fetch_or_u32(&gpuserv_shared_state->debug_perf_mask, (1U<<num));
+	}
+}
+
+void
+pgstrom_print_perf_counter(void)
+{
+	uint32_t	mask;
+
+	if (gpuserv_shared_state &&
+		(mask = pg_atomic_exchange_u32(&gpuserv_shared_state->debug_perf_mask, 0)) != 0)
+	{
+		for (int i=0; i < MAX_DEBUG_PERF_COUNTER; i++)
+		{
+			if ((mask & (1U<<i)) != 0)
+			{
+				uint64_t	dval = pg_atomic_exchange_u64(&gpuserv_shared_state->debug_perf_counter[i], 0);
+
+				elog(INFO, "debug counter[%d] = %lu", i, dval);
+			}
+		}
+	}
 }
 
 /*
@@ -2075,7 +2133,7 @@ __setupGpuJoinPinnedInnerBufferReconstruct(gpuClient *gclient,
 		int32_t		mem_attr;
 
 		rc = cuMemRangeGetAttribute(&mem_attr, sizeof(int32_t),
-									CU_MEM_ADVISE_SET_READ_MOSTLY,
+									CU_MEM_RANGE_ATTRIBUTE_READ_MOSTLY,
 									m_kds_in, kds_head->length);
 		if (rc != CUDA_SUCCESS)
 		{
@@ -3584,8 +3642,9 @@ __loadKdsParquetMallocCallback(void *data, size_t bytesize)
 
 	if (!m_chunk)
 		return NULL;
+	(void)gpuMemoryPrefetchKDS((kern_data_store *)m_chunk->m_devptr,
+							   host_mlocation);
 	*p_chunk = m_chunk;
-
 	return (void *)m_chunk->m_devptr;
 }
 
@@ -3597,13 +3656,13 @@ gpuservLoadKdsParquet(gpuClient *gclient,
 {
 	gpuMemChunk *m_chunk;
 	kern_data_store *kds;
-	const char	*error_message;
+	char		error_message[320];
 
 	kds = parquetReadOneRowGroup(pathname,
 								 kds_head,
 								 __loadKdsParquetMallocCallback,
-								 &m_chunk,
-								 &error_message);
+								 (void *)&m_chunk,
+								 error_message, sizeof(error_message));
 	if (!kds)
 	{
 		__gsLog("%s", error_message);
@@ -3875,7 +3934,7 @@ again:
 					int32_t		mem_attr;
 
 					rc = cuMemRangeGetAttribute(&mem_attr, sizeof(int32_t),
-												CU_MEM_ADVISE_SET_READ_MOSTLY,
+												CU_MEM_RANGE_ATTRIBUTE_READ_MOSTLY,
 												(CUdeviceptr)kds_in,
 												kds_in->length);
 					if (rc != CUDA_SUCCESS)
@@ -4292,6 +4351,14 @@ gpuservHandleGpuTaskExec(gpuContext *gcontext,
 		if (!s_chunk)
 			return;
 		m_kds_src = s_chunk->m_devptr;
+		rc = gpuMemoryPrefetchKDS((kern_data_store *)m_kds_src,
+								  MY_MEMLOCATION_PER_THREAD);
+		if (rc != CUDA_SUCCESS)
+		{
+			gpuClientELog(gclient, "failed on gpuMemoryPrefetchKDS: %s",
+						  cuStrError(rc));
+			return;
+		}
 	}
 	else
 	{
@@ -5858,7 +5925,9 @@ gpuservHandleGpuTaskFinal(gpuContext *gcontext,
 	if (SESSION_SUPPORTS_CPU_FALLBACK(gclient->h_session))
 	{
 		kern_multirels *d_kmrels = (kern_multirels *)gq_buf->m_kmrels;
-
+		/* sanity checks */
+		assert((gclient->xpu_task_flags & (DEVTASK__SELECT_INTO_DIRECT |
+										   DEVTASK__MERGE_FINAL_BUFFER)) == 0);
 		/* Merge RIGHT-OUTER-JOIN Map to the shared host buffer */
 		if (h_kmrels && d_kmrels)
 		{
@@ -5918,9 +5987,18 @@ gpuservHandleGpuTaskFinal(gpuContext *gcontext,
 	}
 
 	/*
-	 * Is the GpuPreAgg final buffer written back?
+	 * Is the GPU-PreAgg final buffer written back?
+	 *
+	 * If CPU-Fallback is enabled, it always write back the final buffer, and
+	 * runs CPU-based Agg node.
+	 * In addition, no-group aggregation always has CPU-based Agg-node to handle
+	 * empty result set. So, it must be written back.
+	 *
+	 * TODO: more simple conditions are needed.
 	 */
-	if (SESSION_SUPPORTS_CPU_FALLBACK(gclient->h_session))
+	if (SESSION_SUPPORTS_CPU_FALLBACK(gclient->h_session) ||
+		(gclient->xpu_task_flags & (DEVTASK__PREAGG |
+									DEVTASK__MERGE_FINAL_BUFFER)) == DEVTASK__PREAGG)
 	{
 		for (int __dindex=0; __dindex < numGpuDevAttrs; __dindex++)
 		{

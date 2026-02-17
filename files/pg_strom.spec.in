@@ -25,6 +25,9 @@ AutoReqProv: no
 %define __HAS_PG16      %(test -x %{__pg_config_16} && echo -n 1 || echo -n 0)
 %define __HAS_PG17      %(test -x %{__pg_config_17} && echo -n 1 || echo -n 0)
 %define __HAS_PG18      %(test -x %{__pg_config_18} && echo -n 1 || echo -n 0)
+%define __ARROW_VERSION   %(pkgconf --exists arrow   && pkgconf --modversion arrow   | awk -F. '{printf "%02u", $1}' || echo -n 00)
+%define __PARQUET_VERSION %(pkgconf --exists parquet && pkgconf --modversion parquet | awk -F. '{printf "%02u", $1}' || echo -n 00)
+%define __ARROW_PARQUET_MIN_VERSION 23
 
 %define __make_options_common VERSION=%{version} RELEASE=%{release} GITHASH=%{__githash} DESTDIR=%{buildroot} CUDA_PATH=%{__cuda_path}
 
@@ -41,13 +44,13 @@ Summary: PG-Strom extension module for PostgreSQL v15
 Group: Applications/Databases
 BuildRequires: postgresql15
 BuildRequires: postgresql15-devel
-BuildRequires: arrow-devel >= 21
-BuildRequires: parquet-devel >= 21
+BuildRequires: arrow-devel >= %{__ARROW_PARQUET_MIN_VERSION}
+BuildRequires: parquet-devel >= %{__ARROW_PARQUET_MIN_VERSION}
 Requires: postgresql15-server
 Recommends: heterodb-extra >= %{__heterodb_extra_min_version}
 Requires: %{name}
-Requires: arrow-devel >= 21
-Requires: parquet-devel >= 21
+Requires: arrow%{__ARROW_VERSION}00-libs
+Requires: parquet%{__PARQUET_VERSION}00-libs
 Requires(post): %{_sbindir}/update-alternatives
 Requires(postun): %{_sbindir}/update-alternatives
 
@@ -70,13 +73,13 @@ Summary: PG-Strom extension module for PostgreSQL v16
 Group: Applications/Databases
 BuildRequires: postgresql16
 BuildRequires: postgresql16-devel
-BuildRequires: arrow-devel >= 21
-BuildRequires: parquet-devel >= 21
+BuildRequires: arrow-devel >= %{__ARROW_PARQUET_MIN_VERSION}
+BuildRequires: parquet-devel >= %{__ARROW_PARQUET_MIN_VERSION}
 Requires: postgresql16-server
 Recommends: heterodb-extra >= %{__heterodb_extra_min_version}
 Requires: %{name}
-Requires: arrow-devel >= 21
-Requires: parquet-devel >= 21
+Requires: arrow%{__ARROW_VERSION}00-libs
+Requires: parquet%{__PARQUET_VERSION}00-libs
 Requires(post): %{_sbindir}/update-alternatives
 Requires(postun): %{_sbindir}/update-alternatives
 
@@ -99,13 +102,13 @@ Summary: PG-Strom extension module for PostgreSQL v17
 Group: Applications/Databases
 BuildRequires: postgresql17
 BuildRequires: postgresql17-devel
-BuildRequires: arrow-devel >= 21
-BuildRequires: parquet-devel >= 21
+BuildRequires: arrow-devel >= %{__ARROW_PARQUET_MIN_VERSION}
+BuildRequires: parquet-devel >= %{__ARROW_PARQUET_MIN_VERSION}
 Requires: postgresql17-server
 Recommends: heterodb-extra >= %{__heterodb_extra_min_version}
 Requires: %{name}
-Requires: arrow-devel >= 21
-Requires: parquet-devel >= 21
+Requires: arrow%{__ARROW_VERSION}00-libs
+Requires: parquet%{__PARQUET_VERSION}00-libs
 Requires(post): %{_sbindir}/update-alternatives
 Requires(postun): %{_sbindir}/update-alternatives
 
@@ -128,13 +131,13 @@ Summary: PG-Strom extension module for PostgreSQL v18
 Group: Applications/Databases
 BuildRequires: postgresql18
 BuildRequires: postgresql18-devel
-BuildRequires: arrow-devel >= 21
-BuildRequires: parquet-devel >= 21
+BuildRequires: arrow-devel >= %{__ARROW_PARQUET_MIN_VERSION}
+BuildRequires: parquet-devel >= %{__ARROW_PARQUET_MIN_VERSION}
 Requires: postgresql18-server
 Recommends: heterodb-extra >= %{__heterodb_extra_min_version}
 Requires: %{name}
-Requires: arrow-devel >= 21
-Requires: parquet-devel >= 21
+Requires: arrow%{__ARROW_VERSION}00-libs
+Requires: parquet%{__PARQUET_VERSION}00-libs
 Requires(post): %{_sbindir}/update-alternatives
 Requires(postun): %{_sbindir}/update-alternatives
 
@@ -258,7 +261,7 @@ fi
 if [ "$1" -eq 0 ]; then
     /usr/sbin/update-alternatives --remove pgsql-pg2arrow   %{__pkgbindir_15}/pg2arrow   || exit 0
     /usr/sbin/update-alternatives --remove pgsql-arrow2csv  %{__pkgbindir_15}/arrow2csv  || exit 0
-	/usr/sbin/update-alternatives --remove pgsql-tsv2arrow  %{__pkgbindir_15}/tsv2arrow  || exit 0
+    /usr/sbin/update-alternatives --remove pgsql-tsv2arrow  %{__pkgbindir_15}/tsv2arrow  || exit 0
 fi
 %endif
 
@@ -283,7 +286,7 @@ fi
 if [ "$1" -eq 1 ]; then
     /usr/sbin/update-alternatives --install /usr/bin/pg2arrow   pgsql-pg2arrow   %{__pkgbindir_17}/pg2arrow   1700 || exit 0
     /usr/sbin/update-alternatives --install /usr/bin/arrow2csv  pgsql-arrow2csv  %{__pkgbindir_17}/arrow2csv  1700 || exit 0
-	/usr/sbin/update-alternatives --install /usr/bin/tsv2arrow  pgsql-tsv2arrow  %{__pkgbindir_17}/tsv2arrow  1700 || exit 0
+    /usr/sbin/update-alternatives --install /usr/bin/tsv2arrow  pgsql-tsv2arrow  %{__pkgbindir_17}/tsv2arrow  1700 || exit 0
 fi
 %postun PG17
 if [ "$1" -eq 0 ]; then
@@ -298,7 +301,7 @@ fi
 if [ "$1" -eq 1 ]; then
     /usr/sbin/update-alternatives --install /usr/bin/pg2arrow   pgsql-pg2arrow   %{__pkgbindir_18}/pg2arrow   1800 || exit 0
     /usr/sbin/update-alternatives --install /usr/bin/arrow2csv  pgsql-arrow2csv  %{__pkgbindir_18}/arrow2csv  1800 || exit 0
-	/usr/sbin/update-alternatives --install /usr/bin/tsv2arrow  pgsql-tsv2arrow  %{__pkgbindir_18}/tsv2arrow  1800 || exit 0
+    /usr/sbin/update-alternatives --install /usr/bin/tsv2arrow  pgsql-tsv2arrow  %{__pkgbindir_18}/tsv2arrow  1800 || exit 0
 fi
 %postun PG18
 if [ "$1" -eq 0 ]; then

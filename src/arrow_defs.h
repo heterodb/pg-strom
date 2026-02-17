@@ -928,7 +928,7 @@ parquetReadOneRowGroup(const char *filename,
 					   void *(*malloc_callback)(void *malloc_private,
 												size_t malloc_size),
 					   void *malloc_private,
-					   const char **p_error_message);
+					   char *error_message, size_t error_message_sz);
 #undef __EXTERN
 
 #endif		/* !__CUDACC__ */

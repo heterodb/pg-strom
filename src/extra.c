@@ -3,8 +3,8 @@
  *
  * Stuff related to invoke HeteroDB Extra Module
  * ----
- * Copyright 2011-2023 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014-2023 (C) PG-Strom Developers Team
+ * Copyright 2011-2026 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2026 (C) PG-Strom Developers Team
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the PostgreSQL License.
@@ -1005,6 +1005,7 @@ heterodbExtraEreportCallback(char ereport_class,
 							 const char *message)
 {
 	const char *label = (ereport_class == 'E' ? "error" :
+						 ereport_class == 'N' ? "notice" :
 						 ereport_class == 'I' ? "info" :
 						 ereport_class == 'D' ? "debug" : "???");
 	ereport(LOG, (errhidestmt(true),

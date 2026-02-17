@@ -3,8 +3,8 @@
  *
  * Common routines related to query execution phase
  * ----
- * Copyright 2011-2023 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014-2023 (C) PG-Strom Developers Team
+ * Copyright 2011-2026 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2026 (C) PG-Strom Developers Team
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the PostgreSQL License.
@@ -2147,6 +2147,8 @@ pgstromExecEndTaskState(CustomScanState *node)
 	}
 	foreach (lc, pts->css.custom_ps)
 		ExecEndNode((PlanState *) lfirst(lc));
+	/* for performance investigation */
+	pgstrom_print_perf_counter();
 }
 
 /*
@@ -2368,6 +2370,11 @@ pgstromSharedStateShutdownDSM(CustomScanState *node)
 	pgstromSharedState *dst_state;
 	EState			   *estate = node->ss.ps.state;
 
+	if (pts->conn)
+	{
+		xpuClientCloseSession(pts->conn);
+		pts->conn = NULL;
+	}
 	if (pts->br_state)
 		pgstromBrinIndexShutdownDSM(pts);
 	if (pts->gcache_desc)
@@ -2989,8 +2996,8 @@ pgstromExplainTaskState(CustomScanState *node,
 	 */
 	if (pts->arrow_state)
 	{
-		pgstromArrowFdwExplain(pts->arrow_state,
-							   pts->css.ss.ss_currentRelation,
+		pgstromArrowFdwExplain(&pts->css.ss,
+							   pts->arrow_state,
 							   es, dcontext);
 		pgstromGpuDirectExplain(pts, es, dcontext);
 	}

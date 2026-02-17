@@ -3,8 +3,8 @@
  *
  * Multi-relations join accelerated with GPU processors
  * ----
- * Copyright 2011-2023 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014-2023 (C) PG-Strom Developers Team
+ * Copyright 2011-2026 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2026 (C) PG-Strom Developers Team
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the PostgreSQL License.
@@ -1860,7 +1860,7 @@ build_explain_tlist_junks(codegen_context *context,
 			}
 		}
 		if (lc == NULL)
-			elog(INFO, "scan_relid=%d anum=%d tlist_dev=%s", pp_info->scan_relid, anum, nodeToString(context->tlist_dev));
+			elog(INFO, "scan_relid=%u anum=%d tlist_dev=%s", pp_info->scan_relid, anum, nodeToString(context->tlist_dev));
 		Assert(lc != NULL);
 	}
 #endif

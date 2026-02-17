@@ -3,8 +3,8 @@
  *
  * Inline routines of misc utility purposes
  * --
- * Copyright 2011-2023 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014-2023 (C) PG-Strom Developers Team
+ * Copyright 2011-2026 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2026 (C) PG-Strom Developers Team
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the PostgreSQL License.
@@ -488,79 +488,4 @@ pthreadCondSignal(pthread_cond_t *cond)
 	if ((errno = pthread_cond_signal(cond)) != 0)
 		__FATAL("failed on pthread_cond_signal: %m");
 }
-
-/*
- * Misc debug functions
- */
-INLINE_FUNCTION(void)
-dump_tuple_desc(const TupleDesc tdesc)
-{
-	fprintf(stderr, "tupdesc %p { natts=%d, tdtypeid=%u, tdtypmod=%d, tdrefcount=%d }\n",
-			tdesc,
-			tdesc->natts,
-			tdesc->tdtypeid,
-			tdesc->tdtypmod,
-			tdesc->tdrefcount);
-	for (int j=0; j < tdesc->natts; j++)
-	{
-		Form_pg_attribute attr = TupleDescAttr(tdesc, j);
-
-		fprintf(stderr, "attr[%d] { attname='%s', atttypid=%u, attlen=%d, attnum=%d, atttypmod=%d, attbyval=%c, attalign=%c, attnotnull=%c attisdropped=%c }\n",
-				j,
-				NameStr(attr->attname),
-				attr->atttypid,
-				(int)attr->attlen,
-				(int)attr->attnum,
-				(int)attr->atttypmod,
-				attr->attbyval ? 't' : 'f',
-				attr->attalign,
-				attr->attnotnull ? 't' : 'f',
-				attr->attisdropped ? 't' : 'f');
-	}
-}
-
-/*
- * dump_kern_data_store
- */
-INLINE_FUNCTION(void)
-dump_kern_data_store(const kern_data_store *kds)
-{
-	fprintf(stderr, "kds %p { length=%lu, usage=%lu, nitems=%u, ncols=%u, format=%c, has_varlena=%c, tdhasoid=%c, tdtypeid=%u, tdtypmod=%d, table_oid=%u, hash_nslots=%u, block_offset=%u, block_nloaded=%u, nr_colmeta=%u }\n",
-			kds,
-			kds->length,
-			kds->usage,
-			kds->nitems,
-			kds->ncols,
-			kds->format,
-			kds->has_varlena ? 't' : 'f',
-			kds->tdhasoid ? 't' : 'f',
-			kds->tdtypeid,
-			kds->tdtypmod,
-			kds->table_oid,
-			kds->hash_nslots,
-			kds->block_offset,
-			kds->block_nloaded,
-			kds->nr_colmeta);
-	for (int j=0; j < kds->nr_colmeta; j++)
-	{
-		const kern_colmeta *cmeta = &kds->colmeta[j];
-
-		fprintf(stderr, "cmeta[%d] { attbyval=%c, attalign=%d, attlen=%d, attnum=%d, attcacheoff=%d, atttypid=%u, atttypmod=%d, atttypkind=%c, kds_format=%c, kds_offset=%u, idx_subattrs=%u, num_subattrs=%u, attname='%s' }\n",
-				j,
-				cmeta->attbyval ? 't' : 'f',
-				(int)cmeta->attalign,
-				(int)cmeta->attlen,
-				(int)cmeta->attnum,
-				(int)cmeta->attcacheoff,
-				cmeta->atttypid,
-				cmeta->atttypmod,
-				cmeta->atttypkind,
-				cmeta->kds_format,
-				cmeta->kds_offset,
-				(unsigned int)cmeta->idx_subattrs,
-				(unsigned int)cmeta->num_subattrs,
-				cmeta->attname);
-	}
-}
-
 #endif	/* PG_UTILS_H */
