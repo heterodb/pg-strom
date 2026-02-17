@@ -26,10 +26,10 @@ NVCC_VERSION := $(shell $(NVCC) --version | grep ^Cuda | \
 MAXREGCOUNT := 128
 MAXTHREADS_PER_BLOCK := $(shell expr 65536 / $(MAXREGCOUNT))
 
-__NUM_GPUS := $(shell ls -d /proc/driver/nvidia/gpus/*/information | wc -l)
+__NUM_GPUS := $(shell ls -d /proc/driver/nvidia/gpus/*/information 2>/dev/null | wc -l)
 ifeq ($(__NUM_GPUS),0)
-__NVCC_TARGET := --gpu-architecture=compute_60 \
-                 --gpu-code=sm_60,sm_61,sm_70,sm_75,sm_80,sm_86,sm_89,sm_90 \
+__NVCC_TARGET := --gpu-architecture=compute_75 \
+                 --gpu-code=sm_75,sm_80,sm_86,sm_89,sm_90,sm_100f,sm_103f,sm_120f,sm_121f \
                  --threads 8
 else
 __NVCC_TARGET := --gpu-architecture=native
