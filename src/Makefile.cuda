@@ -26,7 +26,13 @@ NVCC_VERSION := $(shell $(NVCC) --version | grep ^Cuda | \
 MAXREGCOUNT := 128
 MAXTHREADS_PER_BLOCK := $(shell expr 65536 / $(MAXREGCOUNT))
 
-__NUM_GPUS := $(shell ls -d /proc/driver/nvidia/gpus/*/information | wc -l)
+CUDA_NGPUS_HELPER := cuda_ngpus
+CUDA_HOME ?= /usr/local/cuda
+$(CUDA_NGPUS_HELPER): cuda_ngpus.c
+	$(CC) -O2 -I$(CUDA_HOME)/include -o $@ $< -L$(CUDA_HOME)/lib64 -lcuda
+
+__NUM_GPUS = $(shell ./$(CUDA_NGPUS_HELPER) 2>/dev/null || echo 0)
+
 ifeq ($(__NUM_GPUS),0)
 __NVCC_TARGET := --gpu-architecture=compute_60 \
                  --gpu-code=sm_60,sm_61,sm_70,sm_75,sm_80,sm_86,sm_89,sm_90 \

@@ -139,7 +139,7 @@ githash.c:
 #
 # GPU Device Code
 #
-%.o: %.cu $(CUDA_HEADERS)
+%.o: %.cu $(CUDA_HEADERS) $(NVCC) $(CUDA_NGPUS_HELPER)
 	$(NVCC) $(NVCC_CFLAGS)  --device-c -o $@ $<
 
 $(CUDA_FATBIN): $(CUDA_OBJS)
