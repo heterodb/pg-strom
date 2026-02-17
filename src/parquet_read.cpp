@@ -1,5 +1,5 @@
 /*
- * parquet_read.cc
+ * parquet_read.cpp
  *
  * Routines to read Parquet files
  * ----
@@ -27,9 +27,7 @@
 #include "xpu_common.h"
 #include "arrow_defs.h"
 
-/*
- * version check: libarrow/libparquet v23 is minimum requirement
- */
+/* version check: libarrow/libparquet v23 is minimum requirement */
 #if PARQUET_VERSION_MAJOR < 23
 #error libarrow/libparquet must be version 23 or later
 #endif

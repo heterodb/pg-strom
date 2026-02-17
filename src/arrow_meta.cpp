@@ -1,5 +1,5 @@
 /*
- * arrow_meta.cc
+ * arrow_meta.cpp
  *
  * Routines to handle Apache Arrow/Parquet metadata
  * ----
@@ -35,6 +35,11 @@
 #define ARROW_SIGNATURE_SZ		(sizeof(ARROW_SIGNATURE)-1)
 #define PARQUET_SIGNATURE		"PAR1"
 #define PARQUET_SIGNATURE_SZ	(sizeof(PARQUET_SIGNATURE)-1)
+
+/* version check: libarrow/libparquet v23 is minimum requirement */
+#if ARROW_VERSION_MAJOR < 23
+#error libarrow/libparquet must be version 23 or later
+#endif
 
 /*
  * Error Reporting
