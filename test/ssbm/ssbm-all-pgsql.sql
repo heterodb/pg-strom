@@ -2,7 +2,7 @@
 
 SET max_parallel_workers_per_gather = 24;
 SET pg_strom.enabled = off;
-#SET parallel_setup_cost = 100000;
+-- SET parallel_setup_cost = 100000;
 
 --Q1_1
 
@@ -21,6 +21,8 @@ and d_year = 1993
 and lo_discount between 1 and 3
 and lo_quantity < 25;
 
+select pg_sleep(3);
+
 --Q1_2
 
 explain
@@ -37,6 +39,8 @@ where lo_orderdate = d_datekey
   and d_yearmonthnum = 199401
   and lo_discount between 4 and 6
   and lo_quantity between 26 and 35;
+
+select pg_sleep(3);
 
 --Q1_3
 
@@ -56,6 +60,8 @@ where lo_orderdate = d_datekey
   and d_year = 1994
   and lo_discount between 5 and 7
   and lo_quantity between 26 and 35;
+
+select pg_sleep(3);
 
 --Q2_1
 
@@ -79,6 +85,8 @@ and p_category = 'MFGR#12'
 and s_region = 'AMERICA'
   group by d_year, p_brand1
   order by d_year, p_brand1;
+
+select pg_sleep(3);
 
 --Q2_2
 
@@ -105,6 +113,8 @@ select sum(lo_revenue), d_year, p_brand1
   group by d_year, p_brand1
   order by d_year, p_brand1;
 
+select pg_sleep(3);
+
 --Q2_3
 
 explain
@@ -128,6 +138,8 @@ select sum(lo_revenue), d_year, p_brand1
   group by d_year, p_brand1
   order by d_year, p_brand1;
 
+select pg_sleep(3);
+
 --Q3_1
 
 explain
@@ -150,6 +162,8 @@ and c_region = 'ASIA'  and s_region = 'ASIA'
 and d_year >= 1992 and d_year <= 1997
   group by c_nation, s_nation, d_year
              order by d_year asc, revenue desc;
+
+select pg_sleep(3);
 
 --Q3_2
 
@@ -176,6 +190,8 @@ and d_year >= 1992 and d_year <= 1997
   group by c_city, s_city, d_year
 order by d_year asc, revenue desc;
 
+select pg_sleep(3);
+
 --Q3_3
 
 explain
@@ -201,6 +217,8 @@ where lo_custkey = c_custkey
   group by c_city, s_city, d_year
   order by d_year asc,revenue desc;
 
+select pg_sleep(3);
+
 --Q3_4
 
 explain
@@ -225,6 +243,8 @@ from customer, lineorder, supplier, date1
     and d_yearmonth = 'Dec1997'
     group by c_city, s_city, d_year
   order by d_year asc, revenue desc;
+
+select pg_sleep(3);
 
 --Q4_1
 
@@ -252,6 +272,8 @@ from date1, customer, supplier, part, lineorder
        and (p_mfgr = 'MFGR#1' or p_mfgr = 'MFGR#2')
     group by d_year, c_nation
     order by d_year, c_nation ;
+
+select pg_sleep(3);
 
 --Q4_2
 
@@ -286,6 +308,8 @@ from date1, customer, supplier, part, lineorder
 group by d_year, s_nation, p_category
 order by d_year, s_nation, p_category;
 
+select pg_sleep(3);
+
 --Q4_3
 
 explain
@@ -317,5 +341,4 @@ from date1, customer, supplier, part, lineorder
 group by d_year, s_city, p_brand1
 order by d_year, s_city, p_brand1;
 
-\q
-
+select pg_sleep(3);
