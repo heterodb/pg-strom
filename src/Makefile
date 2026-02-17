@@ -104,13 +104,13 @@ EXTRA_CLEAN = $(CUDA_OBJS) $(GENERATED-HEADERS) \
               $(shell ls -d pgstrom-gpucode-V*-*.fatbin 2>/dev/null)
 EXTENSION = pg_strom
 PG_CPPFLAGS := $(PGSTROM_FLAGS) -I $(CUDA_IPATH)
-PG_CXXFLAGS := -std=c++17 -Wno-sign-compare
+PG_CXXFLAGS := -std=c++20 -Wno-sign-compare
 SHLIB_LINK += -L $(CUDA_LPATH) -lcuda
 
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
 
-# Our C++ code (and libarrow/libparquet) expects C++17 as baseline,
+# Our C++ code (and libarrow/libparquet) expects C++20 as baseline,
 # however, some distribution has different defaults for clang.
 # PostgreSQL's makefile has no particular label to give "-std=c++17"
 # to clang to build JIT bytecode. So, we inject this option after
