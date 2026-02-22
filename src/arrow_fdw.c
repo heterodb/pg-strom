@@ -1119,7 +1119,7 @@ __assignArrowStatsBinaryOne(MinMaxStatDatum *stats,
 			if (max_sz >= MINMAX_STAT_BYTESZ)
 				max_sz = MINMAX_STAT_BYTESZ - 1;
 			memcpy(stats->max.string+1, __max_token, max_sz);
-			SET_VARSIZE_SHORT(stats->max.string, max_sz);
+			SET_VARSIZE_SHORT(stats->max.string, max_sz+1);
 			stats->isnull = false;
 			break;
 		}
@@ -1315,20 +1315,6 @@ __buildArrowStatsOper(arrowStatsHint *as_hint,
 	}
 	else if (strategy == BTEqualStrategyNumber)
 	{
-		Oid		collation_oid = op->inputcollid;
-
-		/* NOTE: min/max statistics of string data is built based on UTF-8 encoding,
-		 * and generated based on simple byte comparison. Thus, we can use this
-		 * statistics for string data only when database encoding is UTF-8, and
-		 * operator determines larger/smaller relationship based on simple bytes
-		 * comparison.
-		 */
-		if (var->vartype == TEXTOID)
-		{
-			if (GetDatabaseEncoding() != PG_UTF8)
-				return false;
-			collation_oid = C_COLLATION_OID;
-		}
 		/* (VAR = ARG) --> (Min > ARG) || (Max < ARG), can be skipped */
 		opcode = get_opfamily_member(opfamily, var->vartype,
 									 exprType((Node *)arg),
@@ -1343,8 +1329,8 @@ __buildArrowStatsOper(arrowStatsHint *as_hint,
 											 var->varcollid,
 											 0),
 							 (Expr *)copyObject(arg),
-							 op->opcollid,
-							 collation_oid);
+							 C_COLLATION_OID,
+							 C_COLLATION_OID);
 		set_opfuncid((OpExpr *)expr);
 		as_hint->eval_quals = lappend(as_hint->eval_quals, expr);
 
@@ -1361,8 +1347,8 @@ __buildArrowStatsOper(arrowStatsHint *as_hint,
 											 var->varcollid,
 											 0),
 							 (Expr *)copyObject(arg),
-							 op->opcollid,
-							 collation_oid);
+							 C_COLLATION_OID,
+							 C_COLLATION_OID);
 		set_opfuncid((OpExpr *)expr);
 		as_hint->eval_quals = lappend(as_hint->eval_quals, expr);
 	}
@@ -1449,20 +1435,19 @@ __buildArrowStatsScalarArrayOp(arrowStatsHint *as_hint,
 	Oid			opcode = sa_op->opno;
 	Var		   *var;
 	Const	   *con;
-	Expr	   *expr;
+	TypeCacheEntry *tcache;
 	Oid			elem_oid;
-	int16		elem_typlen;
-	bool		elem_typbyval;
 	Datum		elem_datum;
 	bool		elem_isnull;
-	Oid			opfamily = InvalidOid;
+	Datum		min_datum;
+	Datum		max_datum;
+	bool		has_minmax = false;
 	StrategyNumber strategy = InvalidStrategy;
 	ArrayType  *arr;
 	ArrayIterator iter;
 	CatCList   *catlist;
-	List	   *result_args = NIL;
-	bool		retval = false;
 	int			anum;
+	bool		retval = false;
 
 	if (list_length(sa_op->args) != 2)
 		return false;
@@ -1477,19 +1462,24 @@ __buildArrowStatsScalarArrayOp(arrowStatsHint *as_hint,
 	 * Var::varnosyn and ::varattnosyn, instead of ::varno and ::varattno.
 	 */
 	if (!OidIsValid(opcode) ||
+		!sa_op->useOr ||	/* right now, only OPER ANY supported */
 		!IsA(var, Var) ||
 		!IsA(con, Const) ||
 		con->constisnull)
 		return false;
-	elem_oid = get_element_type(con->consttype);
-	if (!OidIsValid(elem_oid))
-		return false;
-	get_typlenbyval(elem_oid, &elem_typlen, &elem_typbyval);
-
+	/* min/max stats available? */
 	anum = var->varattnosyn - FirstLowInvalidHeapAttributeNumber;
 	if (!bms_is_member(anum, as_hint->stat_attrs))
 		return false;
-
+	/* pick up type cache */
+	elem_oid = get_element_type(con->consttype);
+	if (!OidIsValid(elem_oid))
+		return false;
+	tcache = lookup_type_cache(elem_oid, (TYPECACHE_LT_OPR |
+										  TYPECACHE_GT_OPR |
+										  TYPECACHE_CMP_PROC));
+	if (!tcache || !OidIsValid(tcache->cmp_proc))
+		return false;
 	/*
 	 * Identify the comparison strategy
 	 */
@@ -1501,7 +1491,6 @@ __buildArrowStatsScalarArrayOp(arrowStatsHint *as_hint,
 
 		if (amop->amopmethod == BRIN_AM_OID)
 		{
-			opfamily = amop->amopfamily;
 			strategy = amop->amopstrategy;
 			break;
 		}
@@ -1509,142 +1498,163 @@ __buildArrowStatsScalarArrayOp(arrowStatsHint *as_hint,
 	ReleaseSysCacheList(catlist);
 
 	/*
-	 * Iterate for each array element
+	 * fetch min/max value from the const array arguments
 	 */
 	arr = DatumGetArrayTypeP(con->constvalue);
 	iter = array_create_iterator(arr, 0, NULL);
 	while (array_iterate(iter, &elem_datum, &elem_isnull))
 	{
-		if (strategy == BTLessStrategyNumber ||
-			strategy == BTLessEqualStrategyNumber)
+		if (elem_isnull)
+			goto bailout;
+		if (!has_minmax)
 		{
-			/*
-			 * if (VAR < ARG) --> (Min >= ARG), can be skipped
-			 * if (VAR <= ARG) --> (Min > ARG), can be skipped
-			 */
-			Oid		negator = get_negator(opcode);
-
-			if (!OidIsValid(negator))
-				goto bailout;
-			expr = make_opclause(negator,
-								 get_op_rettype(negator),
-								 false,
-								 (Expr *)makeVar(INNER_VAR,
-												 var->varattno,
-												 var->vartype,
-												 var->vartypmod,
-												 var->varcollid,
-												 0),
-								 (Expr *)makeConst(elem_oid,
-												   con->consttypmod,
-												   con->constcollid,
-												   elem_typlen,
-												   elem_datum,
-												   elem_isnull,
-												   elem_typbyval),
-								 InvalidOid,
-								 sa_op->inputcollid);
-			set_opfuncid((OpExpr *)expr);
-			result_args = lappend(result_args, expr);
-		}
-		else if (strategy == BTGreaterEqualStrategyNumber ||
-				 strategy == BTGreaterStrategyNumber)
-		{
-			/* if (VAR > ARG) --> (Max <= ARG), can be skipped */
-			/* if (VAR >= ARG) --> (Max < ARG), can be skipped */
-			Oid		negator = get_negator(opcode);
-
-			if (!OidIsValid(negator))
-				goto bailout;
-			expr = make_opclause(negator,
-								 get_op_rettype(negator),
-								 false,
-								 (Expr *)makeVar(OUTER_VAR,
-												 var->varattno,
-												 var->vartype,
-												 var->vartypmod,
-												 var->varcollid,
-												 0),
-								 (Expr *)makeConst(elem_oid,
-												   con->consttypmod,
-												   con->constcollid,
-												   elem_typlen,
-												   elem_datum,
-												   elem_isnull,
-												   elem_typbyval),
-								 InvalidOid,
-								 sa_op->inputcollid);
-			set_opfuncid((OpExpr *)expr);
-			result_args = lappend(result_args, expr);
-		}
-		else if (strategy == BTEqualStrategyNumber)
-		{
-			/* (VAR = ARG) --> (Min > ARG) || (Max < ARG), can be skipped */
-			Oid		gt_opcode;
-			Oid		lt_opcode;
-			Expr   *gt_expr;
-			Expr   *lt_expr;
-
-			gt_opcode = get_opfamily_member(opfamily, var->vartype,
-											elem_oid,
-											BTGreaterStrategyNumber);
-			gt_expr = make_opclause(gt_opcode,
-									get_op_rettype(gt_opcode),
-									false,
-									(Expr *)makeVar(INNER_VAR,
-													var->varattno,
-													var->vartype,
-													var->vartypmod,
-													var->varcollid,
-													0),
-									(Expr *)makeConst(elem_oid,
-													  con->consttypmod,
-													  con->constcollid,
-													  elem_typlen,
-													  elem_datum,
-													  elem_isnull,
-													  elem_typbyval),
-									InvalidOid,
-									sa_op->inputcollid);
-			set_opfuncid((OpExpr *)gt_expr);
-
-			lt_opcode = get_opfamily_member(opfamily, var->vartype,
-											elem_oid,
-											BTLessStrategyNumber);
-			lt_expr = make_opclause(lt_opcode,
-									get_op_rettype(lt_opcode),
-									false,
-									(Expr *)makeVar(OUTER_VAR,
-													var->varattno,
-													var->vartype,
-													var->vartypmod,
-													var->varcollid,
-													0),
-									(Expr *)makeConst(elem_oid,
-													  con->consttypmod,
-													  con->constcollid,
-													  elem_typlen,
-													  elem_datum,
-													  elem_isnull,
-													  elem_typbyval),
-									InvalidOid,
-									sa_op->inputcollid);
-			set_opfuncid((OpExpr *)lt_expr);
-
-			expr = makeBoolExpr(OR_EXPR,
-								list_make2(gt_expr, lt_expr),
-								-1);
-			result_args = lappend(result_args, expr);
+			min_datum = elem_datum;
+			max_datum = elem_datum;
+			has_minmax = true;
 		}
 		else
 		{
-			goto bailout;
+			Datum	status;
+
+			status = OidFunctionCall2Coll(tcache->cmp_proc,
+										  C_COLLATION_OID,
+										  elem_datum,
+										  min_datum);
+			if (DatumGetInt32(status) < 0)
+				min_datum = elem_datum;
+			status = OidFunctionCall2Coll(tcache->cmp_proc,
+										  C_COLLATION_OID,
+										  elem_datum,
+										  max_datum);
+			if (DatumGetInt32(status) > 0)
+				max_datum = elem_datum;
 		}
 	}
-	as_hint->eval_quals = lappend(as_hint->eval_quals,
-								  makeBoolExpr(sa_op->useOr ? AND_EXPR : OR_EXPR,
-											   result_args,
-											   -1));
+	/*
+	 * build the result expression
+	 */
+	if (!has_minmax)
+		goto bailout;
+	if (strategy == BTLessStrategyNumber ||
+		strategy == BTLessEqualStrategyNumber)
+	{
+		/*
+		 * if (VAR <  ANY ARRAY) --> (Vmin >= Cmax), can be skipped
+		 * if (VAR <= ANY ARRAY) --> (Vmin >  Cmax), can be skipped
+		 */
+		Oid		negator = get_negator(opcode);
+		Expr   *expr;
+
+		if (!OidIsValid(negator))
+			goto bailout;
+		expr = make_opclause(negator,
+							 get_op_rettype(negator),
+							 false,
+							 (Expr *)makeVar(INNER_VAR,
+											 var->varattno,
+											 var->vartype,
+											 var->vartypmod,
+											 var->varcollid,
+											 0),
+							 (Expr *)makeConst(elem_oid,
+											   -1,
+											   C_COLLATION_OID,
+											   tcache->typlen,
+											   min_datum,
+											   false,
+											   tcache->typbyval),
+							 C_COLLATION_OID,
+							 C_COLLATION_OID);
+		set_opfuncid((OpExpr *)expr);
+		as_hint->eval_quals = lappend(as_hint->eval_quals, expr);
+	}
+	else if (strategy == BTGreaterEqualStrategyNumber ||
+			 strategy == BTGreaterStrategyNumber)
+	{
+		/*
+		 * if (VAR >  ANY ARRAY) --> (Vmax <= Cmin), can be skipped
+		 * if (VAR >= ANY ARRAY) --> (Vmax <  Cmin), can be skipped
+		 */
+		Oid		negator = get_negator(opcode);
+		Expr   *expr;
+
+		if (!OidIsValid(negator))
+			goto bailout;
+		expr = make_opclause(negator,
+							 get_op_rettype(negator),
+							 false,
+							 (Expr *)makeVar(OUTER_VAR,
+											 var->varattno,
+											 var->vartype,
+											 var->vartypmod,
+											 var->varcollid,
+											 0),
+							 (Expr *)makeConst(elem_oid,
+											   -1,
+											   C_COLLATION_OID,
+											   tcache->typlen,
+											   max_datum,
+											   false,
+											   tcache->typbyval),
+							 C_COLLATION_OID,
+							 C_COLLATION_OID);
+		set_opfuncid((OpExpr *)expr);
+		as_hint->eval_quals = lappend(as_hint->eval_quals, expr);
+	}
+	else if (strategy == BTEqualStrategyNumber)
+	{
+		/*
+		 * if (VAR = ANY ARRAY) --> (Vmax < Cmin || Vmin > Cmax), can be skipped
+		 */
+		Expr   *expr;
+
+		/* Vmax < Cmin */
+		expr = make_opclause(tcache->lt_opr,
+							 get_op_rettype(tcache->lt_opr),
+							 false,
+							 (Expr *)makeVar(OUTER_VAR,
+											 var->varattno,
+											 var->vartype,
+											 var->vartypmod,
+											 var->varcollid,
+											 0),
+							 (Expr *)makeConst(elem_oid,
+											   -1,
+											   var->varcollid,
+											   tcache->typlen,
+											   min_datum,
+											   false,
+											   tcache->typbyval),
+							 C_COLLATION_OID,
+							 C_COLLATION_OID);
+		set_opfuncid((OpExpr *)expr);
+		as_hint->eval_quals = lappend(as_hint->eval_quals, expr);
+		/* Vmin > Cmax */
+		expr = make_opclause(tcache->gt_opr,
+							 get_op_rettype(tcache->gt_opr),
+							 false,
+							 (Expr *)makeVar(INNER_VAR,
+											 var->varattno,
+											 var->vartype,
+											 var->vartypmod,
+											 var->varcollid,
+											 0),
+							 (Expr *)makeConst(elem_oid,
+											   -1,
+											   var->varcollid,
+											   tcache->typlen,
+											   max_datum,
+											   false,
+											   tcache->typbyval),
+							 C_COLLATION_OID,
+							 C_COLLATION_OID);
+		set_opfuncid((OpExpr *)expr);
+		as_hint->eval_quals = lappend(as_hint->eval_quals, expr);
+	}
+	else
+	{
+		goto bailout;
+	}
 	as_hint->load_attrs = bms_add_member(as_hint->load_attrs, var->varattno);
 	retval = true;
 bailout:
