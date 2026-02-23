@@ -51,6 +51,7 @@ typedef struct RecordBatchFieldState
 	size_t		values_length;
 	off_t		extra_offset;
 	size_t		extra_length;
+	size_t		disk_length;
 	MinMaxStatDatum stat_datum;
 	/* sub-fields if any */
 	int			num_children;
@@ -179,6 +180,7 @@ struct arrowMetadataFieldCache
 	size_t		values_length;
 	off_t		extra_offset;
 	size_t		extra_length;
+	size_t		disk_length;
 	MinMaxStatDatum stat_datum;
 	arrowMetadataKeyValueCache *custom_metadata;	/* valid only in RecordBatch-0 */
 	/* sub-fields if any */
@@ -1848,6 +1850,7 @@ __buildRecordBatchFieldStateByCache(RecordBatchFieldState *rb_field,
 	rb_field->values_length  = fcache->values_length;
 	rb_field->extra_offset   = fcache->extra_offset;
 	rb_field->extra_length   = fcache->extra_length;
+	rb_field->disk_length    = fcache->disk_length;
 	memcpy(&rb_field->stat_datum,
 		   &fcache->stat_datum, sizeof(MinMaxStatDatum));
 	if (fcache->num_children > 0)
@@ -2366,6 +2369,7 @@ __buildRecordBatchFieldState(setupRecordBatchContext *con,
 										fnode->stat_min_value,
 										fnode->stat_max_value);
 		}
+		rb_field->disk_length = fnode->parquet.total_compressed_size;
 	}
 	else
 	{
@@ -2381,6 +2385,7 @@ __buildRecordBatchFieldState(setupRecordBatchContext *con,
 				elog(ERROR, "nullmap length is smaller than expected");
 			if (rb_field->nullmap_offset != MAXALIGN(rb_field->nullmap_offset))
 				elog(ERROR, "nullmap is not aligned well");
+			rb_field->disk_length += buffer_curr->length;
 		}
 
 		/* setup values buffer */
@@ -2395,6 +2400,7 @@ __buildRecordBatchFieldState(setupRecordBatchContext *con,
 				elog(ERROR, "values array is smaller than expected");
 			if (rb_field->values_offset != MAXALIGN(rb_field->values_offset))
 				elog(ERROR, "values array is not aligned well");
+			rb_field->disk_length += buffer_curr->length;
 		}
 
 		/* setup extra buffer */
@@ -2408,6 +2414,7 @@ __buildRecordBatchFieldState(setupRecordBatchContext *con,
 			rb_field->extra_length = buffer_curr->length;
 			if (rb_field->extra_offset != MAXALIGN(rb_field->extra_offset))
 				elog(ERROR, "extra buffer is not aligned well");
+			rb_field->disk_length += buffer_curr->length;
 		}
 	}
 
@@ -2422,6 +2429,7 @@ __buildRecordBatchFieldState(setupRecordBatchContext *con,
 										 &rb_field->children[j],
 										 &field->children[j],
 										 depth+1);
+			rb_field->disk_length += rb_field->children[j].disk_length;
 		}
 	}
 	rb_field->num_children = field->_num_children;
@@ -2564,6 +2572,7 @@ __buildArrowMetadataFieldCache(RecordBatchFieldState *rb_field,
 	fcache->values_length = rb_field->values_length;
 	fcache->extra_offset = rb_field->extra_offset;
 	fcache->extra_length = rb_field->extra_length;
+	fcache->disk_length = rb_field->disk_length;
 	memcpy(&fcache->stat_datum,
 		   &rb_field->stat_datum, sizeof(MinMaxStatDatum));
 	/* custom-metadata can be reused for the record-batch > 0 */
@@ -4128,20 +4137,6 @@ parquetFillupRowGroup(Relation relation,
 /*
  * ArrowGetForeignRelSize
  */
-static size_t
-__recordBatchFieldLength(RecordBatchFieldState *rb_field)
-{
-	size_t		len = 0;
-
-	if (rb_field->null_count > 0)
-		len += rb_field->nullmap_length;
-	len += (rb_field->values_length +
-			rb_field->extra_length);
-	for (int j=0; j < rb_field->num_children; j++)
-		len += __recordBatchFieldLength(&rb_field->children[j]);
-	return len;
-}
-
 static void
 ArrowGetForeignRelSize(PlannerInfo *root,
 					   RelOptInfo *baserel,
@@ -4214,7 +4209,7 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 						continue;
 					i = af_state->attrs[j-1].field_index;
 					if (i >= 0 && i < rb_state->nfields)
-						totalLen += __recordBatchFieldLength(&rb_state->fields[i]);
+						totalLen += rb_state->fields[i].disk_length;
 				}
 			}
 			ntuples += rb_state->rb_nitems;
@@ -5628,7 +5623,6 @@ pgstromArrowFdwExplain(ScanState *ss,	/* Foreign or Custom */
 		const char *filename = af_state->filename;
 		size_t		total_sz = af_state->stat_buf.st_size;
 		size_t		read_sz = 0;
-		size_t		sz;
 
 		foreach (lc2, af_state->rb_list)
 		{
@@ -5652,7 +5646,7 @@ pgstromArrowFdwExplain(ScanState *ss,	/* Foreign or Custom */
 				i = af_state->attrs[j-1].field_index;
 				if (i >= 0 && i < rb_state->nfields)
 				{
-					sz = __recordBatchFieldLength(&rb_state->fields[i]);
+					size_t	sz = rb_state->fields[i].disk_length;
 					read_sz += sz;
 					chunk_sz[j] += sz;
 				}

@@ -2634,8 +2634,11 @@ __expandGpuQueryScanJoinBuffer(gpuClient *gclient,
 								MY_STREAM_PER_THREAD);
 		if (rc != CUDA_SUCCESS)
 		{
-			gpuClientELog(gclient, "failed on cuMemPrefetchAsync: %s",
-						  cuStrError(rc));
+			gpuClientELog(gclient, "failed on cuMemPrefetchAsync: %s (old=%p %lu (buf0=%p %lu, buf1=%p, %lu)",
+						  cuStrError(rc),
+						  (void *)kds_dst_old, kds_dst_old->length,
+						  (void *)gq_buf->gpus[0].m_kds_final, gq_buf->gpus[0].m_kds_final_length, 
+						  (void *)gq_buf->gpus[1].m_kds_final, gq_buf->gpus[1].m_kds_final_length);
 			goto out;
 		}
 		rc = allocGpuQueryBuffer(gq_buf, &m_devptr,
