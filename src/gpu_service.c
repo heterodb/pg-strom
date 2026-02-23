@@ -139,7 +139,7 @@ static __thread gpuContext		*GpuWorkerCurrentContext = NULL;
 #define MY_CONTEXT_PER_THREAD	(GpuWorkerCurrentContext->cuda_context)
 #define MY_STREAM_PER_THREAD	CU_STREAM_PER_THREAD
 #define MY_MEMLOCATION_PER_THREAD (GpuWorkerCurrentContext->cuda_mlocation)
-static CUmemLocation		host_mlocation = {CU_DEVICE_CPU, CU_MEM_LOCATION_TYPE_HOST};
+static CUmemLocation		host_mlocation = {CU_MEM_LOCATION_TYPE_HOST, CU_DEVICE_CPU};
 static volatile int			gpuserv_bgworker_got_signal = 0;
 static gpuContext		   *gpuserv_gpucontext_array;
 static dlist_head			gpuserv_gpucontext_list;
