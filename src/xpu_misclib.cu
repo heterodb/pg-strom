@@ -1475,6 +1475,248 @@ pgfn_network_overlap(XPU_PGFUNCTION_ARGS)
 
 /* ----------------------------------------------------------------
  *
+ * type cast from text to inet (device only function for CoerceViaIO)
+ *
+ * ----------------------------------------------------------------
+ */
+STATIC_FUNCTION(bool)
+__strtoinet_ipv4(uint8_t *ipaddr, int *p_netmask, const char *str, int len)
+{
+	/* based on host inet_net_pton_ipv4() */
+	int		dcount = 0;
+	int		dig = -1;
+
+	/* parse IPv4 address string */
+	for (int i=0; i < len; i++)
+	{
+		int		c = str[i];
+
+		if (c >= '0' && c <= '9')
+		{
+			if (dig < 0)
+				dig = (c - '0');
+			else
+				dig = 10 * dig + (c - '0');
+			if (dig > 255)
+				return false;
+		}
+		else if (c == '.')
+		{
+			if (dcount >= 3 || dig < 0)
+				return false;
+			ipaddr[dcount++] = dig;
+			dig = -1;	/* reset */
+		}
+		else if (c == '/')
+		{
+			if (dcount >= 4 || dig < 0)
+				return false;
+			ipaddr[dcount++] = dig;
+			dig = -1;	/* reset */
+			while (dcount < 4)
+				ipaddr[dcount++] = 0;
+		}
+		else
+		{
+			return false;
+		}
+	}
+
+	if (dcount == 4)
+		*p_netmask = dig;
+	else
+	{
+		assert(dcount < 4);
+		ipaddr[dcount++] = dig;
+		while (dcount < 4)
+			ipaddr[dcount++] = 0;
+		*p_netmask = 32;
+	}
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+__strtoinet_ipv6(uint8_t *ipaddr, int *p_netmask, const char *str, int len)
+{
+	/* based on host inet_net_pton_ipv6() */
+	int		dig = -1;
+	int		dcount = 0;
+	int		netmask = 128;
+	int		zero_start = -1;
+
+	/* special case if begin from '::' */
+	if (len >= 2 && str[0] == ':')
+	{
+		if (str[1] != ':')
+			return false;
+		zero_start = 0;
+		str += 2;
+		len -= 2;
+	}
+	/* walks on the input text */
+	for (int i=0; i < len; i++)
+	{
+		int		c = str[i];
+
+		if (c == ':')
+		{
+			if (dig < 0 || dcount > 12)
+				return false;
+			ipaddr[dcount++] = (uint8_t)((dig >> 8) & 0xff);
+			ipaddr[dcount++] = (uint8_t)(dig & 0xff);
+			dig = -1;	/* reset */
+
+			/* in case of double '::' */
+			if (i+1 < len && str[i+1] == ':')
+			{
+				if (zero_start >= 0)
+					return false;
+				zero_start = dcount;
+				i++;	/* skip one next character */
+			}
+		}
+		else if (c == '/')
+		{
+			if (dig < 0 || dcount > 14)
+				return false;
+			ipaddr[dcount++] = (uint8_t)((dig >> 8) & 0xff);
+			ipaddr[dcount++] = (uint8_t)(dig & 0xff);
+			dig = -1;	/* reset */
+
+			/* remained portion should be 10-based digits only */
+			while (++i < len)
+			{
+				c = str[i];
+				if (c < '0' || c > '9')
+					return false;
+				if (dig < 0)
+					dig = (c - '0');
+				else
+					dig = 10 * dig + (c - '0');
+			}
+			if (dig >= 0 && dig <= 128)
+			{
+				netmask = dig;
+				goto out;
+			}
+			return false;
+		}
+		else if (c == '.')
+		{
+			/* IPv4 compatible expression */
+			if (dig < 0 || dcount > 12)
+				return false;
+			for (int j=i; j >= 0; j--)
+			{
+				if (j==0 || str[j-1] < '0' || str[j-1] > '9')
+				{
+					if (!__strtoinet_ipv4(&ipaddr[dcount],
+										  &netmask,
+										  &str[j],
+										  len - j))
+						break;
+					dcount += 4;
+					goto out;
+				}
+			}
+			return false;
+		}
+		else
+		{
+			int		num;
+
+			if (c >= '0' && c <= '9')
+				num = (c - '0');
+			else if (c >= 'a' && c <= 'f')
+				num = (c - 'a' + 10);
+			else if (c >= 'A' && c <= 'F')
+				num = (c - 'A' + 10);
+			else
+				return false;
+
+			if (dig < 0)
+				dig = num;
+			else
+				dig = (dig << 4) + num;
+			if (dig >= 0x10000)
+				return false;
+		}
+	}
+	if (dig < 0 || dcount > 14)
+		return false;
+	ipaddr[dcount++] = (uint8_t)((dig >> 8) & 0xff);
+	ipaddr[dcount++] = (uint8_t)(dig & 0xff);
+out:
+	if (dcount != 16)
+	{
+		int		k, shift = (16 - dcount);
+		assert(shift > 0);
+		if (zero_start < 0)
+			return false;
+		for (k=15; k >= zero_start + shift; k--)
+			ipaddr[k] = ipaddr[k-shift];
+		for (; k >= zero_start; k--)
+			ipaddr[k] = 0;
+	}
+	*p_netmask = netmask;
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+__strtoinet(const char *str, int len, xpu_inet_t *result)
+{
+	int		netmask;
+
+	for (int i=0; i < len; i++)
+	{
+		if (str[i] == ':')
+		{
+			if (__strtoinet_ipv6(result->value.ipaddr,
+								 &netmask,
+								 str, len) &&
+				(netmask >= 0 && netmask <= 128))
+			{
+				result->expr_ops = &xpu_inet_ops;
+				result->value.family = PGSQL_AF_INET6;
+				result->value.bits = netmask;
+				return true;
+			}
+			return false;
+		}
+	}
+	if (__strtoinet_ipv4(result->value.ipaddr,
+						 &netmask,
+						 str, len) &&
+		(netmask >= 0 && netmask <= 32))
+	{
+		result->expr_ops = &xpu_inet_ops;
+		result->value.family = PGSQL_AF_INET;
+		result->value.bits = netmask;
+		return true;
+	}
+	return false;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_devcast_text_to_inet(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS1(inet,text,arg);
+
+	if (XPU_DATUM_ISNULL(&arg))
+		result->expr_ops = NULL;
+	else if (!xpu_text_is_valid(kcxt, &arg))
+		return false;
+	else if (!__strtoinet(arg.value,
+						  arg.length, result))
+	{
+		STROM_ELOG(kcxt, "invalid input for inet");
+		return false;
+	}
+	return true;
+}
+
+/* ----------------------------------------------------------------
+ *
  * cube (alias of earthdistance) data type and functions
  *
  * ----------------------------------------------------------------

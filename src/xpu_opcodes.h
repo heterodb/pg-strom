@@ -133,6 +133,7 @@ DEVONLY_FUNC_OPCODE(float2,  devcast_text_to_float2,  text, DEVKIND__ANY, 12)
 DEVONLY_FUNC_OPCODE(float4,  devcast_text_to_float4,  text, DEVKIND__ANY, 12)
 DEVONLY_FUNC_OPCODE(float8,  devcast_text_to_float8,  text, DEVKIND__ANY, 12)
 DEVONLY_FUNC_OPCODE(numeric, devcast_text_to_numeric, text, DEVKIND__ANY, 15)
+DEVONLY_FUNC_OPCODE(inet,    devcast_text_to_inet,    text, DEVKIND__ANY, 15)
 
 /* '+' : add operators */
 __FUNC_OPCODE(int1pl,  int1/int1, 1, "pg_strom")

@@ -2231,6 +2231,7 @@ codegen_coerceviaio_expression(codegen_context *context,
 		{FuncOpCode__devcast_text_to_float4, "text", NULL, "float4", NULL},
 		{FuncOpCode__devcast_text_to_float8, "text", NULL, "float8", NULL},
 		{FuncOpCode__devcast_text_to_numeric, "text", NULL, "numeric", NULL},
+		{FuncOpCode__devcast_text_to_inet, "text", NULL, "inet", NULL},
 		{FuncOpCode__Invalid, NULL, NULL, NULL, NULL},
 	};
 	devtype_info   *stype;
