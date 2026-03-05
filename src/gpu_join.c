@@ -483,7 +483,6 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 		}
 		else
 		{
-			Assert(!rinfo->pseudoconstant);
 			join_quals = lappend(join_quals, rinfo->clause);
 		}
 		/* Is the hash-join enabled? */
