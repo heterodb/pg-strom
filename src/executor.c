@@ -437,6 +437,8 @@ __build_session_param_info(pgstromTaskState *pts,
 		bool		isnull;
 		uint32_t	offset;
 
+		/* expr should not contain any Var nodes */
+		Assert(!contain_var_clause((Node *)expr));
 		datum = ExecEvalExprSwitchContext(expr_state, econtext, &isnull);
 		if (isnull)
 			offset = 0;
