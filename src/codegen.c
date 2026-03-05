@@ -1736,29 +1736,71 @@ codegen_const_expression(codegen_context *context,
 }
 
 static int
+codegen_pseudo_const_expression(codegen_context *context,
+								StringInfo buf, int curr_depth,
+								Expr *expr)
+{
+	devtype_info *dtype;
+	Oid			type_oid = exprType((Node *)expr);
+	uint32_t	param_id = 0;
+	ListCell   *lc;
+
+	dtype = pgstrom_devtype_lookup(type_oid);
+	if (!dtype)
+		__Ereport("type %s is not device supported", format_type_be(type_oid));
+	/* assign param_id */
+	foreach (lc, context->used_params)
+	{
+		if (equal(lfirst(lc), expr))
+			goto found;
+		param_id++;
+	}
+	param_id = list_length(context->used_params);
+	context->used_params = lappend(context->used_params, expr);
+found:
+	if (buf)
+	{
+		kern_expression kexp;
+		int		pos;
+
+		memset(&kexp, 0, sizeof(kexp));
+		kexp.opcode = FuncOpCode__ParamExpr;
+		kexp.exptype = dtype->type_code;
+		kexp.expflags = context->kexp_flags;
+		kexp.u.p.param_id = param_id;
+		pos = __appendBinaryStringInfo(buf, &kexp, offsetof(kern_expression,
+															u.p.__data));
+		__appendKernExpMagicAndLength(buf, pos);
+	}
+	return 0;
+}
+
+static int
 codegen_param_expression(codegen_context *context,
 						 StringInfo buf, int curr_depth,
 						 Param *param)
 {
-	devtype_info   *dtype;
-	char			typtype;
+	devtype_info *dtype;
+	uint32_t	param_id = 0;
+	ListCell   *lc;
 
 	if (param->paramkind != PARAM_EXTERN)
 		__Ereport("Only PARAM_EXTERN is supported on device: %d",
 				  (int)param->paramkind);
-
-	typtype = get_typtype(param->paramtype);
-	if (typtype != TYPTYPE_BASE &&
-		typtype != TYPTYPE_ENUM &&
-		typtype != TYPTYPE_RANGE &&
-		typtype != TYPTYPE_DOMAIN)
-		__Ereport("unable to use type %s in Param expression (class: %c)",
-				  format_type_be(param->paramtype), typtype);
-
 	dtype = pgstrom_devtype_lookup(param->paramtype);
 	if (!dtype)
 		__Ereport("type %s is not device supported",
 				  format_type_be(param->paramtype));
+	/* assign param_id */
+	foreach (lc, context->used_params)
+	{
+		if (equal(lfirst(lc), param))
+			goto found;
+		param_id++;
+	}
+	param_id = list_length(context->used_params);
+	context->used_params = lappend(context->used_params, param);
+found:
 	if (buf)
 	{
 		kern_expression	kexp;
@@ -1768,13 +1810,11 @@ codegen_param_expression(codegen_context *context,
 		kexp.opcode = FuncOpCode__ParamExpr;
 		kexp.exptype = dtype->type_code;
 		kexp.expflags = context->kexp_flags;
-		kexp.u.p.param_id = param->paramid;
+		kexp.u.p.param_id = param_id;
 		pos = __appendBinaryStringInfo(buf, &kexp, offsetof(kern_expression,
 															u.p.__data));
 		__appendKernExpMagicAndLength(buf, pos);
 	}
-	context->used_params = list_append_unique(context->used_params, param);
-
 	return 0;
 }
 
@@ -2718,6 +2758,17 @@ codegen_expression_walker(codegen_context *context,
 {
 	if (!expr)
 		return 0;
+	/*
+	 * When a sub-expression is composed of a STABLE function/operator with
+	 * constant arguments only, PG-Strom replaces it with a reference to a
+	 * parameter.  This serves both as a performance optimization and as a
+	 * mechanism to allow evaluation of expressions that include functions
+	 * unsupported by GPU execution.
+	 *
+	 * A simple constant itself, however, is represented as a ConstExpr.
+	 */
+	if (!IsA(expr, Const) && is_pseudo_constant_clause((Node *)expr))
+		return codegen_pseudo_const_expression(context, buf, curr_depth, expr);
 
 	context->stack_usage += XPUCODE_STACK_USAGE_NORMAL;
 	switch (nodeTag(expr))
