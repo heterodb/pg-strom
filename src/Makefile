@@ -71,6 +71,7 @@ endif
 #
 HAS_LIBARROW = $(shell pkgconf --exists arrow>/dev/null 2>&1   && echo -n yes)
 HAS_PARQUET  = $(shell pkgconf --exists parquet>/dev/null 2>&1 && echo -n yes)
+HAS_LIBNUMA  = $(shell pkgconf --exists numa>/dev/null 2>&1   && echo -n yes)
 ifeq ($(HAS_LIBARROW),yes)
 PGSTROM_FLAGS += -DHAS_LIBARROW=1
 PG_CXXFLAGS += $(shell pkgconf --cflags arrow)
@@ -89,6 +90,11 @@ ifneq ($(ARROW_LIBDIR),)
 SHLIB_LINK += -Wl,-rpath,$(ARROW_LIBDIR)
 endif
 endif
+endif
+ifeq ($(HAS_LIBNUMA),yes)
+PGSTROM_FLAGS += -DHAS_LIBNUMA=1
+PG_CXXFLAGS += $(shell pkgconf --cflags numa)
+SHLIB_LINK += $(shell pkgconf --libs numa)
 endif
 
 #

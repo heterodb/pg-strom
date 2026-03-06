@@ -46,11 +46,13 @@ BuildRequires: postgresql15
 BuildRequires: postgresql15-devel
 BuildRequires: arrow-devel >= %{__ARROW_PARQUET_MIN_VERSION}
 BuildRequires: parquet-devel >= %{__ARROW_PARQUET_MIN_VERSION}
+BuildRequires: numactl-devel
 Requires: postgresql15-server
 Recommends: heterodb-extra >= %{__heterodb_extra_min_version}
 Requires: %{name}
 Requires: arrow%{__ARROW_VERSION}00-libs
 Requires: parquet%{__PARQUET_VERSION}00-libs
+Requires: numactl-devel
 Requires(post): %{_sbindir}/update-alternatives
 Requires(postun): %{_sbindir}/update-alternatives
 
@@ -75,11 +77,13 @@ BuildRequires: postgresql16
 BuildRequires: postgresql16-devel
 BuildRequires: arrow-devel >= %{__ARROW_PARQUET_MIN_VERSION}
 BuildRequires: parquet-devel >= %{__ARROW_PARQUET_MIN_VERSION}
+BuildRequires: numactl-devel
 Requires: postgresql16-server
 Recommends: heterodb-extra >= %{__heterodb_extra_min_version}
 Requires: %{name}
 Requires: arrow%{__ARROW_VERSION}00-libs
 Requires: parquet%{__PARQUET_VERSION}00-libs
+Requires: numactl-devel
 Requires(post): %{_sbindir}/update-alternatives
 Requires(postun): %{_sbindir}/update-alternatives
 
@@ -104,11 +108,13 @@ BuildRequires: postgresql17
 BuildRequires: postgresql17-devel
 BuildRequires: arrow-devel >= %{__ARROW_PARQUET_MIN_VERSION}
 BuildRequires: parquet-devel >= %{__ARROW_PARQUET_MIN_VERSION}
+BuildRequires: numactl-devel
 Requires: postgresql17-server
 Recommends: heterodb-extra >= %{__heterodb_extra_min_version}
 Requires: %{name}
 Requires: arrow%{__ARROW_VERSION}00-libs
 Requires: parquet%{__PARQUET_VERSION}00-libs
+Requires: numactl-devel
 Requires(post): %{_sbindir}/update-alternatives
 Requires(postun): %{_sbindir}/update-alternatives
 
@@ -133,11 +139,13 @@ BuildRequires: postgresql18
 BuildRequires: postgresql18-devel
 BuildRequires: arrow-devel >= %{__ARROW_PARQUET_MIN_VERSION}
 BuildRequires: parquet-devel >= %{__ARROW_PARQUET_MIN_VERSION}
+BuildRequires: numactl-devel
 Requires: postgresql18-server
 Recommends: heterodb-extra >= %{__heterodb_extra_min_version}
 Requires: %{name}
 Requires: arrow%{__ARROW_VERSION}00-libs
 Requires: parquet%{__PARQUET_VERSION}00-libs
+Requires: numactl-devel
 Requires(post): %{_sbindir}/update-alternatives
 Requires(postun): %{_sbindir}/update-alternatives
 
@@ -176,6 +184,7 @@ pushd ../PG15
 %{__make} -C src -j 12 %{__make_options_15}
 %{__make} -C arrow-tools -j 6 %{__make_options_15} pg2arrow
 %{__make} -C arrow-tools -j 6 %{__make_options_15} arrow2csv
+%{__make} -C arrow-tools -j 6 %{__make_options_15} tsv2arrow
 popd
 %endif
 
@@ -184,6 +193,7 @@ pushd ../PG16
 %{__make} -C src -j 12 %{__make_options_16}
 %{__make} -C arrow-tools -j 6 %{__make_options_16} pg2arrow
 %{__make} -C arrow-tools -j 6 %{__make_options_16} arrow2csv
+%{__make} -C arrow-tools -j 6 %{__make_options_15} tsv2arrow
 popd
 %endif
 
@@ -192,6 +202,7 @@ pushd ../PG17
 %{__make} -C src -j 12 %{__make_options_17}
 %{__make} -C arrow-tools -j 6 %{__make_options_17} pg2arrow
 %{__make} -C arrow-tools -j 6 %{__make_options_17} arrow2csv
+%{__make} -C arrow-tools -j 6 %{__make_options_15} tsv2arrow
 popd
 %endif
 
@@ -200,6 +211,7 @@ pushd ../PG18
 %{__make} -C src -j 12 %{__make_options_18}
 %{__make} -C arrow-tools -j 6 %{__make_options_18} pg2arrow
 %{__make} -C arrow-tools -j 6 %{__make_options_18} arrow2csv
+%{__make} -C arrow-tools -j 6 %{__make_options_15} tsv2arrow
 popd
 %endif
 

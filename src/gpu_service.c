@@ -31,6 +31,7 @@ struct gpuContext
 	dlist_node		chain;
 	char			gpu_label[8];	/* for debug output */
 	int				serv_fd;		/* for accept(2) */
+	int				host_numa_id;
 	int				cuda_dindex;
 	gpumask_t		cuda_dmask;		/* = (1UL<<cuda_dindex) */
 	CUdevice		cuda_device;
@@ -6092,6 +6093,31 @@ gpuservHandleGpuTaskFinal(gpuContext *gcontext,
 }
 
 /*
+ * gpuservSetHostNumaNode
+ */
+static void
+gpuservSetHostNumaNode(gpuContext *gcontext)
+{
+#ifdef HAS_LIBNUMA
+	if (numa_available() == 0 &&
+		gcontext->host_numa_id >= 0 &&
+		gcontext->host_numa_id < numa_num_configured_nodes())
+	{
+		if (numa_run_on_node(gcontext->host_numa_id) == 0)
+		{
+			numa_set_preferred(gcontext->host_numa_id);
+		}
+		else
+		{
+			__gsDebug("libnuma: GPU%d worker thread failed on numa_run_on_node(%d): %m",
+					  gcontext->cuda_dindex,
+					  gcontext->host_numa_id);
+		}
+	}
+#endif
+}
+
+/*
  * gpuservGpuWorkerMain -- actual worker
  */
 static void *
@@ -6106,6 +6132,8 @@ gpuservGpuWorkerMain(void *__arg)
 
 	/* set primary working context */
 	gpuContextSwitchTo(gcontext);
+	/* set preferable host NUMA node */
+	gpuservSetHostNumaNode(gcontext);
 
 	__gsDebug("GPU-%d worker thread launched", MY_DINDEX_PER_THREAD);
 	
@@ -6655,6 +6683,7 @@ gpuservSetupGpuContext(int cuda_dindex)
 	/* gpuContext initialization */
 	sprintf(gcontext->gpu_label, "GPU%d", cuda_dindex);
 	gcontext->serv_fd = -1;
+	gcontext->host_numa_id = dattrs->HOST_NUMA_ID;
 	gcontext->cuda_dindex = cuda_dindex;
 	gcontext->cuda_dmask = (1UL << cuda_dindex);
 	pthreadMutexInit(&gcontext->cuda_setlimit_lock);
