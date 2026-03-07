@@ -2320,14 +2320,9 @@ pgstromSharedStateShutdownDSM(CustomScanState *node)
 {
 	pgstromTaskState   *pts = (pgstromTaskState *) node;
 	pgstromSharedState *src_state = pts->ps_state;
-	pgstromSharedState *dst_state;
+	pgstromSharedState *dst_state = NULL;
 	EState			   *estate = node->ss.ps.state;
 
-	if (pts->conn)
-	{
-		xpuClientCloseSession(pts->conn);
-		pts->conn = NULL;
-	}
 	if (pts->br_state)
 		pgstromBrinIndexShutdownDSM(pts);
 	if (pts->gcache_desc)
@@ -2341,6 +2336,27 @@ pgstromSharedStateShutdownDSM(CustomScanState *node)
 		dst_state = MemoryContextAllocZero(estate->es_query_cxt, sz);
 		memcpy(dst_state, src_state, sz);
 		pts->ps_state = dst_state;
+	}
+	/*
+	 * NOTE: XpuConnection::scan_repeat_sync_control is initialized to point
+	 * a variable on DSM segment to share current status of relation scan.
+	 * When ShutdownDSM callback is invoked, no other worker processes are
+	 * working, thus it is obviously safe to switch the control variable.
+	 *
+	 * Please note that ShutdownDSM can be called before execution end,
+	 * when DECLARE CURSOR + FETCH command is used, for example.
+	 * See, issue #1006
+	 */
+	if (pts->conn)
+	{
+		XpuConnection *conn = pts->conn;
+		uint64_t	control;
+
+		pthreadMutexLock(&conn->mutex);
+		control = pg_atomic_read_u64(conn->scan_repeat_sync_control);
+		pg_atomic_write_u64(&pts->ps_state->scan_repeat_sync_control, control);
+		conn->scan_repeat_sync_control = &pts->ps_state->scan_repeat_sync_control;
+		pthreadMutexUnlock(&conn->mutex);
 	}
 	/*
 	 * SELECT-INTO Direct mode needs to update processed tuples
