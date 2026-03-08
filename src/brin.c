@@ -558,9 +558,8 @@ pgstromBrinIndexExecReset(pgstromTaskState *pts)
 		ExecIndexEvalRuntimeKeys(econtext,
 								 br_state->RuntimeKeys,
 								 br_state->NumRuntimeKeys);
+		br_state->RuntimeKeysIsReady = true;
 	}
-	br_state->RuntimeKeysIsReady = false;
-
 	br_state->curr_chunk_id = 0;
 	br_state->curr_block_id = UINT_MAX;
 
