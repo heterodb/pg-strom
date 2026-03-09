@@ -11,7 +11,6 @@
  */
 #include "pg_strom.h"
 #include "arrow_defs.h"
-#include "arrow_ipc.h"
 #include "xpu_numeric.h"
 
 /*
@@ -6225,7 +6224,7 @@ pgstrom_arrow_fdw_import_file(PG_FUNCTION_ARGS)
 	readArrowFile(file_name, &af_info, false);
 	copyArrowNode(&schema.node, &af_info.footer.schema.node);
 	if (schema._num_fields > SHRT_MAX)
-		Elog("Arrow file '%s' has too much fields: %d",
+		elog(ERROR, "Arrow file '%s' has too much fields: %d",
 			 file_name, schema._num_fields);
 	column_names = ensureUniqueFieldNames(&schema, NIL);
 
