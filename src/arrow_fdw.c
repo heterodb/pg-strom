@@ -244,13 +244,14 @@ typedef struct
 /*
  * Static variables
  */
-static FdwRoutine			pgstrom_arrow_fdw_routine;
+static FdwRoutine	pgstrom_arrow_fdw_routine;
 static shmem_request_hook_type shmem_request_next = NULL;
 static shmem_startup_hook_type shmem_startup_next = NULL;
 static arrowMetadataCacheHead *arrow_metadata_cache = NULL;
-static bool					arrow_fdw_enabled;	/* GUC */
-static bool					arrow_fdw_stats_hint_enabled;	/* GUC */
-int							arrow_metadata_cache_size_kb;	/* GUC */
+static bool			arrow_fdw_enabled;	/* GUC */
+static bool			arrow_fdw_stats_hint_enabled;	/* GUC */
+int					arrow_metadata_cache_size_kb;	/* GUC */
+static int			parquet_parallel_read_threshold;/* GUC */
 
 /* ----------------------------------------------------------------
  *
@@ -3915,6 +3916,7 @@ __arrowFdwSetupKDSHead(Relation relation,
 	size_t		head_off = chunk_buffer->len;
 	char		kds_format = KDS_FORMAT_ARROW;
 	bool		all_fields = bms_is_member(-FirstLowInvalidHeapAttributeNumber, referenced);
+	int			nr_loads = 0;
 	kern_data_store *kds;
 
 	/*
@@ -3949,9 +3951,14 @@ __arrowFdwSetupKDSHead(Relation relation,
 										&kds->colmeta[j],
 										&rb_state->fields[field_index]);
 			if (all_fields || bms_is_member(k+1, referenced))
+			{
 				kds->colmeta[j].field_index = field_index;
+				nr_loads++;
+			}
 			else
+			{
 				kds->colmeta[j].field_index = -1;	/* not referenced */
+			}
 		}
 		else if (field_index == __FIELD_INDEX_SPECIAL__VIRTUAL_PER_FILE)
 		{
@@ -3987,6 +3994,16 @@ __arrowFdwSetupKDSHead(Relation relation,
 			elog(ERROR, "Bug? unexpected field-index (%d)", field_index);
 		}
 	}
+	/*
+	 * turn on multi-threading read of parquet::arrow::FileReader,
+	 * if number of columns exceeds the threshold. (in case when small
+	 * number of columns are loaded, multi-threading is not efficient
+	 * so much.)
+	 */
+	if (kds_format == KDS_FORMAT_PARQUET &&
+		parquet_parallel_read_threshold >= 0 &&
+		nr_loads >= parquet_parallel_read_threshold)
+		kds->parquet_parallel_load = true;
 	kds->parquet_row_group = rb_state->rb_index;
 	kds->arrow_virtual_usage = (chunk_buffer->len
 								- (head_off + KDS_HEAD_LENGTH(kds)));
@@ -6927,6 +6944,19 @@ pgstrom_init_arrow_fdw(void)
 							INT_MAX,
 							PGC_POSTMASTER,
 							GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
+							NULL, NULL, NULL);
+	/*
+	 * Threshold of using threadpool for parquet read
+	 */
+	DefineCustomIntVariable("arrow_fdw.parquet_parallel_read_threshold",
+							"minimum number of loaded columns using thread-pool for Parquet read",
+							NULL,
+							&parquet_parallel_read_threshold,
+							8,		/* default 8 columns */
+							-1,		/* -1 : disabled, 0 : always */
+							INT_MAX,
+							PGC_USERSET,
+							GUC_NOT_IN_SAMPLE,
 							NULL, NULL, NULL);
 	/* shared memory size */
 	shmem_request_next = shmem_request_hook;

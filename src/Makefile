@@ -13,7 +13,7 @@ STROM_OBJS = main.o githash.o extra.o codegen.o executor.o fallback.o \
              arrow_fdw.o arrow_meta.o parquet_read.o \
              misc.o float2.o tinyint.o aggfuncs.o
 GENERATED-HEADERS = gpu_devattrs.h githash.c
-STROM_HEADERS = arrow_defs.h arrow_ipc.h float2.h
+STROM_HEADERS = arrow_defs.h float2.h
 
 #
 # Githash.c checker

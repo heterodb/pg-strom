@@ -280,7 +280,7 @@ again:
  * setupParquetFileReferenced
  */
 static void
-__setupParquetFileReferenced(parquet::arrow::SchemaField &schema_field,
+__setupParquetFileReferenced(const parquet::arrow::SchemaField &schema_field,
 							 std::vector<int> &referenced)
 {
 	if (schema_field.column_index >= 0)
@@ -291,11 +291,10 @@ __setupParquetFileReferenced(parquet::arrow::SchemaField &schema_field,
 
 static void
 setupParquetFileReferenced(const kern_data_store *kds_head,
-						   parquet::arrow::FileReader *parquet_file_reader,
+						   const parquet::arrow::SchemaManifest &manifest,
 						   std::vector<int> &referenced,
 						   std::vector<int> &revmap)
 {
-	auto	manifest = parquet_file_reader->manifest();
 	for (int j=0; j < kds_head->ncols; j++)
 	{
 		int		field_index = kds_head->colmeta[j].field_index;
@@ -767,6 +766,10 @@ __parquetReadOneRowGroup(const char *filename,
 				   filename,
 				   rv.status().ToString().c_str());
 		arrow_file_reader = std::move(rv.ValueOrDie());
+
+		/* enables thread-pool of the arrow file reader, if required */
+		if (kds_head->parquet_parallel_load)
+			arrow_file_reader->set_use_threads(true);
 	}
 
 	/*
@@ -779,8 +782,10 @@ __parquetReadOneRowGroup(const char *filename,
 		std::vector<int>	revmap;
 		arrow::Status		status;
 
-		setupParquetFileReferenced(kds_head, arrow_file_reader.get(),
-								   referenced, revmap);
+		setupParquetFileReferenced(kds_head,
+								   arrow_file_reader->manifest(),
+								   referenced,
+								   revmap);
 		status = arrow_file_reader->ReadRowGroup(row_group_id, referenced, &table);
 		if (!status.ok())
 			__Elog("failed on parquet::arrow::FileReader::ReadRowGroup('%s', %d): %s",
