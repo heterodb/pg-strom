@@ -3650,6 +3650,7 @@ readArrowFileInfo(const char *filename, ArrowFileInfo *af_info)
 		emsg = (char *)alloca(std::strlen(estr)+1);
 		strcpy(emsg, estr);
 	}
+	close(fdesc);
 	/* error report */
 	if (emsg)
 		ErrorReport(emsg);
