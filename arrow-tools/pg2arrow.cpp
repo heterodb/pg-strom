@@ -1950,7 +1950,13 @@ pgsql_define_arrow_schema(pgsqlHandlerVector &pgsql_handlers)
 	 * be referenced for compatibility checks by worker threads.
 	 */
 	if (!arrow_schema)
-		arrow_schema = arrow::schema(arrow_fields);
+	{
+		auto	metadata = std::make_shared<arrow::KeyValueMetadata>();
+
+		metadata->Append(std::string("sql_command"),
+						 std::string(raw_pgsql_command));
+		arrow_schema = arrow::schema(arrow_fields)->WithMetadata(metadata);
+	}
 	else
 	{
 		auto	prime_fields = arrow_schema->fields();
@@ -2733,7 +2739,10 @@ parquet_my_writer_props(void)
 static std::shared_ptr<parquet::ArrowWriterProperties>
 parquet_arrow_my_writer_props(void)
 {
-	return parquet::default_arrow_writer_properties();
+	parquet::ArrowWriterProperties::Builder builder;
+
+	builder.store_schema();
+	return builder.build();
 }
 
 /*

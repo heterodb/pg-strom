@@ -1469,7 +1469,7 @@ ArrowFileBuilderTable::AssignSchema(void)
 			Elog("multiple field '%s' exist", column->field_name.c_str());
 		columns_htable[column->field_name] = column;
 	}
-	arrow_schema = arrow::schema(arrow_fields);
+	arrow_schema = arrow::schema(arrow_fields)->WithMetadata(table_metadata);
 }
 
 std::string
@@ -1563,7 +1563,10 @@ ArrowFileBuilderTable::__parquetWriterProperties()
 std::shared_ptr<parquet::ArrowWriterProperties>
 ArrowFileBuilderTable::__parquetArrowProperties()
 {
-	return parquet::default_arrow_writer_properties();
+	parquet::ArrowWriterProperties::Builder builder;
+
+	builder.store_schema();
+	return builder.build();
 }
 
 void
