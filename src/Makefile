@@ -69,23 +69,23 @@ endif
 #
 # libarrow / libparquet
 #
-HAS_LIBARROW = $(shell pkgconf --exists arrow>/dev/null 2>&1   && echo -n yes)
-HAS_PARQUET  = $(shell pkgconf --exists parquet>/dev/null 2>&1 && echo -n yes)
-HAS_LIBNUMA  = $(shell pkgconf --exists numa>/dev/null 2>&1   && echo -n yes)
+HAS_LIBARROW = $(shell $(PKGCONF) --exists arrow>/dev/null 2>&1   && echo -n yes)
+HAS_PARQUET  = $(shell $(PKGCONF) --exists parquet>/dev/null 2>&1 && echo -n yes)
+HAS_LIBNUMA  = $(shell $(PKGCONF) --exists numa>/dev/null 2>&1   && echo -n yes)
 ifeq ($(HAS_LIBARROW),yes)
 PGSTROM_FLAGS += -DHAS_LIBARROW=1
-PG_CXXFLAGS += $(shell pkgconf --cflags arrow)
+PG_CXXFLAGS += $(shell $(PKGCONF) --cflags arrow)
 ifeq ($(HAS_PARQUET),yes)
 PGSTROM_FLAGS += -DHAS_PARQUET=1
-PG_CXXFLAGS += $(shell pkgconf --cflags parquet)
-SHLIB_LINK += $(shell pkgconf --libs parquet)
-PARQUET_LIBDIR = $(shell pkgconf --variable=libdir parquet)
+PG_CXXFLAGS += $(shell $(PKGCONF) --cflags parquet)
+SHLIB_LINK += $(shell $(PKGCONF) --libs parquet)
+PARQUET_LIBDIR = $(shell $(PKGCONF) --variable=libdir parquet)
 ifneq ($(PARQUET_LIBDIR),)
 SHLIB_LINK += -Wl,-rpath,$(PARQUET_LIBDIR)
 endif
 else
-SHLIB_LINK += $(shell pkgconf --libs arrow)
-ARROW_LIBDIR = $(shell pkgconf --variable=libdir arrow)
+SHLIB_LINK += $(shell $(PKGCONF) --libs arrow)
+ARROW_LIBDIR = $(shell $(PKGCONF) --variable=libdir arrow)
 ifneq ($(ARROW_LIBDIR),)
 SHLIB_LINK += -Wl,-rpath,$(ARROW_LIBDIR)
 endif
@@ -93,8 +93,8 @@ endif
 endif
 ifeq ($(HAS_LIBNUMA),yes)
 PGSTROM_FLAGS += -DHAS_LIBNUMA=1
-PG_CXXFLAGS += $(shell pkgconf --cflags numa)
-SHLIB_LINK += $(shell pkgconf --libs numa)
+PG_CXXFLAGS += $(shell $(PKGCONF) --cflags numa)
+SHLIB_LINK += $(shell $(PKGCONF) --libs numa)
 endif
 
 #

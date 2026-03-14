@@ -6,12 +6,9 @@ include ../Makefile.common
 #
 # Makefile for arrow-tools
 #
-CXX          ?= g++
-PG_CONFIG    ?= pg_config
-
 HAS_PG_CONFIG = $(shell which $(PG_CONFIG)>/dev/null 2>&1 && echo yes)
-HAS_LIBARROW = $(shell pkgconf --exists arrow>/dev/null 2>&1 && echo -n yes)
-HAS_PARQUET = $(shell pkgconf --exists parquet>/dev/null 2>&1 && echo -n yes)
+HAS_LIBARROW = $(shell $(PKGCONF) --exists arrow>/dev/null 2>&1 && echo -n yes)
+HAS_PARQUET = $(shell $(PKGCONF) --exists parquet>/dev/null 2>&1 && echo -n yes)
 
 ifeq ($(HAS_LIBARROW),yes)
 ALL_PROGS = vcf2arrow tsv2arrow arrow2csv
@@ -42,18 +39,18 @@ endif
 PG2ARROW_LDFLAGS = $(shell $(PG_CONFIG) --ldflags) \
                 -L $(shell $(PG_CONFIG) --libdir) -lpq
 ifeq ($(HAS_LIBARROW),yes)
-CPPFLAGS += -DHAS_LIBARROW=1 $(shell pkgconf --cflags arrow)
+CPPFLAGS += -DHAS_LIBARROW=1 $(shell $(PKGCONF) --cflags arrow)
 ifeq ($(HAS_PARQUET),yes)
-CPPFLAGS += -DHAS_PARQUET=1  $(shell pkgconf --cflags parquet)
-PG2ARROW_LDFLAGS  += $(shell pkgconf --libs parquet)
-VCF2ARROW_LDFLAGS += $(shell pkgconf --libs parquet)
-TSV2ARROW_LDFLAGS += $(shell pkgconf --libs parquet)
-ARROW2CSV_LDFLAGS += $(shell pkgconf --libs parquet)
+CPPFLAGS += -DHAS_PARQUET=1  $(shell $(PKGCONF) --cflags parquet)
+PG2ARROW_LDFLAGS  += $(shell $(PKGCONF) --libs parquet)
+VCF2ARROW_LDFLAGS += $(shell $(PKGCONF) --libs parquet)
+TSV2ARROW_LDFLAGS += $(shell $(PKGCONF) --libs parquet)
+ARROW2CSV_LDFLAGS += $(shell $(PKGCONF) --libs parquet)
 else
-PG2ARROW_LDFLAGS  += $(shell pkgconf --libs arrow)
-VCF2ARROW_LDFLAGS += $(shell pkgconf --libs arrow)
-TSV2ARROW_LDFLAGS += $(shell pkgconf --libs arrow)
-ARROW2CSV_LDFLAGS += $(shell pkgconf --libs arrow)
+PG2ARROW_LDFLAGS  += $(shell $(PKGCONF) --libs arrow)
+VCF2ARROW_LDFLAGS += $(shell $(PKGCONF) --libs arrow)
+TSV2ARROW_LDFLAGS += $(shell $(PKGCONF) --libs arrow)
+ARROW2CSV_LDFLAGS += $(shell $(PKGCONF) --libs arrow)
 endif
 endif
 CPPFLAGS += -std=c++20 $(CFLAGS) -Wno-sign-compare
