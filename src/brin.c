@@ -548,7 +548,6 @@ pgstromBrinIndexExecReset(pgstromTaskState *pts)
 {
 	/* See, ExecReScanBitmapIndexScan */
 	BrinIndexState *br_state = pts->br_state;
-	BrinIndexResults *br_results = br_state->brinResults;
 
 	if (br_state->NumRuntimeKeys != 0)
 	{
@@ -563,9 +562,18 @@ pgstromBrinIndexExecReset(pgstromTaskState *pts)
 	br_state->curr_chunk_id = 0;
 	br_state->curr_block_id = UINT_MAX;
 
-	br_results->build_status = 0;
-	br_results->nitems   = 0;
-	pg_atomic_init_u64(&br_results->index, 0);
+	/*
+	 * NOTE: In non-parallel execution, br_state->brinResults is initialized
+	 * on the first invocation of the executor, so when ExecReset is called,
+	 * a valid object may not have been allocated yet.
+	 */
+	if (br_state->brinResults)
+	{
+		BrinIndexResults *br_results = br_state->brinResults;
+		br_results->build_status = 0;
+		br_results->nitems   = 0;
+		pg_atomic_init_u64(&br_results->index, 0);
+	}
 }
 
 /*
