@@ -61,7 +61,12 @@ install: $(GEM_PACKAGE)
 uninstall:
 	$(RUBY_GEM) uninstall fluent-plugin-arrow-file
 
+test:
+	@$(RUBY_RAKE) test 2>&1 | grep -v -E "(literal string will be frozen|warning: assigned but unused variable)"
+
 clean:
 	rm -rf $(EXT_MODULE) $(GEM_PACKAGE) tmp \
 	       $(addprefix ext/arrow_file_write/,$(notdir $(EXT_SOURCE))) \
            $(BIN_MODULE) $(TAR_NAME)*
+
+.PHONY: gem tarball rpm install uninstall test clean

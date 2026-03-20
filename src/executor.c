@@ -3,8 +3,8 @@
  *
  * Common routines related to query execution phase
  * ----
- * Copyright 2011-2023 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014-2023 (C) PG-Strom Developers Team
+ * Copyright 2011-2026 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2026 (C) PG-Strom Developers Team
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the PostgreSQL License.
@@ -425,98 +425,53 @@ __build_session_param_info(pgstromTaskState *pts,
 {
 	pgstromPlanInfo *pp_info = pts->pp_info;
 	ExprContext	   *econtext = pts->css.ss.ps.ps_ExprContext;
-	ParamListInfo	param_info = econtext->ecxt_param_list_info;
+	uint32_t		param_id = 0;
 	ListCell	   *lc;
 
-	Assert(param_info != NULL);
-	session->nparams = param_info->numParams;
+	session->nparams = list_length(pp_info->used_params);
 	foreach (lc, pp_info->used_params)
 	{
-		Param	   *param = lfirst(lc);
-		Datum		param_value;
-		bool		param_isnull;
+		Expr	   *expr = lfirst(lc);
+		ExprState  *expr_state = ExecInitExpr(expr, NULL);
+		Datum		datum;
+		bool		isnull;
 		uint32_t	offset;
 
-		Assert(param->paramid >= 0 &&
-			   param->paramid < session->nparams);
-		if (param->paramkind == PARAM_EXEC)
-		{
-			/* See ExecEvalParamExec */
-			ParamExecData  *prm = &(econtext->ecxt_param_exec_vals[param->paramid]);
-
-			if (prm->execPlan)
-			{
-				/* Parameter not evaluated yet, so go do it */
-				ExecSetParamPlan(prm->execPlan, econtext);
-				/* ExecSetParamPlan should have processed this param... */
-				Assert(prm->execPlan == NULL);
-			}
-			param_isnull = prm->isnull;
-			param_value  = prm->value;
-		}
-		else if (param->paramkind == PARAM_EXTERN)
-		{
-			/* See ExecEvalParamExtern */
-			ParamExternData *prm, prmData;
-
-			if (param_info->paramFetch != NULL)
-				prm = param_info->paramFetch(param_info,
-											 param->paramid,
-											 false, &prmData);
-			else
-				prm = &param_info->params[param->paramid - 1];
-			if (!OidIsValid(prm->ptype))
-				elog(ERROR, "no value found for parameter %d", param->paramid);
-			if (prm->ptype != param->paramtype)
-				elog(ERROR, "type of parameter %d (%s) does not match that when preparing the plan (%s)",
-					 param->paramid,
-					 format_type_be(prm->ptype),
-					 format_type_be(param->paramtype));
-			param_isnull = prm->isnull;
-			param_value  = prm->value;
-		}
-		else
-		{
-			elog(ERROR, "Bug? unexpected parameter kind: %d",
-				 (int)param->paramkind);
-		}
-
-		if (param_isnull)
+		/* expr should not contain any Var nodes */
+		Assert(!contain_var_clause((Node *)expr));
+		datum = ExecEvalExprSwitchContext(expr_state, econtext, &isnull);
+		if (isnull)
 			offset = 0;
 		else
 		{
+			Oid		type_oid = exprType((Node *)expr);
 			int16	typlen;
 			bool	typbyval;
 
-			get_typlenbyval(param->paramtype, &typlen, &typbyval);
+			get_typlenbyval(type_oid, &typlen, &typbyval);
 			if (typbyval)
 			{
-				offset = __appendBinaryStringInfo(buf,
-												  (char *)&param_value,
-												  typlen);
+				offset = __appendBinaryStringInfo(buf, (char *)&datum, typlen);
 			}
 			else if (typlen > 0)
 			{
-				offset = __appendBinaryStringInfo(buf,
-												  DatumGetPointer(param_value),
-												  typlen);
+				offset = __appendBinaryStringInfo(buf, DatumGetPointer(datum), typlen);
 			}
 			else if (typlen == -1)
 			{
-				struct varlena *temp = PG_DETOAST_DATUM(param_value);
+				struct varlena *temp = PG_DETOAST_DATUM(datum);
 
 				offset = __appendBinaryStringInfo(buf, temp, VARSIZE(temp));
-				if (param_value != PointerGetDatum(temp))
+				if (datum != PointerGetDatum(temp))
 					pfree(temp);
 			}
 			else
 			{
 				elog(ERROR, "Not a supported data type for kernel parameter: %s",
-					 format_type_be(param->paramtype));
+					 format_type_be(type_oid));
 			}
 		}
-		Assert(param->paramid >= 0 && param->paramid < session->nparams);
-		session->poffset[param->paramid] = offset;
+		session->poffset[param_id++] = offset;
 	}
 }
 
@@ -663,9 +618,7 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 {
 	pgstromSharedState *ps_state = pts->ps_state;
 	pgstromPlanInfo *pp_info = pts->pp_info;
-	ExprContext	   *econtext = pts->css.ss.ps.ps_ExprContext;
-	ParamListInfo	param_info = econtext->ecxt_param_list_info;
-	uint32_t		nparams = (param_info ? param_info->numParams : 0);
+	uint32_t		nparams = list_length(pp_info->used_params);
 	uint32_t		session_sz;
 	kern_session_info *session;
 	XpuCommand	   *xcmd;
@@ -679,7 +632,7 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 	session = alloca(session_sz);
 	memset(session, 0, session_sz);
 	__appendZeroStringInfo(&buf, session_sz);
-	if (param_info)
+	if (nparams > 0)
 		__build_session_param_info(pts, session, &buf);
 	if (pp_info->kvars_deflist != NIL)
 		__build_session_kvars_defs(pts, session, &buf);
@@ -2367,7 +2320,7 @@ pgstromSharedStateShutdownDSM(CustomScanState *node)
 {
 	pgstromTaskState   *pts = (pgstromTaskState *) node;
 	pgstromSharedState *src_state = pts->ps_state;
-	pgstromSharedState *dst_state;
+	pgstromSharedState *dst_state = NULL;
 	EState			   *estate = node->ss.ps.state;
 
 	if (pts->br_state)
@@ -2383,6 +2336,27 @@ pgstromSharedStateShutdownDSM(CustomScanState *node)
 		dst_state = MemoryContextAllocZero(estate->es_query_cxt, sz);
 		memcpy(dst_state, src_state, sz);
 		pts->ps_state = dst_state;
+	}
+	/*
+	 * NOTE: XpuConnection::scan_repeat_sync_control is initialized to point
+	 * a variable on DSM segment to share current status of relation scan.
+	 * When ShutdownDSM callback is invoked, no other worker processes are
+	 * working, thus it is obviously safe to switch the control variable.
+	 *
+	 * Please note that ShutdownDSM can be called before execution end,
+	 * when DECLARE CURSOR + FETCH command is used, for example.
+	 * See, issue #1006
+	 */
+	if (pts->conn)
+	{
+		XpuConnection *conn = pts->conn;
+		uint64_t	control;
+
+		pthreadMutexLock(&conn->mutex);
+		control = pg_atomic_read_u64(conn->scan_repeat_sync_control);
+		pg_atomic_write_u64(&pts->ps_state->scan_repeat_sync_control, control);
+		conn->scan_repeat_sync_control = &pts->ps_state->scan_repeat_sync_control;
+		pthreadMutexUnlock(&conn->mutex);
 	}
 	/*
 	 * SELECT-INTO Direct mode needs to update processed tuples

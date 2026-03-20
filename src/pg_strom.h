@@ -3,8 +3,8 @@
  *
  * Header file of pg_strom module
  * --
- * Copyright 2011-2023 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014-2023 (C) PG-Strom Developers Team
+ * Copyright 2011-2026 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2026 (C) PG-Strom Developers Team
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the PostgreSQL License.
@@ -142,6 +142,9 @@
 #include <libgen.h>
 #include <limits.h>
 #include <math.h>
+#ifdef HAS_LIBNUMA
+#include <numa.h>
+#endif /* HAS_LIBNUMA */
 #include <pthread.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
@@ -171,7 +174,6 @@ typedef struct GpuDevAttributes
 	uint32_t	NVIDIA_KMOD_VERSION;
 	uint32_t	NVIDIA_FS_KMOD_VERSION;
 	int			CUDA_DRIVER_VERSION;
-	int32		NUMA_NODE_ID;
 	int32		DEV_ID;
 	char		DEV_NAME[256];
 	char		DEV_UUID[2 * sizeof(CUuuid) + 8];	/* human readable */
@@ -985,6 +987,7 @@ extern void		pgstrom_init_gpu_sort(void);
 /*
  * arrow_fdw.c and arrow_read.c
  */
+extern int		arrow_metadata_cache_size_kb;		/* GUC */
 extern bool		baseRelIsArrowFdw(RelOptInfo *baserel);
 extern bool 	RelationIsArrowFdw(Relation frel);
 extern gpumask_t GetOptimalGpusForArrowFdw(PlannerInfo *root,

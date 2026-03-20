@@ -20,18 +20,23 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <string>
+#include <syslog.h>
 #include "float2.h"
 
 using	arrowSchema		= std::shared_ptr<arrow::Schema>;
 using	arrowField		= std::shared_ptr<arrow::Field>;
 using	arrowBuilder	= std::shared_ptr<arrow::ArrayBuilder>;
 using	arrowArray		= std::shared_ptr<arrow::Array>;
+using	arrowMetadata	= std::shared_ptr<arrow::KeyValueMetadata>;
 
 #define Min(a,b)		((a) < (b) ? (a) : (b))
 #define Max(a,b)		((a) > (b) ? (a) : (b))
 #define Elog(fmt,...)							\
 	rb_raise(rb_eException, "%s:%d " fmt,		\
 			 __FILE__, __LINE__, ##__VA_ARGS__)
+#define Info(fmt,...)								\
+	syslog(LOG_USER, "[fluentd-arrow %s:%d] " fmt,	\
+		   __FILE__, __LINE__, ##__VA_ARGS__)
 
 static inline void *
 palloc(size_t sz)
@@ -153,6 +158,7 @@ public:
 	arrow::Compression::type compression;	/* valid only if parquet-mode */
 	arrowBuilder	arrow_builder;
 	arrowArray		arrow_array;
+	arrowMetadata	metadata;
 	arrowFileWriteColumn(const char *__attname,
 						 const char *__typname,
 						 bool __stats_enabled,
@@ -165,6 +171,7 @@ public:
 		tag_column = false;
 		stats_enabled = __stats_enabled;
 		compression = __compression;
+		metadata = std::make_shared<arrow::KeyValueMetadata>();
 	}
 	virtual void	appendStats(std::shared_ptr<arrow::KeyValueMetadata> custom_metadata) = 0;
 	virtual void	putValue(VALUE datum) = 0;
@@ -282,10 +289,10 @@ ARROW_FILE_WRITE_FIELD_TEMPLATE(Time_sec, Time32Builder, time32(arrow::TimeUnit:
 ARROW_FILE_WRITE_FIELD_TEMPLATE(Time_ms,  Time32Builder, time32(arrow::TimeUnit::MILLI),  int32_t);
 ARROW_FILE_WRITE_FIELD_TEMPLATE(Time_us,  Time64Builder, time64(arrow::TimeUnit::MICRO),  int64_t);
 ARROW_FILE_WRITE_FIELD_TEMPLATE(Time_ns,  Time64Builder, time64(arrow::TimeUnit::NANO),   int64_t);
-ARROW_FILE_WRITE_FIELD_TEMPLATE(Timestamp_sec, TimestampBuilder, timestamp(arrow::TimeUnit::SECOND), int64_t);
-ARROW_FILE_WRITE_FIELD_TEMPLATE(Timestamp_ms,  TimestampBuilder, timestamp(arrow::TimeUnit::MILLI),  int64_t);
-ARROW_FILE_WRITE_FIELD_TEMPLATE(Timestamp_us,  TimestampBuilder, timestamp(arrow::TimeUnit::MICRO),  int64_t);
-ARROW_FILE_WRITE_FIELD_TEMPLATE(Timestamp_ns,  TimestampBuilder, timestamp(arrow::TimeUnit::NANO),   int64_t);
+ARROW_FILE_WRITE_FIELD_TEMPLATE(Timestamp_sec, TimestampBuilder, timestamp(arrow::TimeUnit::SECOND, "UTC"), int64_t);
+ARROW_FILE_WRITE_FIELD_TEMPLATE(Timestamp_ms,  TimestampBuilder, timestamp(arrow::TimeUnit::MILLI, "UTC"),  int64_t);
+ARROW_FILE_WRITE_FIELD_TEMPLATE(Timestamp_us,  TimestampBuilder, timestamp(arrow::TimeUnit::MICRO, "UTC"),  int64_t);
+ARROW_FILE_WRITE_FIELD_TEMPLATE(Timestamp_ns,  TimestampBuilder, timestamp(arrow::TimeUnit::NANO, "UTC"),   int64_t);
 
 bool
 arrowFileWriteColumnBoolean::fetchValue(VALUE datum)
@@ -474,6 +481,64 @@ __tryFetchEventTime(VALUE datum,
 	return false;
 }
 
+/*
+ * Helper function to parse datetime string and extract time components
+ * Returns a Time object that can be used with __tryFetchEventTime
+ */
+static VALUE
+__parseAndExtractDateTime(VALUE datum, bool extract_date_only, bool extract_time_only)
+{
+	VALUE sval = rb_String(datum);
+	std::string date_str(RSTRING_PTR(sval), RSTRING_LEN(sval));
+	
+	if (extract_date_only)
+	{
+		/* For Date types, extract only YYYY-MM-DD */
+		size_t sep = date_str.find_first_of("T ");
+		if (sep != std::string::npos)
+			date_str = date_str.substr(0, sep);
+	}
+	
+	/* Check if timezone information is present */
+	bool has_timezone = false;
+	size_t len = date_str.length();
+	for (size_t i = 0; i < len; i++)
+	{
+		char c = date_str[i];
+		if (c == '+' || c == '-' || c == 'Z')
+		{
+			/* Found timezone offset or Z (UTC) */
+			has_timezone = true;
+			break;
+		}
+		if (i > 0 && date_str[i] == ' ' && i + 3 < len)
+		{
+			/* Check for timezone abbreviation like JST, UTC, PST, etc */
+			if (isupper(date_str[i+1]))
+			{
+				has_timezone = true;
+				break;
+			}
+		}
+	}
+	
+	/* If no timezone specified, assume UTC to avoid locale-dependent behavior */
+	if (!has_timezone && !extract_date_only)
+		date_str += " UTC";
+	
+	/* Parse as Time object */
+	VALUE time_str = rb_str_new(date_str.c_str(), date_str.length());
+	VALUE time_obj = rb_funcall(rb_cTime, rb_intern("parse"), 1, time_str);
+	
+	if (extract_time_only)
+	{
+		/* For Time types, we just need the Time object - conversion to time-of-day
+		 * will be done by the caller using (sec % SECS_PER_DAY) */
+	}
+	
+	return time_obj;
+}
+
 template <typename B_TYPE, typename A_TYPE, typename C_TYPE>
 static inline C_TYPE
 __fetchRubyDateTimeValue(arrowBuilder arrow_builder,
@@ -507,7 +572,17 @@ arrowFileWriteColumnDate_sec::fetchValue(VALUE datum)
 	uint64_t	sec, nsec;
 
 	if (!__tryFetchEventTime(datum, &sec, &nsec))
-		return FETCH_RUBY_DATE_TIME_VALUE(Date32, int32_t);
+	{
+		/* Try parsing as datetime string and extract date part */
+		if (TYPE(datum) == T_STRING)
+		{
+			datum = __parseAndExtractDateTime(datum, true, false);
+			if (!__tryFetchEventTime(datum, &sec, &nsec))
+				return FETCH_RUBY_DATE_TIME_VALUE(Date32, int32_t);
+		}
+		else
+			return FETCH_RUBY_DATE_TIME_VALUE(Date32, int32_t);
+	}
 	return (int32_t)(sec / SECS_PER_DAY);
 }
 
@@ -517,7 +592,16 @@ arrowFileWriteColumnDate_ms::fetchValue(VALUE datum)
 	uint64_t	sec, nsec;
 
 	if (!__tryFetchEventTime(datum, &sec, &nsec))
-		return FETCH_RUBY_DATE_TIME_VALUE(Date64, int64_t);
+	{
+		if (TYPE(datum) == T_STRING)
+		{
+			datum = __parseAndExtractDateTime(datum, true, false);
+			if (!__tryFetchEventTime(datum, &sec, &nsec))
+				return FETCH_RUBY_DATE_TIME_VALUE(Date64, int64_t);
+		}
+		else
+			return FETCH_RUBY_DATE_TIME_VALUE(Date64, int64_t);
+	}
 	return (sec * 1000L) + (nsec / 1000000L);
 }
 
@@ -527,7 +611,16 @@ arrowFileWriteColumnTime_sec::fetchValue(VALUE datum)
 	uint64_t	sec, nsec;
 
 	if (!__tryFetchEventTime(datum, &sec, &nsec))
-		return FETCH_RUBY_DATE_TIME_VALUE(Time32, int32_t);
+	{
+		if (TYPE(datum) == T_STRING)
+		{
+			datum = __parseAndExtractDateTime(datum, false, true);
+			if (!__tryFetchEventTime(datum, &sec, &nsec))
+				return FETCH_RUBY_DATE_TIME_VALUE(Time32, int32_t);
+		}
+		else
+			return FETCH_RUBY_DATE_TIME_VALUE(Time32, int32_t);
+	}
 	return (int32_t)(sec % SECS_PER_DAY);
 }
 
@@ -537,7 +630,16 @@ arrowFileWriteColumnTime_ms::fetchValue(VALUE datum)
 	uint64_t	sec, nsec;
 
 	if (!__tryFetchEventTime(datum, &sec, &nsec))
-		return FETCH_RUBY_DATE_TIME_VALUE(Time32, int32_t);
+	{
+		if (TYPE(datum) == T_STRING)
+		{
+			datum = __parseAndExtractDateTime(datum, false, true);
+			if (!__tryFetchEventTime(datum, &sec, &nsec))
+				return FETCH_RUBY_DATE_TIME_VALUE(Time32, int32_t);
+		}
+		else
+			return FETCH_RUBY_DATE_TIME_VALUE(Time32, int32_t);
+	}
 	return (sec % SECS_PER_DAY) * 1000 + (nsec / 1000000);
 }
 
@@ -547,7 +649,16 @@ arrowFileWriteColumnTime_us::fetchValue(VALUE datum)
 	uint64_t	sec, nsec;
 
 	if (!__tryFetchEventTime(datum, &sec, &nsec))
-		return FETCH_RUBY_DATE_TIME_VALUE(Time64, int64_t);
+	{
+		if (TYPE(datum) == T_STRING)
+		{
+			datum = __parseAndExtractDateTime(datum, false, true);
+			if (!__tryFetchEventTime(datum, &sec, &nsec))
+				return FETCH_RUBY_DATE_TIME_VALUE(Time64, int64_t);
+		}
+		else
+			return FETCH_RUBY_DATE_TIME_VALUE(Time64, int64_t);
+	}
 	return (sec % SECS_PER_DAY) * 1000000L + (nsec / 1000);
 }
 
@@ -557,7 +668,16 @@ arrowFileWriteColumnTime_ns::fetchValue(VALUE datum)
 	uint64_t	sec, nsec;
 
 	if (!__tryFetchEventTime(datum, &sec, &nsec))
-		return FETCH_RUBY_DATE_TIME_VALUE(Time64, int64_t);
+	{
+		if (TYPE(datum) == T_STRING)
+		{
+			datum = __parseAndExtractDateTime(datum, false, true);
+			if (!__tryFetchEventTime(datum, &sec, &nsec))
+				return FETCH_RUBY_DATE_TIME_VALUE(Time64, int64_t);
+		}
+		else
+			return FETCH_RUBY_DATE_TIME_VALUE(Time64, int64_t);
+	}
 	return (sec % SECS_PER_DAY) * 1000000000L + nsec;
 }
 
@@ -567,7 +687,17 @@ arrowFileWriteColumnTimestamp_sec::fetchValue(VALUE datum)
 	uint64_t	sec, nsec;
 
 	if (!__tryFetchEventTime(datum, &sec, &nsec))
-		return FETCH_RUBY_DATE_TIME_VALUE(Timestamp, int64_t);
+	{
+		/* Try parsing as datetime string */
+		if (TYPE(datum) == T_STRING)
+		{
+			datum = __parseAndExtractDateTime(datum, false, false);
+			if (!__tryFetchEventTime(datum, &sec, &nsec))
+				return FETCH_RUBY_DATE_TIME_VALUE(Timestamp, int64_t);
+		}
+		else
+			return FETCH_RUBY_DATE_TIME_VALUE(Timestamp, int64_t);
+	}
 	return sec;
 }
 
@@ -577,7 +707,17 @@ arrowFileWriteColumnTimestamp_ms::fetchValue(VALUE datum)
 	uint64_t	sec, nsec;
 
 	if (!__tryFetchEventTime(datum, &sec, &nsec))
-		return FETCH_RUBY_DATE_TIME_VALUE(Timestamp, int64_t);
+	{
+		/* Try parsing as datetime string */
+		if (TYPE(datum) == T_STRING)
+		{
+			datum = __parseAndExtractDateTime(datum, false, false);
+			if (!__tryFetchEventTime(datum, &sec, &nsec))
+				return FETCH_RUBY_DATE_TIME_VALUE(Timestamp, int64_t);
+		}
+		else
+			return FETCH_RUBY_DATE_TIME_VALUE(Timestamp, int64_t);
+	}
 	return (sec * 1000) + (nsec / 1000000);
 }
 
@@ -587,7 +727,17 @@ arrowFileWriteColumnTimestamp_us::fetchValue(VALUE datum)
 	uint64_t	sec, nsec;
 
 	if (!__tryFetchEventTime(datum, &sec, &nsec))
-		return FETCH_RUBY_DATE_TIME_VALUE(Timestamp, int64_t);
+	{
+		/* Try parsing as datetime string */
+		if (TYPE(datum) == T_STRING)
+		{
+			datum = __parseAndExtractDateTime(datum, false, false);
+			if (!__tryFetchEventTime(datum, &sec, &nsec))
+				return FETCH_RUBY_DATE_TIME_VALUE(Timestamp, int64_t);
+		}
+		else
+			return FETCH_RUBY_DATE_TIME_VALUE(Timestamp, int64_t);
+	}
 	return (sec * 1000000) + (nsec / 1000);
 }
 
@@ -597,7 +747,17 @@ arrowFileWriteColumnTimestamp_ns::fetchValue(VALUE datum)
 	uint64_t	sec, nsec;
 
 	if (!__tryFetchEventTime(datum, &sec, &nsec))
-		return FETCH_RUBY_DATE_TIME_VALUE(Timestamp, int64_t);
+	{
+		/* Try parsing as datetime string */
+		if (TYPE(datum) == T_STRING)
+		{
+			datum = __parseAndExtractDateTime(datum, false, false);
+			if (!__tryFetchEventTime(datum, &sec, &nsec))
+				return FETCH_RUBY_DATE_TIME_VALUE(Timestamp, int64_t);
+		}
+		else
+			return FETCH_RUBY_DATE_TIME_VALUE(Timestamp, int64_t);
+	}
 	return (sec * 1000000000L) + nsec;
 }
 
@@ -632,17 +792,20 @@ public:
 				end++;
 			if (*end == ',')
 			{
-				dscale = ival;
+				/* Decimal(precision, scale) */
+				dprecision = ival;
 				ival = strtol(end+1, &end, 10);
 				while (isspace(*end))
 					end++;
 				if (*end != ')')
 					Elog("invalid Decimal128 precision and scale '%s'", __atttype);
-				dprecision = ival;
+				dscale = ival;
 			}
 			else if (*end == ')')
 			{
-				dscale = ival;
+				/* Decimal(precision) - use default scale */
+				dprecision = ival;
+				end++;
 			}
 			else
 				Elog("invalid Decimal128 precision and scale '%s'", __atttype);
@@ -1033,7 +1196,7 @@ arrowFileWrite::OpenFile(std::string &filename)
 			filename += temp;
 		}
 		/* open the output file */
-		fdesc = open(filename.c_str(), O_RDWR | O_CREAT | O_EXCL | 0600);
+		fdesc = open(filename.c_str(), O_RDWR | O_CREAT | O_EXCL, 0600);
 		if (fdesc < 0 && errno != EEXIST)
 			Elog("failed on open('%s'): %m", filename.c_str());
 	}
@@ -1356,6 +1519,8 @@ __arrowFileWriteParseSchemaDefs(arrowFileWrite *fw_state, VALUE __schema_defs)
 		char   *field_name = tok;
 		char   *field_type;
 		char   *field_extra;
+		bool	ts_column = false;
+		bool	tag_column = false;
 		int		stats_enabled = -1;
 		arrow::Compression::type compression = fw_state->default_compression;
 
@@ -1375,9 +1540,11 @@ __arrowFileWriteParseSchemaDefs(arrowFileWrite *fw_state, VALUE __schema_defs)
 				 __tok = strtok_r(NULL, ";", &__saveptr))
 			{
 				__tok = __trim(__tok);
-				if (strcmp(__tok, "stats_enabled") == 0)
+				if (strcmp(__tok, "stats_enabled") == 0 ||
+					strcmp(__tok, "stat_enabled") == 0)
 					stats_enabled = 1;
-				else if (strcmp(__tok, "stats_disabled") == 0)
+				else if (strcmp(__tok, "stats_disabled") == 0 ||
+						 strcmp(__tok, "stat_disabled") == 0)
 					stats_enabled = 0;
 				else
 				{
@@ -1402,8 +1569,13 @@ __arrowFileWriteParseSchemaDefs(arrowFileWrite *fw_state, VALUE __schema_defs)
 		if (stats_enabled < 0)
 			stats_enabled = (fw_state->parquet_mode ? 1 : 0);
 		assert(stats_enabled == 0 || stats_enabled == 1);
+		if (fw_state->ts_column && strcasecmp(fw_state->ts_column, field_name) == 0)
+			ts_column = true;
+		if (fw_state->tag_column && strcasecmp(fw_state->tag_column, field_name) == 0)
+			tag_column = true;
 
-		if (strcasecmp(field_type, "bool") == 0)
+		if (strcasecmp(field_type, "bool") == 0 ||
+			strcasecmp(field_type, "boolean") == 0)
 			arrow_column = std::make_shared<arrowFileWriteColumnBoolean>(field_name,
 																		 stats_enabled,
 																		 compression);
@@ -1511,15 +1683,25 @@ __arrowFileWriteParseSchemaDefs(arrowFileWrite *fw_state, VALUE __schema_defs)
 																	  stats_enabled,
 																	  compression);
 		else if (strcasecmp(field_type, "ipaddr4") == 0)
+		{
 			arrow_column = std::make_shared<arrowFileWriteColumnIpAddr4>(field_name,
 																		 stats_enabled,
 																		 compression);
+			arrow_column->metadata->Append(std::string("pg_type"),
+										   std::string("inet"));
+		}
 		else if (strcasecmp(field_type, "ipaddr6") == 0)
+		{
 			arrow_column = std::make_shared<arrowFileWriteColumnIpAddr6>(field_name,
 																		 stats_enabled,
 																		 compression);
+			arrow_column->metadata->Append(std::string("pg_type"),
+										   std::string("inet"));
+		}
 		else
 			Elog("ArrowFileWrite: not a supported type '%s' for '%s'", field_type, field_name);
+		arrow_column->ts_column = ts_column;
+		arrow_column->tag_column = tag_column;
 		fw_state->arrow_columns.push_back(arrow_column);
 	}
 }
@@ -1547,7 +1729,10 @@ arrowFileWrite__initialize(VALUE __self,
 		{
 			auto	column = fw_state->arrow_columns[i];
 			auto	builder = column->arrow_builder;
-			arrow_fields.push_back(arrow::field(column->attname, builder->type()));
+			arrow_fields.push_back(arrow::field(column->attname,
+												builder->type(),
+												true,	/* nullable */
+												column->metadata));
 		}
 		fw_state->arrow_schema = arrow::schema(arrow_fields);
 	}

@@ -58,7 +58,7 @@ declare -r regression_diff_file_path="${script_path}/regression.diffs"
 
 echo "Files ${arrow_file_path} and ${expected_file_path} differ" >> ${regression_diff_file_path}
 echo "------------------------" >> ${regression_diff_file_path}
-diff <(${arrow2csv_path} ${ARROW2CSV_OPTION} ${arrow_file_path}) <(cat ${expected_file_path}) | tee -a ${regression_diff_file_path}
+diff -b <(${arrow2csv_path} ${ARROW2CSV_OPTION} ${arrow_file_path}) <(cat ${expected_file_path}) | tee -a ${regression_diff_file_path}
 if [[ ${PIPESTATUS[0]} -ne 0 ]]; then
     echo "Not match"
     exit 1

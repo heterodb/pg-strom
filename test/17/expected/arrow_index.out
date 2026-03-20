@@ -48,8 +48,8 @@ OPTIONS (file :'test_arrow_index_path');
 EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF,BUFFERS OFF)
 SELECT * FROM regtest_arrow_index_temp.regtest_arrow
  WHERE date_num=(SELECT date_num FROM regtest_arrow_index_temp.target_num);
-                                              QUERY PLAN                                              
-------------------------------------------------------------------------------------------------------
+                                                   QUERY PLAN                                                    
+-----------------------------------------------------------------------------------------------------------------
  Gather (actual rows=269 loops=1)
    Workers Planned: 2
    Workers Launched: 2
@@ -59,7 +59,7 @@ SELECT * FROM regtest_arrow_index_temp.regtest_arrow
          Filter: (date_num = (InitPlan 1).col1)
          Rows Removed by Filter: 103473
          referenced: id, int_num, float_num, half_num, decimal_num, date_num, time_num, timestamp_num
-         Stats-Hint: (date_num = $0)  [loaded: 1, skipped: 3]
+         Stats-Hint: (date_num OPERATOR(pg_catalog.=) 'Param(PARAM_EXEC, ID: 1)'::text)  [loaded: 1, skipped: 3]
          file0: test_arrow_index.data (read: 51.50MB, size: 51.50MB)
 (11 rows)
 
@@ -102,8 +102,8 @@ RESET pg_strom.enabled;
 EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF,BUFFERS OFF)
 SELECT * FROM regtest_arrow_index_temp.regtest_arrow
  WHERE int_num=(SELECT int_num FROM regtest_arrow_index_temp.target_num);
-                                              QUERY PLAN                                              
-------------------------------------------------------------------------------------------------------
+                                                   QUERY PLAN                                                   
+----------------------------------------------------------------------------------------------------------------
  Gather (actual rows=1 loops=1)
    Workers Planned: 2
    Workers Launched: 2
@@ -113,7 +113,7 @@ SELECT * FROM regtest_arrow_index_temp.regtest_arrow
          Filter: (int_num = (InitPlan 1).col1)
          Rows Removed by Filter: 103563
          referenced: id, int_num, float_num, half_num, decimal_num, date_num, time_num, timestamp_num
-         Stats-Hint: (int_num = $0)  [loaded: 1, skipped: 3]
+         Stats-Hint: (int_num OPERATOR(pg_catalog.=) 'Param(PARAM_EXEC, ID: 1)'::text)  [loaded: 1, skipped: 3]
          file0: test_arrow_index.data (read: 51.50MB, size: 51.50MB)
 (11 rows)
 
@@ -156,8 +156,8 @@ RESET pg_strom.enabled;
 EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF,BUFFERS OFF)
 SELECT * FROM regtest_arrow_index_temp.regtest_arrow
  WHERE float_num=(SELECT float_num FROM regtest_arrow_index_temp.target_num);
-                                              QUERY PLAN                                              
-------------------------------------------------------------------------------------------------------
+                                                    QUERY PLAN                                                    
+------------------------------------------------------------------------------------------------------------------
  Gather (actual rows=1 loops=1)
    Workers Planned: 2
    Workers Launched: 2
@@ -167,7 +167,7 @@ SELECT * FROM regtest_arrow_index_temp.regtest_arrow
          Filter: (float_num = (InitPlan 1).col1)
          Rows Removed by Filter: 103563
          referenced: id, int_num, float_num, half_num, decimal_num, date_num, time_num, timestamp_num
-         Stats-Hint: (float_num = $0)  [loaded: 1, skipped: 3]
+         Stats-Hint: (float_num OPERATOR(pg_catalog.=) 'Param(PARAM_EXEC, ID: 1)'::text)  [loaded: 1, skipped: 3]
          file0: test_arrow_index.data (read: 51.50MB, size: 51.50MB)
 (11 rows)
 
@@ -262,8 +262,8 @@ RESET pg_strom.enabled;
 EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF,BUFFERS OFF)
 SELECT * FROM regtest_arrow_index_temp.regtest_arrow
  WHERE decimal_num=(SELECT decimal_num FROM regtest_arrow_index_temp.target_num);
-                                              QUERY PLAN                                              
-------------------------------------------------------------------------------------------------------
+                                                     QUERY PLAN                                                     
+--------------------------------------------------------------------------------------------------------------------
  Gather (actual rows=0 loops=1)
    Workers Planned: 2
    Workers Launched: 2
@@ -273,7 +273,7 @@ SELECT * FROM regtest_arrow_index_temp.regtest_arrow
          Filter: (decimal_num = (InitPlan 1).col1)
          Rows Removed by Filter: 103563
          referenced: id, int_num, float_num, half_num, decimal_num, date_num, time_num, timestamp_num
-         Stats-Hint: (decimal_num = $0)  [loaded: 1, skipped: 3]
+         Stats-Hint: (decimal_num OPERATOR(pg_catalog.=) 'Param(PARAM_EXEC, ID: 1)'::text)  [loaded: 1, skipped: 3]
          file0: test_arrow_index.data (read: 51.50MB, size: 51.50MB)
 (11 rows)
 
@@ -316,8 +316,8 @@ RESET pg_strom.enabled;
 EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF,BUFFERS OFF)
 SELECT * FROM regtest_arrow_index_temp.regtest_arrow
  WHERE time_num=(SELECT time_num FROM regtest_arrow_index_temp.target_num);
-                                              QUERY PLAN                                              
-------------------------------------------------------------------------------------------------------
+                                                   QUERY PLAN                                                    
+-----------------------------------------------------------------------------------------------------------------
  Gather (actual rows=1 loops=1)
    Workers Planned: 2
    Workers Launched: 2
@@ -327,7 +327,7 @@ SELECT * FROM regtest_arrow_index_temp.regtest_arrow
          Filter: (time_num = (InitPlan 1).col1)
          Rows Removed by Filter: 103563
          referenced: id, int_num, float_num, half_num, decimal_num, date_num, time_num, timestamp_num
-         Stats-Hint: (time_num = $0)  [loaded: 1, skipped: 3]
+         Stats-Hint: (time_num OPERATOR(pg_catalog.=) 'Param(PARAM_EXEC, ID: 1)'::text)  [loaded: 1, skipped: 3]
          file0: test_arrow_index.data (read: 51.50MB, size: 51.50MB)
 (11 rows)
 
@@ -372,8 +372,8 @@ pg2arrow: wrote on '/home/onishi/pg-strom/test/data/test_arrow_index.data' total
 EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF,BUFFERS OFF)
 SELECT * FROM regtest_arrow_index_temp.regtest_arrow
 WHERE timestamp_num=(SELECT timestamp_num FROM regtest_arrow_index_temp.target_num);
-                                              QUERY PLAN                                              
-------------------------------------------------------------------------------------------------------
+                                                      QUERY PLAN                                                      
+----------------------------------------------------------------------------------------------------------------------
  Gather (actual rows=1 loops=1)
    Workers Planned: 2
    Workers Launched: 2
@@ -383,7 +383,7 @@ WHERE timestamp_num=(SELECT timestamp_num FROM regtest_arrow_index_temp.target_n
          Filter: (timestamp_num = (InitPlan 1).col1)
          Rows Removed by Filter: 103563
          referenced: id, int_num, float_num, half_num, decimal_num, date_num, time_num, timestamp_num
-         Stats-Hint: (timestamp_num = $0)  [loaded: 1, skipped: 3]
+         Stats-Hint: (timestamp_num OPERATOR(pg_catalog.=) 'Param(PARAM_EXEC, ID: 1)'::text)  [loaded: 1, skipped: 3]
          file0: test_arrow_index.data (read: 51.50MB, size: 51.50MB)
 (11 rows)
 
