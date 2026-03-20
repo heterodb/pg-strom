@@ -42,7 +42,6 @@ pickup_outer_referenced(PlannerInfo *root,
 			AppendRelInfo  *apinfo = lfirst(lc);
 			RelOptInfo	   *parent_rel;
 			Bitmapset	   *parent_refs;
-			Var			   *var;
 
 			if (apinfo->child_relid != base_rel->relid)
 				continue;
@@ -61,10 +60,28 @@ pickup_outer_referenced(PlannerInfo *root,
 					elog(ERROR, "Bug? column reference out of range");
 				else
 				{
-					var = list_nth(apinfo->translated_vars, j-1);
-					Assert(IsA(var, Var));
-					j = var->varattno - FirstLowInvalidHeapAttributeNumber;
-					referenced = bms_add_member(referenced, j);
+					Expr   *expr = list_nth(apinfo->translated_vars, j-1);
+
+					if (IsA(expr, Var))
+					{
+						Var	   *var = (Var *)expr;
+
+						j = var->varattno - FirstLowInvalidHeapAttributeNumber;
+						referenced = bms_add_member(referenced, j);
+					}
+					else
+					{
+						List   *varsList = pull_vars_of_level((Node *)expr, 0);
+						ListCell *cell;
+
+						foreach (cell, varsList)
+						{
+							Var	   *var = lfirst(cell);
+
+							j = var->varattno - FirstLowInvalidHeapAttributeNumber;
+							referenced = bms_add_member(referenced, j);
+						}
+					}
 				}
 			}
 			break;

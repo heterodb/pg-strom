@@ -31,6 +31,7 @@ struct gpuContext
 	dlist_node		chain;
 	char			gpu_label[8];	/* for debug output */
 	int				serv_fd;		/* for accept(2) */
+	int				host_numa_id;
 	int				cuda_dindex;
 	gpumask_t		cuda_dmask;		/* = (1UL<<cuda_dindex) */
 	CUdevice		cuda_device;
@@ -139,7 +140,7 @@ static __thread gpuContext		*GpuWorkerCurrentContext = NULL;
 #define MY_CONTEXT_PER_THREAD	(GpuWorkerCurrentContext->cuda_context)
 #define MY_STREAM_PER_THREAD	CU_STREAM_PER_THREAD
 #define MY_MEMLOCATION_PER_THREAD (GpuWorkerCurrentContext->cuda_mlocation)
-static CUmemLocation		host_mlocation = {CU_DEVICE_CPU, CU_MEM_LOCATION_TYPE_HOST};
+static CUmemLocation		host_mlocation = {CU_MEM_LOCATION_TYPE_HOST_NUMA_CURRENT, CU_DEVICE_CPU};
 static volatile int			gpuserv_bgworker_got_signal = 0;
 static gpuContext		   *gpuserv_gpucontext_array;
 static dlist_head			gpuserv_gpucontext_list;
@@ -2634,8 +2635,11 @@ __expandGpuQueryScanJoinBuffer(gpuClient *gclient,
 								MY_STREAM_PER_THREAD);
 		if (rc != CUDA_SUCCESS)
 		{
-			gpuClientELog(gclient, "failed on cuMemPrefetchAsync: %s",
-						  cuStrError(rc));
+			gpuClientELog(gclient, "failed on cuMemPrefetchAsync: %s (old=%p %lu (buf0=%p %lu, buf1=%p, %lu)",
+						  cuStrError(rc),
+						  (void *)kds_dst_old, kds_dst_old->length,
+						  (void *)gq_buf->gpus[0].m_kds_final, gq_buf->gpus[0].m_kds_final_length, 
+						  (void *)gq_buf->gpus[1].m_kds_final, gq_buf->gpus[1].m_kds_final_length);
 			goto out;
 		}
 		rc = allocGpuQueryBuffer(gq_buf, &m_devptr,
@@ -6089,6 +6093,31 @@ gpuservHandleGpuTaskFinal(gpuContext *gcontext,
 }
 
 /*
+ * gpuservSetHostNumaNode
+ */
+static void
+gpuservSetHostNumaNode(gpuContext *gcontext)
+{
+#ifdef HAS_LIBNUMA
+	if (numa_available() == 0 &&
+		gcontext->host_numa_id >= 0 &&
+		gcontext->host_numa_id < numa_num_configured_nodes())
+	{
+		if (numa_run_on_node(gcontext->host_numa_id) == 0)
+		{
+			numa_set_preferred(gcontext->host_numa_id);
+		}
+		else
+		{
+			__gsDebug("libnuma: GPU%d worker thread failed on numa_run_on_node(%d): %m",
+					  gcontext->cuda_dindex,
+					  gcontext->host_numa_id);
+		}
+	}
+#endif
+}
+
+/*
  * gpuservGpuWorkerMain -- actual worker
  */
 static void *
@@ -6103,6 +6132,8 @@ gpuservGpuWorkerMain(void *__arg)
 
 	/* set primary working context */
 	gpuContextSwitchTo(gcontext);
+	/* set preferable host NUMA node */
+	gpuservSetHostNumaNode(gcontext);
 
 	__gsDebug("GPU-%d worker thread launched", MY_DINDEX_PER_THREAD);
 	
@@ -6652,6 +6683,7 @@ gpuservSetupGpuContext(int cuda_dindex)
 	/* gpuContext initialization */
 	sprintf(gcontext->gpu_label, "GPU%d", cuda_dindex);
 	gcontext->serv_fd = -1;
+	gcontext->host_numa_id = dattrs->HOST_NUMA_ID;
 	gcontext->cuda_dindex = cuda_dindex;
 	gcontext->cuda_dmask = (1UL << cuda_dindex);
 	pthreadMutexInit(&gcontext->cuda_setlimit_lock);

@@ -13,7 +13,7 @@ STROM_OBJS = main.o githash.o extra.o codegen.o executor.o fallback.o \
              arrow_fdw.o arrow_meta.o parquet_read.o \
              misc.o float2.o tinyint.o aggfuncs.o
 GENERATED-HEADERS = gpu_devattrs.h githash.c
-STROM_HEADERS = arrow_defs.h arrow_ipc.h float2.h
+STROM_HEADERS = arrow_defs.h float2.h
 
 #
 # Githash.c checker
@@ -69,26 +69,32 @@ endif
 #
 # libarrow / libparquet
 #
-HAS_LIBARROW = $(shell pkgconf --exists arrow>/dev/null 2>&1   && echo -n yes)
-HAS_PARQUET  = $(shell pkgconf --exists parquet>/dev/null 2>&1 && echo -n yes)
+HAS_LIBARROW = $(shell $(PKGCONF) --exists arrow>/dev/null 2>&1   && echo -n yes)
+HAS_PARQUET  = $(shell $(PKGCONF) --exists parquet>/dev/null 2>&1 && echo -n yes)
+HAS_LIBNUMA  = $(shell $(PKGCONF) --exists numa>/dev/null 2>&1   && echo -n yes)
 ifeq ($(HAS_LIBARROW),yes)
 PGSTROM_FLAGS += -DHAS_LIBARROW=1
-PG_CXXFLAGS += $(shell pkgconf --cflags arrow)
+PG_CXXFLAGS += $(shell $(PKGCONF) --cflags arrow)
 ifeq ($(HAS_PARQUET),yes)
 PGSTROM_FLAGS += -DHAS_PARQUET=1
-PG_CXXFLAGS += $(shell pkgconf --cflags parquet)
-SHLIB_LINK += $(shell pkgconf --libs parquet)
-PARQUET_LIBDIR = $(shell pkgconf --variable=libdir parquet)
+PG_CXXFLAGS += $(shell $(PKGCONF) --cflags parquet)
+SHLIB_LINK += $(shell $(PKGCONF) --libs parquet)
+PARQUET_LIBDIR = $(shell $(PKGCONF) --variable=libdir parquet)
 ifneq ($(PARQUET_LIBDIR),)
 SHLIB_LINK += -Wl,-rpath,$(PARQUET_LIBDIR)
 endif
 else
-SHLIB_LINK += $(shell pkgconf --libs arrow)
-ARROW_LIBDIR = $(shell pkgconf --variable=libdir arrow)
+SHLIB_LINK += $(shell $(PKGCONF) --libs arrow)
+ARROW_LIBDIR = $(shell $(PKGCONF) --variable=libdir arrow)
 ifneq ($(ARROW_LIBDIR),)
 SHLIB_LINK += -Wl,-rpath,$(ARROW_LIBDIR)
 endif
 endif
+endif
+ifeq ($(HAS_LIBNUMA),yes)
+PGSTROM_FLAGS += -DHAS_LIBNUMA=1
+PG_CXXFLAGS += $(shell $(PKGCONF) --cflags numa)
+SHLIB_LINK += $(shell $(PKGCONF) --libs numa)
 endif
 
 #
@@ -104,13 +110,13 @@ EXTRA_CLEAN = $(CUDA_OBJS) $(GENERATED-HEADERS) \
               $(shell ls -d pgstrom-gpucode-V*-*.fatbin 2>/dev/null)
 EXTENSION = pg_strom
 PG_CPPFLAGS := $(PGSTROM_FLAGS) -I $(CUDA_IPATH)
-PG_CXXFLAGS := -std=c++17 -Wno-sign-compare
+PG_CXXFLAGS := -std=c++20 -Wno-sign-compare
 SHLIB_LINK += -L $(CUDA_LPATH) -lcuda
 
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
 
-# Our C++ code (and libarrow/libparquet) expects C++17 as baseline,
+# Our C++ code (and libarrow/libparquet) expects C++20 as baseline,
 # however, some distribution has different defaults for clang.
 # PostgreSQL's makefile has no particular label to give "-std=c++17"
 # to clang to build JIT bytecode. So, we inject this option after

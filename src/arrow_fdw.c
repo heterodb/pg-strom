@@ -11,7 +11,6 @@
  */
 #include "pg_strom.h"
 #include "arrow_defs.h"
-#include "arrow_ipc.h"
 #include "xpu_numeric.h"
 
 /*
@@ -51,6 +50,7 @@ typedef struct RecordBatchFieldState
 	size_t		values_length;
 	off_t		extra_offset;
 	size_t		extra_length;
+	size_t		disk_length;
 	MinMaxStatDatum stat_datum;
 	/* sub-fields if any */
 	int			num_children;
@@ -179,6 +179,7 @@ struct arrowMetadataFieldCache
 	size_t		values_length;
 	off_t		extra_offset;
 	size_t		extra_length;
+	size_t		disk_length;
 	MinMaxStatDatum stat_datum;
 	arrowMetadataKeyValueCache *custom_metadata;	/* valid only in RecordBatch-0 */
 	/* sub-fields if any */
@@ -243,13 +244,14 @@ typedef struct
 /*
  * Static variables
  */
-static FdwRoutine			pgstrom_arrow_fdw_routine;
+static FdwRoutine	pgstrom_arrow_fdw_routine;
 static shmem_request_hook_type shmem_request_next = NULL;
 static shmem_startup_hook_type shmem_startup_next = NULL;
 static arrowMetadataCacheHead *arrow_metadata_cache = NULL;
-static bool					arrow_fdw_enabled;	/* GUC */
-static bool					arrow_fdw_stats_hint_enabled;	/* GUC */
-int							arrow_metadata_cache_size_kb;	/* GUC */
+static bool			arrow_fdw_enabled;	/* GUC */
+static bool			arrow_fdw_stats_hint_enabled;	/* GUC */
+int					arrow_metadata_cache_size_kb;	/* GUC */
+static int			parquet_parallel_read_threshold;/* GUC */
 
 /* ----------------------------------------------------------------
  *
@@ -1119,7 +1121,7 @@ __assignArrowStatsBinaryOne(MinMaxStatDatum *stats,
 			if (max_sz >= MINMAX_STAT_BYTESZ)
 				max_sz = MINMAX_STAT_BYTESZ - 1;
 			memcpy(stats->max.string+1, __max_token, max_sz);
-			SET_VARSIZE_SHORT(stats->max.string, max_sz);
+			SET_VARSIZE_SHORT(stats->max.string, max_sz+1);
 			stats->isnull = false;
 			break;
 		}
@@ -1315,20 +1317,6 @@ __buildArrowStatsOper(arrowStatsHint *as_hint,
 	}
 	else if (strategy == BTEqualStrategyNumber)
 	{
-		Oid		collation_oid = op->inputcollid;
-
-		/* NOTE: min/max statistics of string data is built based on UTF-8 encoding,
-		 * and generated based on simple byte comparison. Thus, we can use this
-		 * statistics for string data only when database encoding is UTF-8, and
-		 * operator determines larger/smaller relationship based on simple bytes
-		 * comparison.
-		 */
-		if (var->vartype == TEXTOID)
-		{
-			if (GetDatabaseEncoding() != PG_UTF8)
-				return false;
-			collation_oid = C_COLLATION_OID;
-		}
 		/* (VAR = ARG) --> (Min > ARG) || (Max < ARG), can be skipped */
 		opcode = get_opfamily_member(opfamily, var->vartype,
 									 exprType((Node *)arg),
@@ -1343,8 +1331,8 @@ __buildArrowStatsOper(arrowStatsHint *as_hint,
 											 var->varcollid,
 											 0),
 							 (Expr *)copyObject(arg),
-							 op->opcollid,
-							 collation_oid);
+							 C_COLLATION_OID,
+							 C_COLLATION_OID);
 		set_opfuncid((OpExpr *)expr);
 		as_hint->eval_quals = lappend(as_hint->eval_quals, expr);
 
@@ -1361,8 +1349,8 @@ __buildArrowStatsOper(arrowStatsHint *as_hint,
 											 var->varcollid,
 											 0),
 							 (Expr *)copyObject(arg),
-							 op->opcollid,
-							 collation_oid);
+							 C_COLLATION_OID,
+							 C_COLLATION_OID);
 		set_opfuncid((OpExpr *)expr);
 		as_hint->eval_quals = lappend(as_hint->eval_quals, expr);
 	}
@@ -1449,20 +1437,19 @@ __buildArrowStatsScalarArrayOp(arrowStatsHint *as_hint,
 	Oid			opcode = sa_op->opno;
 	Var		   *var;
 	Const	   *con;
-	Expr	   *expr;
+	TypeCacheEntry *tcache;
 	Oid			elem_oid;
-	int16		elem_typlen;
-	bool		elem_typbyval;
 	Datum		elem_datum;
 	bool		elem_isnull;
-	Oid			opfamily = InvalidOid;
+	Datum		min_datum;
+	Datum		max_datum;
+	bool		has_minmax = false;
 	StrategyNumber strategy = InvalidStrategy;
 	ArrayType  *arr;
 	ArrayIterator iter;
 	CatCList   *catlist;
-	List	   *result_args = NIL;
-	bool		retval = false;
 	int			anum;
+	bool		retval = false;
 
 	if (list_length(sa_op->args) != 2)
 		return false;
@@ -1477,19 +1464,24 @@ __buildArrowStatsScalarArrayOp(arrowStatsHint *as_hint,
 	 * Var::varnosyn and ::varattnosyn, instead of ::varno and ::varattno.
 	 */
 	if (!OidIsValid(opcode) ||
+		!sa_op->useOr ||	/* right now, only OPER ANY supported */
 		!IsA(var, Var) ||
 		!IsA(con, Const) ||
 		con->constisnull)
 		return false;
-	elem_oid = get_element_type(con->consttype);
-	if (!OidIsValid(elem_oid))
-		return false;
-	get_typlenbyval(elem_oid, &elem_typlen, &elem_typbyval);
-
+	/* min/max stats available? */
 	anum = var->varattnosyn - FirstLowInvalidHeapAttributeNumber;
 	if (!bms_is_member(anum, as_hint->stat_attrs))
 		return false;
-
+	/* pick up type cache */
+	elem_oid = get_element_type(con->consttype);
+	if (!OidIsValid(elem_oid))
+		return false;
+	tcache = lookup_type_cache(elem_oid, (TYPECACHE_LT_OPR |
+										  TYPECACHE_GT_OPR |
+										  TYPECACHE_CMP_PROC));
+	if (!tcache || !OidIsValid(tcache->cmp_proc))
+		return false;
 	/*
 	 * Identify the comparison strategy
 	 */
@@ -1501,7 +1493,6 @@ __buildArrowStatsScalarArrayOp(arrowStatsHint *as_hint,
 
 		if (amop->amopmethod == BRIN_AM_OID)
 		{
-			opfamily = amop->amopfamily;
 			strategy = amop->amopstrategy;
 			break;
 		}
@@ -1509,142 +1500,163 @@ __buildArrowStatsScalarArrayOp(arrowStatsHint *as_hint,
 	ReleaseSysCacheList(catlist);
 
 	/*
-	 * Iterate for each array element
+	 * fetch min/max value from the const array arguments
 	 */
 	arr = DatumGetArrayTypeP(con->constvalue);
 	iter = array_create_iterator(arr, 0, NULL);
 	while (array_iterate(iter, &elem_datum, &elem_isnull))
 	{
-		if (strategy == BTLessStrategyNumber ||
-			strategy == BTLessEqualStrategyNumber)
+		if (elem_isnull)
+			goto bailout;
+		if (!has_minmax)
 		{
-			/*
-			 * if (VAR < ARG) --> (Min >= ARG), can be skipped
-			 * if (VAR <= ARG) --> (Min > ARG), can be skipped
-			 */
-			Oid		negator = get_negator(opcode);
-
-			if (!OidIsValid(negator))
-				goto bailout;
-			expr = make_opclause(negator,
-								 get_op_rettype(negator),
-								 false,
-								 (Expr *)makeVar(INNER_VAR,
-												 var->varattno,
-												 var->vartype,
-												 var->vartypmod,
-												 var->varcollid,
-												 0),
-								 (Expr *)makeConst(elem_oid,
-												   con->consttypmod,
-												   con->constcollid,
-												   elem_typlen,
-												   elem_datum,
-												   elem_isnull,
-												   elem_typbyval),
-								 InvalidOid,
-								 sa_op->inputcollid);
-			set_opfuncid((OpExpr *)expr);
-			result_args = lappend(result_args, expr);
-		}
-		else if (strategy == BTGreaterEqualStrategyNumber ||
-				 strategy == BTGreaterStrategyNumber)
-		{
-			/* if (VAR > ARG) --> (Max <= ARG), can be skipped */
-			/* if (VAR >= ARG) --> (Max < ARG), can be skipped */
-			Oid		negator = get_negator(opcode);
-
-			if (!OidIsValid(negator))
-				goto bailout;
-			expr = make_opclause(negator,
-								 get_op_rettype(negator),
-								 false,
-								 (Expr *)makeVar(OUTER_VAR,
-												 var->varattno,
-												 var->vartype,
-												 var->vartypmod,
-												 var->varcollid,
-												 0),
-								 (Expr *)makeConst(elem_oid,
-												   con->consttypmod,
-												   con->constcollid,
-												   elem_typlen,
-												   elem_datum,
-												   elem_isnull,
-												   elem_typbyval),
-								 InvalidOid,
-								 sa_op->inputcollid);
-			set_opfuncid((OpExpr *)expr);
-			result_args = lappend(result_args, expr);
-		}
-		else if (strategy == BTEqualStrategyNumber)
-		{
-			/* (VAR = ARG) --> (Min > ARG) || (Max < ARG), can be skipped */
-			Oid		gt_opcode;
-			Oid		lt_opcode;
-			Expr   *gt_expr;
-			Expr   *lt_expr;
-
-			gt_opcode = get_opfamily_member(opfamily, var->vartype,
-											elem_oid,
-											BTGreaterStrategyNumber);
-			gt_expr = make_opclause(gt_opcode,
-									get_op_rettype(gt_opcode),
-									false,
-									(Expr *)makeVar(INNER_VAR,
-													var->varattno,
-													var->vartype,
-													var->vartypmod,
-													var->varcollid,
-													0),
-									(Expr *)makeConst(elem_oid,
-													  con->consttypmod,
-													  con->constcollid,
-													  elem_typlen,
-													  elem_datum,
-													  elem_isnull,
-													  elem_typbyval),
-									InvalidOid,
-									sa_op->inputcollid);
-			set_opfuncid((OpExpr *)gt_expr);
-
-			lt_opcode = get_opfamily_member(opfamily, var->vartype,
-											elem_oid,
-											BTLessStrategyNumber);
-			lt_expr = make_opclause(lt_opcode,
-									get_op_rettype(lt_opcode),
-									false,
-									(Expr *)makeVar(OUTER_VAR,
-													var->varattno,
-													var->vartype,
-													var->vartypmod,
-													var->varcollid,
-													0),
-									(Expr *)makeConst(elem_oid,
-													  con->consttypmod,
-													  con->constcollid,
-													  elem_typlen,
-													  elem_datum,
-													  elem_isnull,
-													  elem_typbyval),
-									InvalidOid,
-									sa_op->inputcollid);
-			set_opfuncid((OpExpr *)lt_expr);
-
-			expr = makeBoolExpr(OR_EXPR,
-								list_make2(gt_expr, lt_expr),
-								-1);
-			result_args = lappend(result_args, expr);
+			min_datum = elem_datum;
+			max_datum = elem_datum;
+			has_minmax = true;
 		}
 		else
 		{
-			goto bailout;
+			Datum	status;
+
+			status = OidFunctionCall2Coll(tcache->cmp_proc,
+										  C_COLLATION_OID,
+										  elem_datum,
+										  min_datum);
+			if (DatumGetInt32(status) < 0)
+				min_datum = elem_datum;
+			status = OidFunctionCall2Coll(tcache->cmp_proc,
+										  C_COLLATION_OID,
+										  elem_datum,
+										  max_datum);
+			if (DatumGetInt32(status) > 0)
+				max_datum = elem_datum;
 		}
 	}
-	as_hint->eval_quals = lappend(as_hint->eval_quals,
-								  makeBoolExpr(sa_op->useOr ? AND_EXPR : OR_EXPR,
-											   result_args,
-											   -1));
+	/*
+	 * build the result expression
+	 */
+	if (!has_minmax)
+		goto bailout;
+	if (strategy == BTLessStrategyNumber ||
+		strategy == BTLessEqualStrategyNumber)
+	{
+		/*
+		 * if (VAR <  ANY ARRAY) --> (Vmin >= Cmax), can be skipped
+		 * if (VAR <= ANY ARRAY) --> (Vmin >  Cmax), can be skipped
+		 */
+		Oid		negator = get_negator(opcode);
+		Expr   *expr;
+
+		if (!OidIsValid(negator))
+			goto bailout;
+		expr = make_opclause(negator,
+							 get_op_rettype(negator),
+							 false,
+							 (Expr *)makeVar(INNER_VAR,
+											 var->varattno,
+											 var->vartype,
+											 var->vartypmod,
+											 var->varcollid,
+											 0),
+							 (Expr *)makeConst(elem_oid,
+											   -1,
+											   C_COLLATION_OID,
+											   tcache->typlen,
+											   min_datum,
+											   false,
+											   tcache->typbyval),
+							 C_COLLATION_OID,
+							 C_COLLATION_OID);
+		set_opfuncid((OpExpr *)expr);
+		as_hint->eval_quals = lappend(as_hint->eval_quals, expr);
+	}
+	else if (strategy == BTGreaterEqualStrategyNumber ||
+			 strategy == BTGreaterStrategyNumber)
+	{
+		/*
+		 * if (VAR >  ANY ARRAY) --> (Vmax <= Cmin), can be skipped
+		 * if (VAR >= ANY ARRAY) --> (Vmax <  Cmin), can be skipped
+		 */
+		Oid		negator = get_negator(opcode);
+		Expr   *expr;
+
+		if (!OidIsValid(negator))
+			goto bailout;
+		expr = make_opclause(negator,
+							 get_op_rettype(negator),
+							 false,
+							 (Expr *)makeVar(OUTER_VAR,
+											 var->varattno,
+											 var->vartype,
+											 var->vartypmod,
+											 var->varcollid,
+											 0),
+							 (Expr *)makeConst(elem_oid,
+											   -1,
+											   C_COLLATION_OID,
+											   tcache->typlen,
+											   max_datum,
+											   false,
+											   tcache->typbyval),
+							 C_COLLATION_OID,
+							 C_COLLATION_OID);
+		set_opfuncid((OpExpr *)expr);
+		as_hint->eval_quals = lappend(as_hint->eval_quals, expr);
+	}
+	else if (strategy == BTEqualStrategyNumber)
+	{
+		/*
+		 * if (VAR = ANY ARRAY) --> (Vmax < Cmin || Vmin > Cmax), can be skipped
+		 */
+		Expr   *expr;
+
+		/* Vmax < Cmin */
+		expr = make_opclause(tcache->lt_opr,
+							 get_op_rettype(tcache->lt_opr),
+							 false,
+							 (Expr *)makeVar(OUTER_VAR,
+											 var->varattno,
+											 var->vartype,
+											 var->vartypmod,
+											 var->varcollid,
+											 0),
+							 (Expr *)makeConst(elem_oid,
+											   -1,
+											   var->varcollid,
+											   tcache->typlen,
+											   min_datum,
+											   false,
+											   tcache->typbyval),
+							 C_COLLATION_OID,
+							 C_COLLATION_OID);
+		set_opfuncid((OpExpr *)expr);
+		as_hint->eval_quals = lappend(as_hint->eval_quals, expr);
+		/* Vmin > Cmax */
+		expr = make_opclause(tcache->gt_opr,
+							 get_op_rettype(tcache->gt_opr),
+							 false,
+							 (Expr *)makeVar(INNER_VAR,
+											 var->varattno,
+											 var->vartype,
+											 var->vartypmod,
+											 var->varcollid,
+											 0),
+							 (Expr *)makeConst(elem_oid,
+											   -1,
+											   var->varcollid,
+											   tcache->typlen,
+											   max_datum,
+											   false,
+											   tcache->typbyval),
+							 C_COLLATION_OID,
+							 C_COLLATION_OID);
+		set_opfuncid((OpExpr *)expr);
+		as_hint->eval_quals = lappend(as_hint->eval_quals, expr);
+	}
+	else
+	{
+		goto bailout;
+	}
 	as_hint->load_attrs = bms_add_member(as_hint->load_attrs, var->varattno);
 	retval = true;
 bailout:
@@ -1838,6 +1850,7 @@ __buildRecordBatchFieldStateByCache(RecordBatchFieldState *rb_field,
 	rb_field->values_length  = fcache->values_length;
 	rb_field->extra_offset   = fcache->extra_offset;
 	rb_field->extra_length   = fcache->extra_length;
+	rb_field->disk_length    = fcache->disk_length;
 	memcpy(&rb_field->stat_datum,
 		   &fcache->stat_datum, sizeof(MinMaxStatDatum));
 	if (fcache->num_children > 0)
@@ -2356,6 +2369,7 @@ __buildRecordBatchFieldState(setupRecordBatchContext *con,
 										fnode->stat_min_value,
 										fnode->stat_max_value);
 		}
+		rb_field->disk_length = fnode->parquet.total_compressed_size;
 	}
 	else
 	{
@@ -2371,6 +2385,7 @@ __buildRecordBatchFieldState(setupRecordBatchContext *con,
 				elog(ERROR, "nullmap length is smaller than expected");
 			if (rb_field->nullmap_offset != MAXALIGN(rb_field->nullmap_offset))
 				elog(ERROR, "nullmap is not aligned well");
+			rb_field->disk_length += buffer_curr->length;
 		}
 
 		/* setup values buffer */
@@ -2385,6 +2400,7 @@ __buildRecordBatchFieldState(setupRecordBatchContext *con,
 				elog(ERROR, "values array is smaller than expected");
 			if (rb_field->values_offset != MAXALIGN(rb_field->values_offset))
 				elog(ERROR, "values array is not aligned well");
+			rb_field->disk_length += buffer_curr->length;
 		}
 
 		/* setup extra buffer */
@@ -2398,6 +2414,7 @@ __buildRecordBatchFieldState(setupRecordBatchContext *con,
 			rb_field->extra_length = buffer_curr->length;
 			if (rb_field->extra_offset != MAXALIGN(rb_field->extra_offset))
 				elog(ERROR, "extra buffer is not aligned well");
+			rb_field->disk_length += buffer_curr->length;
 		}
 	}
 
@@ -2412,6 +2429,7 @@ __buildRecordBatchFieldState(setupRecordBatchContext *con,
 										 &rb_field->children[j],
 										 &field->children[j],
 										 depth+1);
+			rb_field->disk_length += rb_field->children[j].disk_length;
 		}
 	}
 	rb_field->num_children = field->_num_children;
@@ -2554,6 +2572,7 @@ __buildArrowMetadataFieldCache(RecordBatchFieldState *rb_field,
 	fcache->values_length = rb_field->values_length;
 	fcache->extra_offset = rb_field->extra_offset;
 	fcache->extra_length = rb_field->extra_length;
+	fcache->disk_length = rb_field->disk_length;
 	memcpy(&fcache->stat_datum,
 		   &rb_field->stat_datum, sizeof(MinMaxStatDatum));
 	/* custom-metadata can be reused for the record-batch > 0 */
@@ -3897,6 +3916,7 @@ __arrowFdwSetupKDSHead(Relation relation,
 	size_t		head_off = chunk_buffer->len;
 	char		kds_format = KDS_FORMAT_ARROW;
 	bool		all_fields = bms_is_member(-FirstLowInvalidHeapAttributeNumber, referenced);
+	int			nr_loads = 0;
 	kern_data_store *kds;
 
 	/*
@@ -3931,9 +3951,14 @@ __arrowFdwSetupKDSHead(Relation relation,
 										&kds->colmeta[j],
 										&rb_state->fields[field_index]);
 			if (all_fields || bms_is_member(k+1, referenced))
+			{
 				kds->colmeta[j].field_index = field_index;
+				nr_loads++;
+			}
 			else
+			{
 				kds->colmeta[j].field_index = -1;	/* not referenced */
+			}
 		}
 		else if (field_index == __FIELD_INDEX_SPECIAL__VIRTUAL_PER_FILE)
 		{
@@ -3969,6 +3994,16 @@ __arrowFdwSetupKDSHead(Relation relation,
 			elog(ERROR, "Bug? unexpected field-index (%d)", field_index);
 		}
 	}
+	/*
+	 * turn on multi-threading read of parquet::arrow::FileReader,
+	 * if number of columns exceeds the threshold. (in case when small
+	 * number of columns are loaded, multi-threading is not efficient
+	 * so much.)
+	 */
+	if (kds_format == KDS_FORMAT_PARQUET &&
+		parquet_parallel_read_threshold >= 0 &&
+		nr_loads >= parquet_parallel_read_threshold)
+		kds->parquet_parallel_load = true;
 	kds->parquet_row_group = rb_state->rb_index;
 	kds->arrow_virtual_usage = (chunk_buffer->len
 								- (head_off + KDS_HEAD_LENGTH(kds)));
@@ -4118,20 +4153,6 @@ parquetFillupRowGroup(Relation relation,
 /*
  * ArrowGetForeignRelSize
  */
-static size_t
-__recordBatchFieldLength(RecordBatchFieldState *rb_field)
-{
-	size_t		len = 0;
-
-	if (rb_field->null_count > 0)
-		len += rb_field->nullmap_length;
-	len += (rb_field->values_length +
-			rb_field->extra_length);
-	for (int j=0; j < rb_field->num_children; j++)
-		len += __recordBatchFieldLength(&rb_field->children[j]);
-	return len;
-}
-
 static void
 ArrowGetForeignRelSize(PlannerInfo *root,
 					   RelOptInfo *baserel,
@@ -4204,7 +4225,7 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 						continue;
 					i = af_state->attrs[j-1].field_index;
 					if (i >= 0 && i < rb_state->nfields)
-						totalLen += __recordBatchFieldLength(&rb_state->fields[i]);
+						totalLen += rb_state->fields[i].disk_length;
 				}
 			}
 			ntuples += rb_state->rb_nitems;
@@ -5618,7 +5639,6 @@ pgstromArrowFdwExplain(ScanState *ss,	/* Foreign or Custom */
 		const char *filename = af_state->filename;
 		size_t		total_sz = af_state->stat_buf.st_size;
 		size_t		read_sz = 0;
-		size_t		sz;
 
 		foreach (lc2, af_state->rb_list)
 		{
@@ -5642,7 +5662,7 @@ pgstromArrowFdwExplain(ScanState *ss,	/* Foreign or Custom */
 				i = af_state->attrs[j-1].field_index;
 				if (i >= 0 && i < rb_state->nfields)
 				{
-					sz = __recordBatchFieldLength(&rb_state->fields[i]);
+					size_t	sz = rb_state->fields[i].disk_length;
 					read_sz += sz;
 					chunk_sz[j] += sz;
 				}
@@ -6221,7 +6241,7 @@ pgstrom_arrow_fdw_import_file(PG_FUNCTION_ARGS)
 	readArrowFile(file_name, &af_info, false);
 	copyArrowNode(&schema.node, &af_info.footer.schema.node);
 	if (schema._num_fields > SHRT_MAX)
-		Elog("Arrow file '%s' has too much fields: %d",
+		elog(ERROR, "Arrow file '%s' has too much fields: %d",
 			 file_name, schema._num_fields);
 	column_names = ensureUniqueFieldNames(&schema, NIL);
 
@@ -6924,6 +6944,19 @@ pgstrom_init_arrow_fdw(void)
 							INT_MAX,
 							PGC_POSTMASTER,
 							GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
+							NULL, NULL, NULL);
+	/*
+	 * Threshold of using threadpool for parquet read
+	 */
+	DefineCustomIntVariable("arrow_fdw.parquet_parallel_read_threshold",
+							"minimum number of loaded columns using thread-pool for Parquet read",
+							NULL,
+							&parquet_parallel_read_threshold,
+							8,		/* default 8 columns */
+							-1,		/* -1 : disabled, 0 : always */
+							INT_MAX,
+							PGC_USERSET,
+							GUC_NOT_IN_SAMPLE,
 							NULL, NULL, NULL);
 	/* shared memory size */
 	shmem_request_next = shmem_request_hook;

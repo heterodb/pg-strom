@@ -106,8 +106,6 @@ __collectGpuDevAttrs(GpuDevAttributes *dattrs, CUdevice cuda_device)
 {
 	CUresult	rc;
 	char		path[1024];
-	char		linebuf[1024];
-	FILE	   *filp;
 	CUuuid		uuid;
 	int			x, y, z;
 	const char *str;
@@ -164,23 +162,6 @@ __collectGpuDevAttrs(GpuDevAttributes *dattrs, CUdevice cuda_device)
 	/*
 	 * Some other fields to be fetched from Sysfs
 	 */
-	snprintf(path, sizeof(path),
-			 "/sys/bus/pci/devices/%04x:%02x:%02x.0/numa_node",
-			 dattrs->PCI_DOMAIN_ID,
-			 dattrs->PCI_BUS_ID,
-			 dattrs->PCI_DEVICE_ID);
-	filp = fopen(path, "r");
-	if (!filp)
-		dattrs->NUMA_NODE_ID = -1;	/* unknown */
-	else
-	{
-		if (!fgets(linebuf, sizeof(linebuf), filp))
-			dattrs->NUMA_NODE_ID = -1;	/* unknown */
-		else
-			dattrs->NUMA_NODE_ID = atoi(linebuf);
-		fclose(filp);
-	}
-
 	snprintf(path, sizeof(path),
 			 "/sys/bus/pci/devices/%04x:%02x:%02x.0/resource1",
 			 dattrs->PCI_DOMAIN_ID,
@@ -1234,13 +1215,8 @@ pgstrom_gpu_device_info(PG_FUNCTION_ARGS)
 			att_desc = "GPU PCI Bar1 Size";
 			att_value = format_bytesz(dattrs->DEV_BAR1_MEMSZ);
 			break;
-		case 5:
-			att_name = "NUMA_NODE_ID";
-			att_desc = "GPU NUMA Node Id";
-			att_value = psprintf("%d", dattrs->NUMA_NODE_ID);
-			break;
 		default:
-			i = aindex - 6;
+			i = aindex - 5;
 			val = *((int *)((char *)dattrs +
 							GpuDevAttrCatalog[i].attr_offset));
 			att_name = GpuDevAttrCatalog[i].attr_label;

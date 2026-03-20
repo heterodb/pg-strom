@@ -751,6 +751,7 @@ struct kern_data_store {
 	uint32_t		arrow_virtual_usage; /* usage of virtual column buffer */
 	/* only KDS_FORMAT_PARQUET */
 	uint32_t		parquet_row_group;	/* row-group id to be loaded */
+	bool			parquet_parallel_load; /* if parquet-reader use thread-pool */
 	/* column definition */
 	uint32_t		nr_colmeta;	/* number of colmeta[] array elements;
 								 * maybe, >= ncols, if any composite types */

@@ -142,6 +142,9 @@
 #include <libgen.h>
 #include <limits.h>
 #include <math.h>
+#ifdef HAS_LIBNUMA
+#include <numa.h>
+#endif /* HAS_LIBNUMA */
 #include <pthread.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
@@ -171,7 +174,6 @@ typedef struct GpuDevAttributes
 	uint32_t	NVIDIA_KMOD_VERSION;
 	uint32_t	NVIDIA_FS_KMOD_VERSION;
 	int			CUDA_DRIVER_VERSION;
-	int32		NUMA_NODE_ID;
 	int32		DEV_ID;
 	char		DEV_NAME[256];
 	char		DEV_UUID[2 * sizeof(CUuuid) + 8];	/* human readable */

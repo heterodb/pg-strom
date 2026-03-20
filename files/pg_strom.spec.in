@@ -27,6 +27,7 @@ AutoReqProv: no
 %define __HAS_PG18      %(test -x %{__pg_config_18} && echo -n 1 || echo -n 0)
 %define __ARROW_VERSION   %(pkgconf --exists arrow   && pkgconf --modversion arrow   | awk -F. '{printf "%02u", $1}' || echo -n 00)
 %define __PARQUET_VERSION %(pkgconf --exists parquet && pkgconf --modversion parquet | awk -F. '{printf "%02u", $1}' || echo -n 00)
+%define __ARROW_PARQUET_MIN_VERSION 23
 
 %define __make_options_common VERSION=%{version} RELEASE=%{release} GITHASH=%{__githash} DESTDIR=%{buildroot} CUDA_PATH=%{__cuda_path}
 
@@ -43,13 +44,15 @@ Summary: PG-Strom extension module for PostgreSQL v15
 Group: Applications/Databases
 BuildRequires: postgresql15
 BuildRequires: postgresql15-devel
-BuildRequires: arrow-devel >= 21
-BuildRequires: parquet-devel >= 21
+BuildRequires: arrow-devel >= %{__ARROW_PARQUET_MIN_VERSION}
+BuildRequires: parquet-devel >= %{__ARROW_PARQUET_MIN_VERSION}
+BuildRequires: numactl-devel
 Requires: postgresql15-server
 Recommends: heterodb-extra >= %{__heterodb_extra_min_version}
 Requires: %{name}
 Requires: arrow%{__ARROW_VERSION}00-libs
 Requires: parquet%{__PARQUET_VERSION}00-libs
+Requires: numactl-devel
 Requires(post): %{_sbindir}/update-alternatives
 Requires(postun): %{_sbindir}/update-alternatives
 
@@ -72,13 +75,15 @@ Summary: PG-Strom extension module for PostgreSQL v16
 Group: Applications/Databases
 BuildRequires: postgresql16
 BuildRequires: postgresql16-devel
-BuildRequires: arrow-devel >= 21
-BuildRequires: parquet-devel >= 21
+BuildRequires: arrow-devel >= %{__ARROW_PARQUET_MIN_VERSION}
+BuildRequires: parquet-devel >= %{__ARROW_PARQUET_MIN_VERSION}
+BuildRequires: numactl-devel
 Requires: postgresql16-server
 Recommends: heterodb-extra >= %{__heterodb_extra_min_version}
 Requires: %{name}
 Requires: arrow%{__ARROW_VERSION}00-libs
 Requires: parquet%{__PARQUET_VERSION}00-libs
+Requires: numactl-devel
 Requires(post): %{_sbindir}/update-alternatives
 Requires(postun): %{_sbindir}/update-alternatives
 
@@ -101,13 +106,15 @@ Summary: PG-Strom extension module for PostgreSQL v17
 Group: Applications/Databases
 BuildRequires: postgresql17
 BuildRequires: postgresql17-devel
-BuildRequires: arrow-devel >= 21
-BuildRequires: parquet-devel >= 21
+BuildRequires: arrow-devel >= %{__ARROW_PARQUET_MIN_VERSION}
+BuildRequires: parquet-devel >= %{__ARROW_PARQUET_MIN_VERSION}
+BuildRequires: numactl-devel
 Requires: postgresql17-server
 Recommends: heterodb-extra >= %{__heterodb_extra_min_version}
 Requires: %{name}
 Requires: arrow%{__ARROW_VERSION}00-libs
 Requires: parquet%{__PARQUET_VERSION}00-libs
+Requires: numactl-devel
 Requires(post): %{_sbindir}/update-alternatives
 Requires(postun): %{_sbindir}/update-alternatives
 
@@ -130,13 +137,15 @@ Summary: PG-Strom extension module for PostgreSQL v18
 Group: Applications/Databases
 BuildRequires: postgresql18
 BuildRequires: postgresql18-devel
-BuildRequires: arrow-devel >= 21
-BuildRequires: parquet-devel >= 21
+BuildRequires: arrow-devel >= %{__ARROW_PARQUET_MIN_VERSION}
+BuildRequires: parquet-devel >= %{__ARROW_PARQUET_MIN_VERSION}
+BuildRequires: numactl-devel
 Requires: postgresql18-server
 Recommends: heterodb-extra >= %{__heterodb_extra_min_version}
 Requires: %{name}
 Requires: arrow%{__ARROW_VERSION}00-libs
 Requires: parquet%{__PARQUET_VERSION}00-libs
+Requires: numactl-devel
 Requires(post): %{_sbindir}/update-alternatives
 Requires(postun): %{_sbindir}/update-alternatives
 
@@ -175,6 +184,7 @@ pushd ../PG15
 %{__make} -C src -j 12 %{__make_options_15}
 %{__make} -C arrow-tools -j 6 %{__make_options_15} pg2arrow
 %{__make} -C arrow-tools -j 6 %{__make_options_15} arrow2csv
+%{__make} -C arrow-tools -j 6 %{__make_options_15} tsv2arrow
 popd
 %endif
 
@@ -183,6 +193,7 @@ pushd ../PG16
 %{__make} -C src -j 12 %{__make_options_16}
 %{__make} -C arrow-tools -j 6 %{__make_options_16} pg2arrow
 %{__make} -C arrow-tools -j 6 %{__make_options_16} arrow2csv
+%{__make} -C arrow-tools -j 6 %{__make_options_15} tsv2arrow
 popd
 %endif
 
@@ -191,6 +202,7 @@ pushd ../PG17
 %{__make} -C src -j 12 %{__make_options_17}
 %{__make} -C arrow-tools -j 6 %{__make_options_17} pg2arrow
 %{__make} -C arrow-tools -j 6 %{__make_options_17} arrow2csv
+%{__make} -C arrow-tools -j 6 %{__make_options_15} tsv2arrow
 popd
 %endif
 
@@ -199,6 +211,7 @@ pushd ../PG18
 %{__make} -C src -j 12 %{__make_options_18}
 %{__make} -C arrow-tools -j 6 %{__make_options_18} pg2arrow
 %{__make} -C arrow-tools -j 6 %{__make_options_18} arrow2csv
+%{__make} -C arrow-tools -j 6 %{__make_options_15} tsv2arrow
 popd
 %endif
 

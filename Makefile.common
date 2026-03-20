@@ -33,3 +33,10 @@ PGSTROM_GITHASH := $(GITHASH)::local_changes
 endif
 endif
 endif
+
+#
+# Shell commands
+#
+CXX       ?= g++
+PG_CONFIG ?= pg_config
+PKGCONF   ?= $(shell which pkgconf 2>/dev/null || which pkg-config 2>/dev/null)

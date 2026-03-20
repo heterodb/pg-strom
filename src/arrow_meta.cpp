@@ -1,5 +1,5 @@
 /*
- * arrow_meta.cc
+ * arrow_meta.cpp
  *
  * Routines to handle Apache Arrow/Parquet metadata
  * ----
@@ -35,6 +35,11 @@
 #define ARROW_SIGNATURE_SZ		(sizeof(ARROW_SIGNATURE)-1)
 #define PARQUET_SIGNATURE		"PAR1"
 #define PARQUET_SIGNATURE_SZ	(sizeof(PARQUET_SIGNATURE)-1)
+
+/* version check: libarrow/libparquet v23 is minimum requirement */
+#if ARROW_VERSION_MAJOR < 23
+#error libarrow/libparquet must be version 23 or later
+#endif
 
 /*
  * Error Reporting
@@ -3169,11 +3174,15 @@ __readParquetFieldMetadata(ArrowField *node,
  */
 static void
 __readParquetSchemaMetadata(ArrowSchema *node,
-							const parquet::SchemaDescriptor *parquet_schema)
+							std::shared_ptr<parquet::FileMetaData> metadata)
 {
+	auto	parquet_schema = metadata->schema();
+	auto	parquet_key_values = metadata->key_value_metadata();
 	std::shared_ptr<arrow::Schema> arrow_schema;
 
 	auto	status = parquet::arrow::FromParquetSchema(parquet_schema,
+													   parquet::default_arrow_reader_properties(),
+													   parquet_key_values,
 													   &arrow_schema);
 	if (!status.ok())
 		Elog("failed on parquet::FromParquetSchema: %s",
@@ -3544,7 +3553,7 @@ __readParquetFileMetadata(std::shared_ptr<arrow::io::ReadableFile> rfilp,
 	/*
 	 * Read Schema definition
 	 */
-	__readParquetSchemaMetadata(&footer->schema, metadata->schema());
+	__readParquetSchemaMetadata(&footer->schema, metadata);
 	/*
 	 * Read Row-Groups for each
 	 */
@@ -3566,25 +3575,50 @@ __readParquetFileMetadata(std::shared_ptr<arrow::io::ReadableFile> rfilp,
 		af_info->_num_recordBatches = ngroups;
 		footer->_num_recordBatches = ngroups;
 	}
-	/* key-value metadata */
+
+	/*
+	 * key-value metadata
+	 *
+	 * When parquet::arrow::FileWriter writes an Arrow Schema in Parquet format,
+	 * it binary-encodes the Arrow schema definition itself and stores it under
+	 * the key "ARROW:schema".
+	 * parquet::arrow::FromParquetSchema automatically reflects this information
+	 * into the reconstructed Schema and Field definitions, so there is no need
+	 * to parse the Parquet metadata again. However, if "ARROW:schema" is not
+	 * present, it assumes that this restoration process has not been applied,
+	 * and reconstructs the Parquet footer metadata instead.
+	 */
 	auto	file_key_value = metadata->key_value_metadata();
 	if (file_key_value)
 	{
+		bool	meet_arrow_schema = false;
 		int		nitems = file_key_value->size();
-		ArrowKeyValue  *custom_metadata = (ArrowKeyValue *)
-			__palloc(sizeof(ArrowKeyValue) * nitems);
+
 		for (int i=0; i < nitems; i++)
 		{
-			ArrowKeyValue *node = &custom_metadata[i];
-
-			INIT_ARROW_NODE(node, KeyValue);
-			node->key = __pstrdup(file_key_value->key(i).c_str());
-			node->_key_len = std::strlen(node->key);
-			node->value = __pstrdup(file_key_value->value(i).c_str());
-			node->_value_len = std::strlen(node->value);
+			if (file_key_value->key(i) == std::string(""))
+			{
+				meet_arrow_schema = true;
+				break;
+			}
 		}
-		af_info->footer._num_custom_metadata = nitems;
-		af_info->footer.custom_metadata = custom_metadata;
+		if (!meet_arrow_schema)
+		{
+			ArrowKeyValue  *custom_metadata = (ArrowKeyValue *)
+				__palloc(sizeof(ArrowKeyValue) * nitems);
+			for (int i=0; i < nitems; i++)
+			{
+				ArrowKeyValue *node = &custom_metadata[i];
+
+				INIT_ARROW_NODE(node, KeyValue);
+				node->key = __pstrdup(file_key_value->key(i).c_str());
+				node->_key_len = std::strlen(node->key);
+				node->value = __pstrdup(file_key_value->value(i).c_str());
+				node->_value_len = std::strlen(node->value);
+			}
+			af_info->footer._num_custom_metadata = nitems;
+			af_info->footer.custom_metadata = custom_metadata;
+		}
 	}
 }
 #endif
@@ -3645,6 +3679,7 @@ readArrowFileInfo(const char *filename, ArrowFileInfo *af_info)
 		emsg = (char *)alloca(std::strlen(estr)+1);
 		strcpy(emsg, estr);
 	}
+	close(fdesc);
 	/* error report */
 	if (emsg)
 		ErrorReport(emsg);
