@@ -68,3 +68,8 @@ test: gpu_cache
 # GPU Sort
 # ----------
 test: gpu_sort
+
+# ----------
+# inet type operators and functions
+# ----------
+test: conv_text_inet
