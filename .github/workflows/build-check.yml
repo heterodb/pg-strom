@@ -1,9 +1,12 @@
 name: Build Check
 
-# Run a build verification after a pull request is approved.
+# Run a build verification when a pull request is submitted.
 on:
-  pull_request_review:
-    types: [submitted]
+  pull_request:
+    types: [opened, synchronize, reopened]
+  # Temporary setting for debugging:
+  # pull_request_review:
+  #   types: [submitted]
   workflow_dispatch:
 
 permissions:
@@ -13,8 +16,8 @@ permissions:
 jobs:
   build:
     name: Build with ${{ matrix.pgdir }}
-    # Execute only when the review state is "approved"
-    if: github.event_name == 'workflow_dispatch' || github.event.review.state == 'approved'
+    # Previous condition (kept for rollback after temporary debugging period):
+    # if: github.event_name == 'workflow_dispatch' || github.event.review.state == 'approved'
     runs-on: self-hosted
     timeout-minutes: 20
 
