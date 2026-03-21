@@ -1,12 +1,12 @@
 name: Build Check
 
-# Run a build verification when a pull request is submitted.
+# Run a build verification after a pull request is approved.
 on:
-  pull_request:
-    types: [opened, synchronize, reopened]
-  # Temporary setting for debugging:
-  # pull_request_review:
-  #   types: [submitted]
+  pull_request_review:
+    types: [submitted]
+  # Temporary debug trigger (disabled):
+  # pull_request:
+  #   types: [opened, synchronize, reopened]
   workflow_dispatch:
 
 permissions:
@@ -16,8 +16,9 @@ permissions:
 jobs:
   build:
     name: Build with ${{ matrix.pgdir }}
-    # Previous condition (kept for rollback after temporary debugging period):
-    # if: github.event_name == 'workflow_dispatch' || github.event.review.state == 'approved'
+    if: github.event_name == 'workflow_dispatch' || github.event.review.state == 'approved'
+    # Temporary debug condition (disabled):
+    # if: true
     runs-on: self-hosted
     timeout-minutes: 20
 
@@ -41,6 +42,7 @@ jobs:
         run: |
           PSQLBIN_ROOT=${PSQLBIN_ROOT:-/actions-runner/psqlbin}
           cd src
+          make clean
           PG_CONFIG=${PSQLBIN_ROOT}/${{ matrix.pgdir }}/bin/pg_config make -j$(nproc) install
 
       - name: Notify approver on failure
