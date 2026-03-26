@@ -3664,6 +3664,7 @@ gpuservLoadKdsParquet(gpuClient *gclient,
 
 	kds = parquetReadOneRowGroup(pathname,
 								 kds_head,
+								 true,
 								 __loadKdsParquetMallocCallback,
 								 (void *)&m_chunk,
 								 error_message, sizeof(error_message));

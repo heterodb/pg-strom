@@ -4139,6 +4139,7 @@ parquetFillupRowGroup(Relation relation,
 	resetLargeStringInfo(chunk_buffer);
 	kds = parquetReadOneRowGroup(rb_state->af_state->filename,
 								 kds_head,
+								 false,
 								 __parquetFillupAllocBuffer,
 								 (void *)chunk_buffer,
 								 error_message, sizeof(error_message));

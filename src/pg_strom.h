@@ -985,7 +985,7 @@ extern void		try_add_sorted_groupby_path(PlannerInfo *root,
 extern void		pgstrom_init_gpu_sort(void);
 
 /*
- * arrow_fdw.c and arrow_read.c
+ * arrow_fdw.c
  */
 extern int		arrow_metadata_cache_size_kb;		/* GUC */
 extern bool		baseRelIsArrowFdw(RelOptInfo *baserel);
@@ -1016,6 +1016,33 @@ extern bool		kds_arrow_fetch_tuple(TupleTableSlot *slot,
 									  size_t index,
 									  const Bitmapset *referenced);
 extern void		pgstrom_init_arrow_fdw(void);
+
+/*
+ * parquet_cache.c
+ */
+extern void	   *parquet_nvme_cache_lookup(const struct stat *pq_fstat,
+										  int32_t rg_index,
+										  int32_t field_id);
+extern void		parquet_nvme_cache_release(void *entry);
+extern ssize_t	parquet_nvme_cache_read_chunks(void *entry,
+											   kern_colmeta *cmeta,
+											   size_t kds_offset,
+											   CUdeviceptr m_segment,
+											   off_t m_offset,
+											   uint32_t *p_npages_direct_read,
+											   uint32_t *p_npages_vfs_read);
+extern void		parquet_nvme_cache_write_async(const struct stat *pq_fstat,
+											   int32_t rg_index,
+											   int32_t field_id,
+											   const char *nullmap_ptr,
+											   size_t nullmap_len,
+											   const char *values_ptr,
+											   size_t values_len,
+											   const char *extra_ptr,
+											   size_t extra_len,
+											   void (*buffer_release_callback)(void *private),
+											   void *buffer_release_private);
+extern void		pgstrom_init_parquet_cache(void);
 
 /*
  * select_into.c

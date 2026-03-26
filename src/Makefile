@@ -10,7 +10,7 @@ STROM_OBJS = main.o githash.o extra.o codegen.o executor.o fallback.o \
              gpu_device.o gpu_service.o dpu_device.o \
              gpu_scan.o gpu_join.o gpu_preagg.o \
              relscan.o brin.o gist.o gpu_cache.o select_into.o \
-             arrow_fdw.o arrow_meta.o parquet_read.o \
+             arrow_fdw.o arrow_meta.o parquet_read.o parquet_cache.o \
              misc.o float2.o tinyint.o aggfuncs.o
 GENERATED-HEADERS = gpu_devattrs.h githash.c
 STROM_HEADERS = arrow_defs.h float2.h
@@ -31,7 +31,8 @@ include Makefile.cuda
 __STROM_SQL = pg_strom--4.0--5.0.sql \
               pg_strom--5.0.sql \
               pg_strom--5.0--5.1.sql \
-              pg_strom--5.1--6.0.sql
+              pg_strom--5.1--6.0.sql \
+              pg_strom--6.0--6.3.sql
 STROM_SQL = $(addprefix sql/,$(__STROM_SQL))
 
 #

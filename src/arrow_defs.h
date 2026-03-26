@@ -925,6 +925,7 @@ struct kern_data_store;
 __EXTERN struct kern_data_store *
 parquetReadOneRowGroup(const char *filename,
 					   const struct kern_data_store *kds_head,
+					   bool try_parquet_cache,
 					   void *(*malloc_callback)(void *malloc_private,
 												size_t malloc_size),
 					   void *malloc_private,

@@ -718,6 +718,7 @@ parquetReadArrowTable(std::shared_ptr<arrow::Table> table,
 static kern_data_store *
 __parquetReadOneRowGroup(const char *filename,
 						 const kern_data_store *kds_head,
+						 bool try_parquet_cache,
 						 void *(*malloc_callback)(void *malloc_private,
 												  size_t malloc_size),
 						 void *malloc_private)
@@ -726,7 +727,6 @@ __parquetReadOneRowGroup(const char *filename,
 	std::shared_ptr<arrow::io::ReadableFile> parquet_filp;
     std::unique_ptr<parquet::ParquetFileReader> raw_file_reader = nullptr;
     std::unique_ptr<parquet::arrow::FileReader> arrow_file_reader = nullptr;
-	std::shared_ptr<parquet::FileMetaData> metadata = nullptr;
 	kern_data_store	   *kds = NULL;
 
 	/* open the parquet file */
@@ -737,7 +737,38 @@ __parquetReadOneRowGroup(const char *filename,
 				   filename,
 				   rv.status().ToString().c_str());
 		parquet_filp = rv.ValueOrDie();
-		metadata = lookupParquetFileMetadata(parquet_filp, filename);
+	}
+
+	/*
+	 * Lookup Parquet NVMe Disk Cache
+	 *
+	 * Three cases are possible:
+	 *
+	 * - No cache hit at all
+	 *   The libparquet reader loads the RowGroup and copies it into the KDS
+	 *   on managed memory.
+	 *   At the same time, the loaded RowGroup is written back to the Disk Cache.
+	 *
+	 * - Partial cache hit
+	 *   The libparquet reader loads the RowGroups that were not found in cache
+	 *   and copies them into the KDS on raw memory using the CUDA API.
+	 *   Columns that hit in the cache are transferred directly from storage
+	 *   to the GPU using GDS.
+	 *
+	 * - Full cache hit
+	 *   Without using libparquet, all referenced columns are transferred
+	 *   directly from storage to the KDS on raw memory using GDS.
+	 */
+	if (try_parquet_cache)
+	{
+		//TO BE IMPLEMENTED
+		//1. lookup the parquet cache
+		//2. (if not fully cached) read parquet file by libparuqet
+		//3, allocation of KDS buffer (managed or raw)
+		//4. arrow::Table -> KDS by CPU(managed) or DMA(raw)
+		//5. (if any cached) iovec is processed
+		//6. (if any uncached) arrow::Table async cached written
+		//7. arrow::Table shall be released later
 	}
 
 	/*
@@ -749,6 +780,7 @@ __parquetReadOneRowGroup(const char *filename,
 	 * Open the Parquet File (with cached metadata)
 	 */
 	{
+		auto		metadata = lookupParquetFileMetadata(parquet_filp, filename);
 		parquet::ReaderProperties	reader_props;
 		reader_props.set_buffer_size(8UL << 20);	/* default buffer size = 8MB */
 
@@ -825,6 +857,7 @@ struct kern_data_store;
 kern_data_store *
 parquetReadOneRowGroup(const char *filename,
 					   const kern_data_store *kds_head,
+					   bool try_parquet_cache,
 					   void *(*malloc_callback)(void *malloc_private,
 												size_t malloc_size),
 					   void *malloc_private,
@@ -836,6 +869,7 @@ parquetReadOneRowGroup(const char *filename,
 	try {
 		kds = __parquetReadOneRowGroup(filename,
 									   kds_head,
+									   try_parquet_cache,
 									   malloc_callback,
 									   malloc_private);
 	}

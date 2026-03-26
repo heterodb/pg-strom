@@ -224,6 +224,20 @@ lappend_cxt(MemoryContext memcxt, List *list, void *datum)
 	return r;
 }
 
+/* dlist version list_length */
+static inline int
+__dlist_length(dlist_head *__dl_head)
+{
+	dlist_iter	iter;
+	int			count = 0;
+
+	dlist_foreach (iter, __dl_head)
+	{
+		count++;
+	}
+	return count;
+}
+
 /* initStringInfo on the specified memory-context */
 static inline void
 initStringInfoCxt(MemoryContext memcxt, StringInfo buf)

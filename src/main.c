@@ -942,6 +942,7 @@ _PG_init(void)
 	pgstrom_init_relscan();
 	pgstrom_init_brin();
 	pgstrom_init_arrow_fdw();
+	pgstrom_init_parquet_cache();
 	pgstrom_init_executor();
 	/* dump version number */
 	elog(LOG, "PG-Strom version %s built for PostgreSQL %s (githash: %s)",
