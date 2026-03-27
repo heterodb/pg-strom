@@ -157,6 +157,7 @@
 #include <sys/uio.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include "arrow_fdw.h"
 #include "xpu_common.h"
 #include "cuda_common.h"
 #include "pg_utils.h"
@@ -1020,28 +1021,6 @@ extern void		pgstrom_init_arrow_fdw(void);
 /*
  * parquet_cache.c
  */
-extern void	   *parquet_nvme_cache_lookup(const struct stat *pq_fstat,
-										  int32_t rg_index,
-										  int32_t field_id);
-extern void		parquet_nvme_cache_release(void *entry);
-extern ssize_t	parquet_nvme_cache_read_chunks(void *entry,
-											   kern_colmeta *cmeta,
-											   size_t kds_offset,
-											   CUdeviceptr m_segment,
-											   off_t m_offset,
-											   uint32_t *p_npages_direct_read,
-											   uint32_t *p_npages_vfs_read);
-extern void		parquet_nvme_cache_write_async(const struct stat *pq_fstat,
-											   int32_t rg_index,
-											   int32_t field_id,
-											   const char *nullmap_ptr,
-											   size_t nullmap_len,
-											   const char *values_ptr,
-											   size_t values_len,
-											   const char *extra_ptr,
-											   size_t extra_len,
-											   void (*buffer_release_callback)(void *private),
-											   void *buffer_release_private);
 extern void		pgstrom_init_parquet_cache(void);
 
 /*

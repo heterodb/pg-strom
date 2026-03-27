@@ -5,6 +5,10 @@
  */
 #ifndef _ARROW_DEFS_H_
 #define _ARROW_DEFS_H_
+#include <stdint.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #ifdef __cplusplus
 typedef bool			__boolean;
@@ -476,24 +480,13 @@ typedef struct ArrowTypeOptions
 
 #undef ARROW_TYPE_OPTIONS_COMMON_FIELDS
 
-#ifndef __CUDACC__
-#include <stdint.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <unistd.h>
 /*
  * ArrowNode
  */
-struct SQLbuffer;
-
 struct ArrowNode
 {
 	ArrowNodeTag	tag;
 	const char	   *tagName;
-	void		  (*dumpArrowNode)(struct SQLbuffer *buf,
-								   const struct ArrowNode *node);
-	void		  (*copyArrowNode)(struct ArrowNode *dest,
-								   const struct ArrowNode *source);
 };
 typedef struct ArrowNode		ArrowNode;
 
@@ -917,20 +910,5 @@ __EXTERN bool	equalArrowNode(const ArrowNode *a, const ArrowNode *b);
 __EXTERN int	readArrowFileInfo(const char *filename, ArrowFileInfo *af_info);
 __EXTERN char  *dumpArrowFileInfo(const ArrowFileInfo *af_info);
 
-/*
- * parquet_read.cc (C++ interface)
- */
-struct kern_data_store;
-
-__EXTERN struct kern_data_store *
-parquetReadOneRowGroup(const char *filename,
-					   const struct kern_data_store *kds_head,
-					   bool try_parquet_cache,
-					   void *(*malloc_callback)(void *malloc_private,
-												size_t malloc_size),
-					   void *malloc_private,
-					   char *error_message, size_t error_message_sz);
-#undef __EXTERN
-
-#endif		/* !__CUDACC__ */
+#undef		__EXTERN
 #endif		/* _ARROW_DEFS_H_ */

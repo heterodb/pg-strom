@@ -10,6 +10,7 @@
  * it under the terms of the PostgreSQL License.
  */
 #include "pg_strom.h"
+#include "arrow_fdw.h"
 #include "cuda_common.h"
 #include <cudaProfiler.h>
 /*

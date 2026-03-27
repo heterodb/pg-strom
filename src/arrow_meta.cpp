@@ -1371,8 +1371,6 @@ __copyArrowNode(ArrowNode *dest, const ArrowNode *src)
 	/* common portion */
 	COPY_SCALAR(tag);
 	COPY_SCALAR(tagName);
-	COPY_SCALAR(dumpArrowNode);	//deprecate
-	COPY_SCALAR(copyArrowNode);	//deprecate
 
 	switch (src->tag)
 	{

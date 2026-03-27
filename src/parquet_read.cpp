@@ -24,8 +24,8 @@
 #include <sys/time.h>
 #include <thread>
 #include <unistd.h>
+#include "arrow_fdw.h"
 #include "xpu_common.h"
-#include "arrow_defs.h"
 
 /* version check: libarrow/libparquet v23 is minimum requirement */
 #if PARQUET_VERSION_MAJOR < 23

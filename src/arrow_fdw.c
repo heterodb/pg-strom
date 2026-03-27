@@ -10,7 +10,7 @@
  * it under the terms of the PostgreSQL License.
  */
 #include "pg_strom.h"
-#include "arrow_defs.h"
+#include "arrow_fdw.h"
 #include "xpu_numeric.h"
 
 /*
