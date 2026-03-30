@@ -24,8 +24,8 @@
 #include <sys/time.h>
 #include <thread>
 #include <unistd.h>
-#include "arrow_fdw.h"
 #include "xpu_common.h"
+#include "arrow_fdw.h"
 
 /* version check: libarrow/libparquet v23 is minimum requirement */
 #if PARQUET_VERSION_MAJOR < 23
@@ -189,7 +189,7 @@ lookupParquetFileMetadata(std::shared_ptr<arrow::io::ReadableFile> filp, const c
 {
 	int			fdesc = filp->file_descriptor();
 	uint32_t	hash, hindex;
-	struct stat stat_buf;
+	struct stat	stat_buf;
 	struct {
 		dev_t   st_dev;
 		ino_t   st_ino;
@@ -292,6 +292,8 @@ __setupParquetFileReferenced(const parquet::arrow::SchemaField &schema_field,
 static void
 setupParquetFileReferenced(const kern_data_store *kds_head,
 						   const parquet::arrow::SchemaManifest &manifest,
+						   bool consider_cached_chunks,
+						   std::vector<void *> &parquet_cached_chunks,
 						   std::vector<int> &referenced,
 						   std::vector<int> &revmap)
 {
@@ -300,6 +302,8 @@ setupParquetFileReferenced(const kern_data_store *kds_head,
 		int		field_index = kds_head->colmeta[j].field_index;
 
 		if (field_index < 0)
+			continue;
+		if (consider_cached_chunks && parquet_cached_chunks[field_index] != NULL)
 			continue;
 		if (field_index < manifest.schema_fields.size())
 		{
@@ -355,18 +359,45 @@ lengthOfArrowColumnBuffer(std::shared_ptr<arrow::Array> chunk)
 }
 
 /*
+ * parquetCacheWriteAsyncDataArray
+ */
+struct parquetCacheWriteAsyncDataArray
+	: parquetCacheWriteAsyncData
+{
+	std::shared_ptr<arrow::Array> array;
+	parquetCacheWriteAsyncDataArray(const struct stat *__pq_fstat,
+									int32_t __rg_index,
+									int32_t __field_id)
+		: parquetCacheWriteAsyncData(__pq_fstat, __rg_index, __field_id)
+	{}
+};
+typedef struct parquetCacheWriteAsyncDataArray	parquetCacheWriteAsyncDataArray;
+
+void
+releaseParquetCacheWriteAsyncData(parquetCacheWriteAsyncData *__data)
+{
+	parquetCacheWriteAsyncDataArray *data = (parquetCacheWriteAsyncDataArray *)__data;
+	/* unpin arrow::Array */
+	delete(data);
+}
+
+/*
  * fillupArrowColumnBuffer
  */
 static void
 fillupArrowColumnBuffer(kern_data_store *kds,
 						kern_colmeta *cmeta,
-						std::shared_ptr<arrow::Array> array)
+						CUdeviceptr m_kds_base,
+						std::shared_ptr<arrow::Array> array,
+						const struct stat *pq_fstat)
 {
+	parquetCacheWriteAsyncDataArray *data = nullptr;
 	auto	dtype = array->type();
 	auto	adata = array->data();
 	bool	needs_nullmap_buffer = (array->null_count() > 0);
 	bool	needs_main_buffer = true;
 	bool	needs_extra_buffer = false;
+	CUresult rc;
 
 	switch (dtype->id())
 	{
@@ -533,9 +564,12 @@ fillupArrowColumnBuffer(kern_data_store *kds,
 				assert(cmeta->idx_subattrs >= kds->ncols &&
 					   cmeta->idx_subattrs <  kds->nr_colmeta &&
 					   cmeta->num_subattrs == 1);
+				pq_fstat = NULL;	/* no parquet cache */
 				fillupArrowColumnBuffer(kds,
 										&kds->colmeta[cmeta->idx_subattrs],
-										list->values());
+										m_kds_base,
+										list->values(),
+										NULL);
 				goto simple_buffer;
 			}
 			break;
@@ -546,9 +580,12 @@ fillupArrowColumnBuffer(kern_data_store *kds,
 				assert(cmeta->idx_subattrs >= kds->ncols &&
 					   cmeta->idx_subattrs <  kds->nr_colmeta &&
 					   cmeta->num_subattrs == 1);
+				pq_fstat = NULL;	/* no parquet cache */
 				fillupArrowColumnBuffer(kds,
 										&kds->colmeta[cmeta->idx_subattrs],
-										list->values());
+										m_kds_base,
+										list->values(),
+										NULL);
 				goto simple_buffer;
 			}
 			break;
@@ -561,11 +598,14 @@ fillupArrowColumnBuffer(kern_data_store *kds,
 					   cmeta->idx_subattrs >= kds->ncols &&
 					   cmeta->idx_subattrs +
 					   cmeta->num_subattrs <= kds->nr_colmeta);
+				pq_fstat = NULL;	/* no parquet cache */
 				for (int k=0; k < cmeta->num_subattrs; k++)
 				{
 					fillupArrowColumnBuffer(kds,
 											&kds->colmeta[cmeta->idx_subattrs + k],
-											comp->field(k));
+											m_kds_base,
+											comp->field(k),
+											NULL);
 				}
 				needs_main_buffer = false;
 				goto simple_buffer;
@@ -581,87 +621,221 @@ fillupArrowColumnBuffer(kern_data_store *kds,
 variable_buffer:
 	needs_extra_buffer = true;
 simple_buffer:
-	/* nullmap */
-	if (needs_nullmap_buffer)
+	if (pq_fstat)
 	{
-		if (adata->buffers.size() < 1)
-			__Elog("corruption? nullmap buffer is missing at '%s'", cmeta->attname);
-		auto	buffer = adata->buffers[0];
-		assert(buffer->data() != nullptr);
-		cmeta->nullmap_offset = kds->usage;
-		cmeta->nullmap_length = buffer->size();
-		kds->usage += ARROW_ALIGN(cmeta->nullmap_length);
-		memcpy((char *)kds +
-			   cmeta->nullmap_offset,
-			   buffer->data(),
-			   cmeta->nullmap_length);
+		data = new parquetCacheWriteAsyncDataArray(pq_fstat,
+												   kds->parquet_row_group,
+												   cmeta->field_index);
+		data->array = array;
 	}
-	else
-	{
-		cmeta->nullmap_offset = 0;
-		cmeta->nullmap_length = 0;
+	try {
+		/* nullmap */
+		if (needs_nullmap_buffer)
+		{
+			if (adata->buffers.size() < 1)
+				__Elog("corruption? nullmap buffer is missing at '%s'", cmeta->attname);
+			auto	buffer = adata->buffers[0];
+			assert(buffer->data() != nullptr);
+			cmeta->nullmap_offset = kds->usage;
+			cmeta->nullmap_length = buffer->size();
+			kds->usage += ARROW_ALIGN(cmeta->nullmap_length);
+			if (m_kds_base == 0UL)
+			{
+				memcpy((char *)kds + cmeta->nullmap_offset,
+					   buffer->data(),
+					   cmeta->nullmap_length);
+			}
+			else
+			{
+				rc = cuMemcpyHtoD(m_kds_base + cmeta->nullmap_offset,
+								  buffer->data(),
+								  cmeta->nullmap_length);
+				if (rc != CUDA_SUCCESS)
+					__Elog("failed on cuMemcpyHtoD");
+			}
+			if (data)
+			{
+				data->nullmap_ptr = buffer->data();
+				data->nullmap_len = buffer->size();
+			}
+		}
+		else
+		{
+			cmeta->nullmap_offset = 0;
+			cmeta->nullmap_length = 0;
+		}
+		/* values/offset */
+		if (needs_main_buffer)
+		{
+			if (adata->buffers.size() < 2)
+				__Elog("corruption? values/offset buffer is missing at '%s'", cmeta->attname);
+			auto	buffer = adata->buffers[1];
+			assert(buffer->data() != nullptr);
+			cmeta->values_offset = kds->usage;
+			cmeta->values_length = buffer->size();
+			kds->usage += ARROW_ALIGN(cmeta->values_length);
+			if (m_kds_base == 0UL)
+			{
+				memcpy((char *)kds + cmeta->values_offset,
+					   buffer->data(),
+					   cmeta->values_length);
+			}
+			else
+			{
+				rc = cuMemcpyHtoD(m_kds_base + cmeta->values_offset,
+								  buffer->data(),
+								  cmeta->values_length);
+				if (rc != CUDA_SUCCESS)
+					__Elog("failed on cuMemcpyHtoD");
+			}
+			if (data)
+			{
+				data->values_ptr = buffer->data();
+				data->values_len = buffer->size();
+			}
+		}
+		else
+		{
+			cmeta->values_offset = 0;
+			cmeta->values_length = 0;
+		}
+		/* extra */
+		if (needs_extra_buffer)
+		{
+			if (adata->buffers.size() < 3)
+				__Elog("corruption? extra buffer is missing at '%s'", cmeta->attname);
+			auto	buffer = adata->buffers[2];
+			assert(buffer->data() != nullptr);
+			cmeta->extra_offset = kds->usage;
+			cmeta->extra_length = buffer->size();
+			kds->usage += ARROW_ALIGN(cmeta->extra_length);
+			if (m_kds_base == 0UL)
+			{
+				memcpy((char *)kds + cmeta->extra_offset,
+					   buffer->data(),
+					   cmeta->extra_length);
+			}
+			else
+			{
+				rc = cuMemcpyHtoD(m_kds_base + cmeta->extra_offset,
+								  buffer->data(),
+								  cmeta->extra_length);
+				if (rc != CUDA_SUCCESS)
+					__Elog("failed on cuMemcpyHtoD");
+			}
+			if (data)
+			{
+				data->extra_ptr = buffer->data();
+				data->extra_len = buffer->size();
+			}
+		}
+		else
+		{
+			cmeta->extra_offset = 0;
+			cmeta->extra_length = 0;
+		}
+		/* write back to the parquet disk cache asynchronously */
+		parquetCacheWriteAsync(data);
 	}
-	/* values/offset */
-	if (needs_main_buffer)
-	{
-		if (adata->buffers.size() < 2)
-			__Elog("corruption? values/offset buffer is missing at '%s'", cmeta->attname);
-		auto	buffer = adata->buffers[1];
-		assert(buffer->data() != nullptr);
-		cmeta->values_offset = kds->usage;
-		cmeta->values_length = buffer->size();
-		kds->usage += ARROW_ALIGN(cmeta->values_length);
-		memcpy((char *)kds +
-			   cmeta->values_offset,
-			   buffer->data(),
-			   cmeta->values_length);
-	}
-	else
-	{
-		cmeta->values_offset = 0;
-		cmeta->values_length = 0;
-	}
-	/* extra */
-	if (needs_extra_buffer)
-	{
-		if (adata->buffers.size() < 3)
-			__Elog("corruption? extra buffer is missing at '%s'", cmeta->attname);
-		auto	buffer = adata->buffers[2];
-		assert(buffer->data() != nullptr);
-		cmeta->extra_offset = kds->usage;
-		cmeta->extra_length = buffer->size();
-		kds->usage += ARROW_ALIGN(cmeta->extra_length);
-		memcpy((char *)kds +
-			   cmeta->extra_offset,
-			   buffer->data(),
-			   cmeta->extra_length);
-	}
-	else
-	{
-		cmeta->extra_offset = 0;
-		cmeta->extra_length = 0;
+	catch (const std::exception &e) {
+		if (data)
+			delete(data);
+		throw;
 	}
 }
 
 /*
- * parquetReadArrowTable
+ * __parquetReadOneRowGroupFullyCached
+ *
+ * Fully cached version of RowGroup reader. It returns KDS buffer of GPU raw memory.
  */
 static kern_data_store *
-parquetReadArrowTable(std::shared_ptr<arrow::Table> table,
-					  std::vector<int> revmap,
-					  const kern_data_store *kds_head,
-					  void *(*malloc_callback)(void *malloc_private,
-											   size_t malloc_size),
-					  void *malloc_private)
+__parquetReadOneRowGroupFullyCached(const kern_data_store *kds_head,
+									std::vector<void *> &parquet_cached_chunks,
+									bool (*malloc_gpu_callback)(void *malloc_private,
+																size_t malloc_size,
+																CUdeviceptr *m_segment,
+																off_t *m_offset),
+									void *malloc_private,
+									uint32_t *p_npages_direct_read,
+									uint32_t *p_npages_vfs_read)
 {
-	size_t		kds_usage = ARROW_ALIGN(KDS_HEAD_LENGTH(kds_head) +
-										kds_head->arrow_virtual_usage);
-	size_t		kds_length = kds_usage;
+	size_t		kds_headsz = KDS_HEAD_LENGTH(kds_head) + kds_head->arrow_virtual_usage;
+	size_t		kds_length = PAGE_ALIGN(kds_headsz);
+	size_t		kds_offset = kds_length;
+	std::vector<char> __buf(kds_headsz);
+	kern_data_store *kds_host = (kern_data_store *)__buf.data();
+	CUdeviceptr	m_segment;
+	off_t		m_offset;
+	CUresult	rc;
+
+	/* make a copy of kds_head */
+	memcpy(kds_host, kds_head, kds_headsz);
+	/* estimate KDS buffer length */
+	for (int j=0; j < kds_host->ncols; j++)
+	{
+		kern_colmeta *cmeta = &kds_host->colmeta[j];
+		void	   *pq_cache;
+		if (cmeta->field_index < 0)
+			continue;
+		pq_cache = parquet_cached_chunks[cmeta->field_index];
+		kds_length += parquet_nvme_cache_length(pq_cache);
+	}
+	/* allocation of GPU device buffer */
+	if (!malloc_gpu_callback(malloc_private, kds_length,
+							 &m_segment, &m_offset))
+		__Elog("out of memory");
+	/* copy to GPU raw memory (and update kds_host) */
+	for (int j=0; j < kds_host->ncols; j++)
+	{
+		kern_colmeta *cmeta = &kds_host->colmeta[j];
+		void	   *pq_cache;
+		ssize_t		sz;
+		if (cmeta->field_index < 0)
+			continue;
+		pq_cache = parquet_cached_chunks[cmeta->field_index];
+		sz = parquet_nvme_cache_read_chunks(pq_cache,
+											cmeta,
+											kds_offset,
+											m_segment,
+											m_offset + kds_offset,
+											p_npages_direct_read,
+											p_npages_vfs_read);
+		if (sz < 0)
+			__Elog("failed on parquet_nvme_cache_read_chunks");
+		kds_offset += sz;
+	}
+	assert(kds_offset <= kds_length);
+	kds_host->length = kds_offset;
+	kds_host->format = KDS_FORMAT_ARROW;
+	rc = cuMemcpyHtoD(m_segment + m_offset, kds_host, kds_headsz);
+	if (rc != CUDA_SUCCESS)
+		__Elog("failed on cuMemcpyHtoD");
+	/* ok */
+	*p_npages_direct_read = (kds_offset - kds_headsz) / PAGE_SIZE;
+	return (kern_data_store *)(m_segment + m_offset);
+}
+
+/*
+ * parquetReadArrowTableSimple
+ */
+static kern_data_store *
+parquetReadArrowTableSimple(std::shared_ptr<arrow::Table> table,
+							std::vector<int> &revmap,
+							const kern_data_store *kds_head,
+							const struct stat *pq_fstat,
+							void *(*malloc_cpu_callback)(void *malloc_private,
+														 size_t malloc_size),
+							void *malloc_private,
+							uint32_t *p_npages_vfs_read,
+							uint32_t *p_npages_direct_read)
+{
+	size_t		kds_headsz = ARROW_ALIGN(KDS_HEAD_LENGTH(kds_head) +
+										 kds_head->arrow_virtual_usage);
+	size_t		kds_length = kds_headsz;
 	kern_data_store *kds;
 
-	/*
-	 * Estimate the buffer length
-	 */
+	/* estimation of buffer length */
 	assert(kds_head->format == KDS_FORMAT_PARQUET);
 	for (const auto &column : table->columns())
 	{
@@ -673,26 +847,16 @@ parquetReadArrowTable(std::shared_ptr<arrow::Table> table,
 			kds_length += lengthOfArrowColumnBuffer(chunk);
 		}
 	}
-
-	/*
-	 * buffer allocation
-	 */
-	kds = (kern_data_store *)malloc_callback(malloc_private, kds_length);
+	/* buffer allocation */
+	kds = (kern_data_store *)malloc_cpu_callback(malloc_private, kds_length);
 	if (!kds)
-	{
 		__Elog("out of memory");
-		return NULL;
-	}
-	/*
-	 * fillup the buffer
-	 */
-	memcpy(kds, kds_head, kds_usage);
-	kds->usage = kds_usage;
+	memcpy(kds, kds_head, kds_headsz);
+	kds->usage = ARROW_ALIGN(kds_headsz);
 	for (int j=0; j < table->num_columns(); j++)
 	{
 		auto	carray = table->column(j);
 		auto	cmeta = &kds->colmeta[revmap[j]];
-
 		/* number of items must be identical */
 		if (j == 0)
 			kds->nitems = carray->length();
@@ -701,75 +865,141 @@ parquetReadArrowTable(std::shared_ptr<arrow::Table> table,
 		/* chunked-array must be single array */
 		assert(carray->num_chunks() <= 1);
 		if (carray->num_chunks() > 0)
-			fillupArrowColumnBuffer(kds, cmeta, carray->chunk(0));
+			fillupArrowColumnBuffer(kds, cmeta, 0UL, carray->chunk(0), pq_fstat);
 	}
 	assert(kds->usage <= kds_length);
 	kds->format = KDS_FORMAT_ARROW;
 	kds->length = kds->usage;
+
 	return kds;
 }
 
+static kern_data_store *
+parquetReadArrowTableWithCache(std::shared_ptr<arrow::Table> table,
+							   std::vector<int> &revmap,
+							   const kern_data_store *kds_head,
+							   const struct stat *pq_fstat,
+							   std::vector<void *> &parquet_cached_chunks,
+							   bool (*malloc_gpu_callback)(void *malloc_private,
+														   size_t malloc_size,
+														   CUdeviceptr *m_segment,
+														   off_t *m_offset),
+							   void *malloc_private,
+							   uint32_t *p_npages_vfs_read,
+							   uint32_t *p_npages_direct_read)
+{
+	size_t		kds_headsz = KDS_HEAD_LENGTH(kds_head) + kds_head->arrow_virtual_usage;
+	size_t		kds_length = ARROW_ALIGN(kds_headsz);
+	std::vector<char> __buf(kds_headsz);
+	kern_data_store *kds_host = (kern_data_store *)__buf.data();
+	CUdeviceptr	m_segment;
+	off_t		m_offset;
+	CUresult	rc;
+
+	memcpy(kds_host, kds_head, kds_headsz);
+	/* estimation of buffer length */
+	assert(kds_host->format == KDS_FORMAT_PARQUET);
+	for (const auto &column : table->columns())
+	{
+		//column = std::shared_ptr<arrow::ChunkedArray>
+		assert(column->num_chunks() <= 1);
+		for (const auto &chunk : column->chunks())
+		{
+			//chunk = std::shared_ptr<arrow::Array>
+			kds_length += lengthOfArrowColumnBuffer(chunk);
+		}
+	}
+	kds_length = PAGE_ALIGN(kds_length);
+	for (int j=0; j < parquet_cached_chunks.size(); j++)
+	{
+		void   *pq_cache = parquet_cached_chunks[j];
+		if (pq_cache)
+			kds_length += PAGE_ALIGN(parquet_nvme_cache_length(pq_cache));
+	}
+	/* buffer allocation */
+	if (!malloc_gpu_callback(malloc_private,
+							 kds_length,
+							 &m_segment,
+							 &m_offset))
+		__Elog("out of memory");
+	/* buffer copy (arrow::Table --> GPU memory) */
+	kds_host->usage = ARROW_ALIGN(kds_headsz);
+	for (int j=0; j < table->num_columns(); j++)
+	{
+		auto	carray = table->column(j);
+		auto	cmeta = &kds_host->colmeta[revmap[j]];
+		/* number of items must be identical */
+		if (j == 0)
+			kds_host->nitems = carray->length();
+		else if (kds_host->nitems != carray->length())
+			__Elog("number of elements mismatch");
+		/* chunked-array must be single array */
+		assert(carray->num_chunks() <= 1);
+		if (carray->num_chunks() > 0)
+			fillupArrowColumnBuffer(kds_host, cmeta,
+									m_segment + m_offset,
+									carray->chunk(0),
+									pq_fstat);
+	}
+	/* buffer copy (Parquet Cache --> GPU memory) */
+	kds_host->usage = PAGE_ALIGN(kds_host->usage);
+	for (int j=0; j < parquet_cached_chunks.size(); j++)
+	{
+		void   *pq_cache = parquet_cached_chunks[j];
+		size_t	sz;
+		if (pq_cache)
+		{
+			auto	cmeta = &kds_host->colmeta[revmap[j]];
+			
+			sz = parquet_nvme_cache_read_chunks(pq_cache,
+												cmeta,
+												kds_host->usage,
+												m_segment,
+												m_offset,
+												p_npages_direct_read,
+												p_npages_vfs_read);
+			kds_host->usage += sz;
+		}
+	}
+	/* buffer copy (KDS header portion)  */
+	assert(kds_host->usage <= kds_length);
+	kds_host->format = KDS_FORMAT_ARROW;
+	kds_host->length = kds_host->usage;
+	rc = cuMemcpyHtoD(m_segment + m_offset,
+					  kds_host,
+					  kds_headsz);
+	if (rc != CUDA_SUCCESS)
+		__Elog("failed on cuMemcpyHtoD");
+	/* ok */
+	return (kern_data_store *)(m_segment + m_offset);
+}
+
 /*
- * parquetReadOneRowGroup
+ * __parquetReadOneRowGroupNormal
  *
- * It returns a KDS buffer with KDS_FORMAT_ARROW that loads the
- * specified row-group.
+ * At least one columns must be loaded using libparquet file reader, even though
+ * some columns can be fetched from the disk cache.
  */
 static kern_data_store *
-__parquetReadOneRowGroup(const char *filename,
-						 const kern_data_store *kds_head,
-						 bool try_parquet_cache,
-						 void *(*malloc_callback)(void *malloc_private,
-												  size_t malloc_size),
-						 void *malloc_private)
+__parquetReadOneRowGroupNormal(std::shared_ptr<arrow::io::ReadableFile> parquet_filp,
+							   const char *filename,
+							   const struct stat *stat_buf,
+							   const kern_data_store *kds_head,
+							   std::vector<void *> &parquet_cached_chunks,
+							   bool (*malloc_gpu_callback)(void *malloc_private,
+														   size_t malloc_size,
+														   CUdeviceptr *m_segment,
+														   off_t *m_offset),
+							   void *(*malloc_cpu_callback)(void *malloc_private,
+															size_t malloc_size),
+							   void *malloc_private,
+							   uint32_t *p_npages_direct_read,
+							   uint32_t *p_npages_vfs_read)
 {
-	int					row_group_id = kds_head->parquet_row_group;
-	std::shared_ptr<arrow::io::ReadableFile> parquet_filp;
-    std::unique_ptr<parquet::ParquetFileReader> raw_file_reader = nullptr;
-    std::unique_ptr<parquet::arrow::FileReader> arrow_file_reader = nullptr;
+	std::unique_ptr<parquet::ParquetFileReader> raw_file_reader = nullptr;
+	std::unique_ptr<parquet::arrow::FileReader> arrow_file_reader = nullptr;
 	kern_data_store	   *kds = NULL;
-
-	/* open the parquet file */
-	{
-		auto	rv = arrow::io::ReadableFile::Open(std::string(filename));
-		if (!rv.ok())
-			__Elog("failed on arrow::io::ReadableFile::Open('%s'): %s",
-				   filename,
-				   rv.status().ToString().c_str());
-		parquet_filp = rv.ValueOrDie();
-	}
-
-	/*
-	 * Lookup Parquet NVMe Disk Cache
-	 *
-	 * Three cases are possible:
-	 *
-	 * - No cache hit at all
-	 *   The libparquet reader loads the RowGroup and copies it into the KDS
-	 *   on managed memory.
-	 *   At the same time, the loaded RowGroup is written back to the Disk Cache.
-	 *
-	 * - Partial cache hit
-	 *   The libparquet reader loads the RowGroups that were not found in cache
-	 *   and copies them into the KDS on raw memory using the CUDA API.
-	 *   Columns that hit in the cache are transferred directly from storage
-	 *   to the GPU using GDS.
-	 *
-	 * - Full cache hit
-	 *   Without using libparquet, all referenced columns are transferred
-	 *   directly from storage to the KDS on raw memory using GDS.
-	 */
-	if (try_parquet_cache)
-	{
-		//TO BE IMPLEMENTED
-		//1. lookup the parquet cache
-		//2. (if not fully cached) read parquet file by libparuqet
-		//3, allocation of KDS buffer (managed or raw)
-		//4. arrow::Table -> KDS by CPU(managed) or DMA(raw)
-		//5. (if any cached) iovec is processed
-		//6. (if any uncached) arrow::Table async cached written
-		//7. arrow::Table shall be released later
-	}
+	int					row_group_id = kds_head->parquet_row_group;
 
 	/*
 	 * Open a new Parquet File Reader dedicated for this thread, but
@@ -788,8 +1018,7 @@ __parquetReadOneRowGroup(const char *filename,
 														   reader_props,
 														   metadata);
 	}
-
-	/* open the arrow file reader */
+	/* Open the Arrow file reader */
 	{
 		auto	rv = parquet::arrow::FileReader::Make(arrow::default_memory_pool(),
 													  std::move(raw_file_reader));
@@ -798,15 +1027,11 @@ __parquetReadOneRowGroup(const char *filename,
 				   filename,
 				   rv.status().ToString().c_str());
 		arrow_file_reader = std::move(rv.ValueOrDie());
-
 		/* enables thread-pool of the arrow file reader, if required */
 		if (kds_head->parquet_parallel_load)
 			arrow_file_reader->set_use_threads(true);
 	}
-
-	/*
-	 * Read the row-group as Arrow Record-Batch
-	 */
+	/* Read the row-group as Arrow Record-Batch */
 	if (row_group_id < arrow_file_reader->num_row_groups())
 	{
 		std::shared_ptr<arrow::Table> table;
@@ -816,6 +1041,8 @@ __parquetReadOneRowGroup(const char *filename,
 
 		setupParquetFileReferenced(kds_head,
 								   arrow_file_reader->manifest(),
+								   (malloc_gpu_callback != NULL),
+								   parquet_cached_chunks,
 								   referenced,
 								   revmap);
 		status = arrow_file_reader->ReadRowGroup(row_group_id, referenced, &table);
@@ -840,43 +1067,161 @@ __parquetReadOneRowGroup(const char *filename,
 				break;
 			}
 		}
-		kds = parquetReadArrowTable(table,
-									revmap,
-									kds_head,
-									malloc_callback,
-									malloc_private);
+		/* load the arrow::Table to KDS */
+		if (malloc_gpu_callback)
+		{
+			kds = parquetReadArrowTableWithCache(table,
+												 revmap,
+												 kds_head,
+												 stat_buf,
+												 parquet_cached_chunks,
+												 malloc_gpu_callback,
+												 malloc_private,
+												 p_npages_direct_read,
+												 p_npages_vfs_read);
+		}
+		else
+		{
+			kds = parquetReadArrowTableSimple(table,
+											  revmap,
+											  kds_head,
+											  stat_buf,
+											  malloc_cpu_callback,
+											  malloc_private,
+											  p_npages_direct_read,
+											  p_npages_vfs_read);
+		}
 	}
 	return kds;
 }
 
 /*
- * parquetReadOneRowGroup - interface to C-portion
+ * parquetReadOneRowGroup
  */
-struct kern_data_store;
-
 kern_data_store *
 parquetReadOneRowGroup(const char *filename,
 					   const kern_data_store *kds_head,
-					   bool try_parquet_cache,
-					   void *(*malloc_callback)(void *malloc_private,
-												size_t malloc_size),
+					   bool  (*malloc_gpu_callback)(void *malloc_private,
+													size_t malloc_size,
+													CUdeviceptr *m_segment,
+													off_t *m_offset),
+					   void *(*malloc_host_callback)(void *malloc_private,
+													 size_t malloc_size),
 					   void *malloc_private,
+					   uint32_t *p_npages_direct_read,
+					   uint32_t *p_npages_vfs_read,
 					   char *error_message,
 					   size_t error_message_sz)
 {
 	kern_data_store *kds = NULL;
+	struct stat		stat_buf;
+	std::vector<void *> parquet_cached_chunks;
 
 	try {
-		kds = __parquetReadOneRowGroup(filename,
-									   kds_head,
-									   try_parquet_cache,
-									   malloc_callback,
-									   malloc_private);
+		std::shared_ptr<arrow::io::ReadableFile> parquet_filp;
+		/*
+		 * Open the Parquet file
+		 */
+		{
+			auto    rv = arrow::io::ReadableFile::Open(std::string(filename));
+			if (!rv.ok())
+				__Elog("failed on arrow::io::ReadableFile::Open('%s'): %s",
+					   filename,
+					   rv.status().ToString().c_str());
+			parquet_filp = rv.ValueOrDie();
+			/* also stat file */
+			if (fstat(parquet_filp->file_descriptor(), &stat_buf) != 0)
+				__Elog("failed on fstat('%s'): %m", filename);
+		}
+		/*
+		 * Try Parquet disk cache if GPU-Direct SQL is available.
+		 *
+		 * Three cases are possible:
+		 *
+		 * - No cache hit at all
+		 *   The libparquet reader loads the RowGroup and copies it into
+		 *   the KDS on managed memory.
+		 *   Then, the loaded RowGroup shall be written back to the disk cache
+		 *   asynchronously.
+		 *
+		 * - Partial cache hit
+		 *   The libparquet reader loads the RowGroups that were not found
+		 *   in the disk cache, and copies them into the KDS on raw memory
+		 *   using CUDA API, because cached portion must be loaded vid
+		 *   GPU-Direct SQL semantics.
+		 *   The columns found in the disk cache are transferred directly
+		 *   from the disk cache to GPU memory using GDS.
+		 *
+		 * - Full cache hit
+		 *   Without using libparquet, all referenced columns are transferred
+		 *   directly from storage to the KDS on raw memory using GDS.
+		 */
+		if (malloc_gpu_callback)
+		{
+			int		num_cached_columns = 0;
+			int		num_uncached_columns = 0;
+
+			for (int j=0; j < kds_head->ncols; j++)
+			{
+				const kern_colmeta *cmeta = &kds_head->colmeta[j];
+				int			row_group_id = kds_head->parquet_row_group;
+				int			field_index = cmeta->field_index;
+				void	   *pq_cache;
+
+				if (field_index < 0 ||
+					cmeta->idx_subattrs > 0 ||
+					cmeta->num_subattrs > 0)
+					continue;
+				pq_cache = parquet_nvme_cache_lookup(&stat_buf,
+													 row_group_id,
+													 field_index);
+				if (pq_cache)
+					num_cached_columns++;
+				else
+					num_uncached_columns++;
+				if (field_index >= parquet_cached_chunks.size())
+					parquet_cached_chunks.resize(field_index + 1);
+				parquet_cached_chunks[field_index] = pq_cache;
+			}
+			/*
+			 * Fast path if all the referenced columns are cached.
+			 */
+			if (num_cached_columns > 0 && num_uncached_columns == 0)
+			{
+				kds = __parquetReadOneRowGroupFullyCached(kds_head,
+														  parquet_cached_chunks,
+														  malloc_gpu_callback,
+														  malloc_private,
+														  p_npages_direct_read,
+														  p_npages_vfs_read);
+			}
+		}
+		/*
+		 * Elsewhere, use arrow/parquet file reader
+		 */
+		if (!kds)
+			kds = __parquetReadOneRowGroupNormal(parquet_filp,
+												 filename,
+												 &stat_buf,
+												 kds_head,
+												 parquet_cached_chunks,
+												 malloc_gpu_callback,
+												 malloc_host_callback,
+												 malloc_private,
+												 p_npages_direct_read,
+												 p_npages_vfs_read);
 	}
 	catch (const std::exception &e) {
 		if (error_message)
 			snprintf(error_message, error_message_sz, "%s", e.what());
-		return NULL;
+		kds = NULL;
+	}
+	/* release parquet cache if any */
+	for (int j=0; j < parquet_cached_chunks.size(); j++)
+	{
+		void   *pq_cache = parquet_cached_chunks[j];
+		if (pq_cache)
+			parquet_nvme_cache_release(pq_cache);
 	}
 	return kds;
 }

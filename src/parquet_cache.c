@@ -190,6 +190,19 @@ parquet_nvme_cache_release(void *__entry)
 }
 
 /*
+ * parquet_nvme_cache_length
+ */
+size_t
+parquet_nvme_cache_length(const void *__entry)
+{
+	const nvmeBlockCacheEntry *entry = (const nvmeBlockCacheEntry *)__entry;
+
+	return (PAGE_ALIGN(entry->nullmap_length) +
+			PAGE_ALIGN(entry->values_length) +
+			PAGE_ALIGN(entry->extra_length));
+}
+
+/*
  * parquet_nvme_cache_read_chunk
  */
 ssize_t
@@ -348,7 +361,7 @@ parquet_nvme_cache_reclaim_blocks(int target)
 
 /* ----------------------------------------------------------------
  *
- * parquet_nvme_cache_write_async
+ * parquetCacheWriteAsync
  *
  * ----------------------------------------------------------------
  */
@@ -381,7 +394,7 @@ static bool
 __parquet_cache_async_write_block(off_t *p_f_offset,
 								  char *block_buf,
 								  const off_t *fchunk_base,
-								  const char *arrow_ptr,
+								  const uint8_t *arrow_ptr,
 								  size_t arrow_len,
 								  bool is_last_buffer)
 {
@@ -424,13 +437,13 @@ __parquet_cache_async_write_block(off_t *p_f_offset,
 }
 
 static void
-__parquet_cache_async_write_one(nvmeBlockCacheAsyncWrite *req, char *block_buf)
+__parquet_cache_async_write_one(parquetCacheWriteAsyncData *data, char *block_buf)
 {
 	nvmeBlockCacheEntry *entry = NULL;
 	size_t		block_sz = (size_t)pgstrom_parquet_nvme_cache_unitsz_mb << 20;
-	size_t		required = (PAGE_ALIGN(req->nullmap_len) +
-							PAGE_ALIGN(req->values_len) +
-							PAGE_ALIGN(req->extra_len));
+	size_t		required = (PAGE_ALIGN(data->nullmap_len) +
+							PAGE_ALIGN(data->values_len) +
+							PAGE_ALIGN(data->extra_len));
 	int			nr_blocks = (required + block_sz - 1) / block_sz;
 	int			block_cnt = 0;
 	off_t	   *fchunk_base = (off_t *)alloca(sizeof(off_t) * nr_blocks);
@@ -476,16 +489,16 @@ again:
 	pthreadMutexUnlock(&nvme_cache_head->free_lock);
 
 	/* 2. setup new cache entry */
-	entry->st_dev   = req->st_dev;
-	entry->st_ino   = req->st_ino;
-	entry->st_utime = req->st_utime;
-	entry->rg_index = req->rg_index;
-	entry->field_id = req->field_id;
-	entry->hash     = parquet_nvme_cache_hash(req->st_dev,
-											  req->st_ino,
-											  req->st_utime,
-											  req->rg_index,
-											  req->field_id);
+	entry->st_dev   = data->pq_fstat.st_dev;
+	entry->st_ino   = data->pq_fstat.st_ino;
+	entry->st_utime = __timespec_to_uts(&data->pq_fstat.st_mtim);
+	entry->rg_index = data->rg_index;
+	entry->field_id = data->field_id;
+	entry->hash     = parquet_nvme_cache_hash(entry->st_dev,
+											  entry->st_ino,
+											  entry->st_utime,
+											  entry->rg_index,
+											  entry->field_id);
 	entry->refcnt = -1;		/* flag for WIP */
 
 	/* 3. check cache duplication */
@@ -512,40 +525,40 @@ again:
 	pthreadMutexUnlock(&nvme_cache_head->hash_locks[slot_id]);
 
 	/* 4. direct write to cache file */
-	if (!req->nullmap_ptr)
+	if (!data->nullmap_ptr)
 		entry->nullmap_length = 0;
 	else if (__parquet_cache_async_write_block(&f_offset,
 											   block_buf,
 											   fchunk_base,
-											   req->nullmap_ptr,
-											   req->nullmap_len,
-											   !req->values_ptr &&
-											   !req->extra_ptr))
-		entry->nullmap_length = req->nullmap_len;
+											   data->nullmap_ptr,
+											   data->nullmap_len,
+											   !data->values_ptr &&
+											   !data->extra_ptr))
+		entry->nullmap_length = data->nullmap_len;
 	else
 		goto bailout_unlink;
 
-	if (!req->values_ptr)
+	if (!data->values_ptr)
 		entry->values_length = 0;
 	else if (__parquet_cache_async_write_block(&f_offset,
 											   block_buf,
 											   fchunk_base,
-											   req->values_ptr,
-											   req->values_len,
-											   !req->extra_ptr))
-		entry->values_length = req->values_len;
+											   data->values_ptr,
+											   data->values_len,
+											   !data->extra_ptr))
+		entry->values_length = data->values_len;
 	else
 		goto bailout_unlink;
 
-	if (!req->extra_ptr)
+	if (!data->extra_ptr)
 		entry->extra_length = 0;
 	else if (__parquet_cache_async_write_block(&f_offset,
 											   block_buf,
 											   fchunk_base,
-											   req->extra_ptr,
-											   req->extra_len,
+											   data->extra_ptr,
+											   data->extra_len,
 											   true))
-		entry->extra_length = req->extra_len;
+		entry->extra_length = data->extra_len;
 	else
 		goto bailout_unlink;
 	assert(f_offset == required);
@@ -596,18 +609,17 @@ __parquet_cache_async_write_worker_main(void *__priv)
 	{
 		if (!dlist_is_empty(&parquet_cache_async_write_list))
 		{
-			nvmeBlockCacheAsyncWrite *req
-				= dlist_container(nvmeBlockCacheAsyncWrite, chain,
-								  dlist_pop_head_node(&parquet_cache_async_write_list));
+			dlist_node *dnode = dlist_pop_head_node(&parquet_cache_async_write_list);
+			parquetCacheWriteAsyncData *data
+				= dlist_container(parquetCacheWriteAsyncData, chain, dnode);
 			pthreadMutexUnlock(&parquet_cache_async_write_mutex);
-			memset(&req->chain, 0, sizeof(dlist_node));
-			__parquet_cache_async_write_one(req, block_buf);
+			memset(&data->chain, 0, sizeof(dlist_node));
+			__parquet_cache_async_write_one(data, block_buf);
 			/* cleanup */
-			req->buffer_release_callback(req->buffer_release_private);
-			free(req);
-			pthreadMutexLock(&parquet_cache_async_write_mutex);
+			releaseParquetCacheWriteAsyncData(data);
 			/* reset */
 			noop_counter = 0;
+			pthreadMutexLock(&parquet_cache_async_write_mutex);
 		}
 		else
 		{
@@ -652,19 +664,8 @@ __parquet_cache_async_write_worker_main(void *__priv)
 }
 
 void
-parquet_nvme_cache_write_async(const struct stat *pq_fstat,
-							   int32_t rg_index,
-							   int32_t field_id,
-							   const char *nullmap_ptr,
-							   size_t nullmap_len,
-							   const char *values_ptr,
-							   size_t values_len,
-							   const char *extra_ptr,
-							   size_t extra_len,
-							   void (*buffer_release_callback)(void *private),
-							   void *buffer_release_private)
+parquetCacheWriteAsync(parquetCacheWriteAsyncData *data)
 {
-	nvmeBlockCacheAsyncWrite *req = NULL;
 	uint32_t	ntasks;
 
 	/* launch worker thread if it looks lacking */
@@ -682,26 +683,18 @@ parquet_nvme_cache_write_async(const struct stat *pq_fstat,
 	}
 	/* give up if too large async-write tasks are pending */
 	ntasks = pg_atomic_fetch_add_u32(&parquet_cache_async_write_num_pending_tasks, 1);
-	if (ntasks > pgstrom_parquet_nvme_cache_max_async_write)
-		goto bailout;
-	/* setup async-write requet object */
-	req = malloc(sizeof(nvmeBlockCacheAsyncWrite));
-	if (!req)
-		goto bailout;
-	req->st_dev   = pq_fstat->st_dev;
-	req->st_ino   = pq_fstat->st_ino;
-	req->st_utime = __timespec_to_uts(&pq_fstat->st_mtim);
-	req->rg_index = rg_index;
-	req->field_id = field_id;
-
-	pthreadMutexLock(&parquet_cache_async_write_mutex);
-	dlist_push_tail(&parquet_cache_async_write_list, &req->chain);
-	pthreadCondSignal(&parquet_cache_async_write_cond);
-	pthreadMutexUnlock(&parquet_cache_async_write_mutex);
-	return;		/* ok */
-bailout:
-	pg_atomic_fetch_sub_u32(&parquet_cache_async_write_num_pending_tasks, 1);
-	buffer_release_callback(buffer_release_private);
+	if (ntasks < pgstrom_parquet_nvme_cache_max_async_write)
+	{
+		pthreadMutexLock(&parquet_cache_async_write_mutex);
+		dlist_push_tail(&parquet_cache_async_write_list, &data->chain);
+		pthreadCondSignal(&parquet_cache_async_write_cond);
+		pthreadMutexUnlock(&parquet_cache_async_write_mutex);
+	}
+	else
+	{
+		/* release immediately */
+		releaseParquetCacheWriteAsyncData(data);
+	}
 }
 
 /*

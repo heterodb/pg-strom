@@ -194,6 +194,13 @@ typedef unsigned int		Oid;
 /* Arrow buffer alignent */
 #define ALIGNOF_ARROW		64
 #define ARROW_ALIGN(len)	TYPEALIGN(ALIGNOF_ARROW,len)
+/* CPU Page alignment */
+#define	PAGE_SIZE			4096
+#define PAGE_MASK			(PAGE_SIZE-1)
+#define PAGE_SHIFT			12
+#define PAGES_PER_BLOCK		(BLCKSZ / PAGE_SIZE)
+#define PAGE_ALIGN(x)		TYPEALIGN(PAGE_SIZE,(x))
+#define PAGE_ALIGN_DOWN(x)	TYPEALIGN_DOWN(PAGE_SIZE,(x))
 
 #ifndef HAS_GPUMASK_TYPEDEF
 #define HAS_GPUMASK_TYPEDEF

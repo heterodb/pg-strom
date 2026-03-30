@@ -19,11 +19,6 @@ static bool	__pgstrom_enabled_guc = true;			/* GUC */
 int			pgstrom_cpu_fallback_elevel = ERROR;	/* GUC */
 bool		pgstrom_regression_test_mode = false;	/* GUC */
 bool		pgstrom_explain_developer_mode = false;	/* GUC */
-long		PAGE_SIZE;
-long		PAGE_MASK;
-int			PAGE_SHIFT;
-long		PHYS_PAGES;
-long		PAGES_PER_BLOCK;
 static bool	pgstrom_enable_select_into_direct;		/* GUC */
 
 static planner_hook_type	planner_hook_next = NULL;
@@ -928,13 +923,6 @@ _PG_init(void)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("PG-Strom must be loaded via shared_preload_libraries")));
-	/* init misc variables */
-	PAGE_SIZE = sysconf(_SC_PAGESIZE);
-	PAGE_MASK = PAGE_SIZE - 1;
-	PAGE_SHIFT = get_next_log2(PAGE_SIZE);
-	PHYS_PAGES = sysconf(_SC_PHYS_PAGES);
-	PAGES_PER_BLOCK = BLCKSZ / PAGE_SIZE;
-
 	/* init pg-strom infrastructure */
 	pgstrom_init_gucs();
 	pgstrom_init_extra();

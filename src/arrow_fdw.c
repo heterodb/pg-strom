@@ -4126,6 +4126,8 @@ parquetFillupRowGroup(Relation relation,
 {
 	kern_data_store *kds_head;
 	kern_data_store *kds;
+	uint32_t	npages_direct_read = 0;
+	uint32_t	npages_vfs_read = 0;
 	char		error_message[320];
 
 	/* prepare the KDS buffer */
@@ -4139,10 +4141,13 @@ parquetFillupRowGroup(Relation relation,
 	resetLargeStringInfo(chunk_buffer);
 	kds = parquetReadOneRowGroup(rb_state->af_state->filename,
 								 kds_head,
-								 false,
+								 NULL,	/* No Parquet Disk Cache */
 								 __parquetFillupAllocBuffer,
 								 (void *)chunk_buffer,
-								 error_message, sizeof(error_message));
+								 &npages_direct_read,
+								 &npages_vfs_read,
+								 error_message,
+								 sizeof(error_message));
 	if (!kds)
 		elog(ERROR, "Unable to load row-group %d of the parquet file '%s': %s",
 			 rb_state->rb_index,

@@ -3639,8 +3639,24 @@ gpuservLoadKdsArrow(gpuClient *gclient,
  *
  * fill up KDS_FORMAT_PARQUET using libarrow/libparquet
  */
+static bool
+__loadKdsParquetGpuMallocCallback(void *data, size_t bytesize,
+								  CUdeviceptr *m_segment,
+								  off_t *m_offset)
+{
+	gpuMemChunk	  **p_chunk = (gpuMemChunk **)data;
+	gpuMemChunk	   *m_chunk = gpuMemAlloc(bytesize);
+
+	if (!m_chunk)
+		return false;
+	*p_chunk = m_chunk;
+	*m_segment = m_chunk->__base;
+	*m_offset  = m_chunk->__offset;
+	return true;
+}
+
 static void *
-__loadKdsParquetMallocCallback(void *data, size_t bytesize)
+__loadKdsParquetCpuMallocCallback(void *data, size_t bytesize)
 {
 	gpuMemChunk	  **p_chunk = (gpuMemChunk **)data;
 	gpuMemChunk	   *m_chunk = gpuMemAllocManaged(bytesize);
@@ -3657,6 +3673,7 @@ static gpuMemChunk *
 gpuservLoadKdsParquet(gpuClient *gclient,
 					  kern_data_store *kds_head,
 					  const char *pathname,
+					  uint32_t *p_npages_direct_read,
 					  uint32_t *p_npages_vfs_read)
 {
 	gpuMemChunk *m_chunk;
@@ -3665,10 +3682,13 @@ gpuservLoadKdsParquet(gpuClient *gclient,
 
 	kds = parquetReadOneRowGroup(pathname,
 								 kds_head,
-								 true,
-								 __loadKdsParquetMallocCallback,
+								 __loadKdsParquetGpuMallocCallback,
+								 __loadKdsParquetCpuMallocCallback,
 								 (void *)&m_chunk,
-								 error_message, sizeof(error_message));
+								 p_npages_direct_read,
+								 p_npages_vfs_read,
+								 error_message,
+								 sizeof(error_message));
 	if (!kds)
 	{
 		__gsLog("%s", error_message);
@@ -4353,18 +4373,14 @@ gpuservHandleGpuTaskExec(gpuContext *gcontext,
 		s_chunk = gpuservLoadKdsParquet(gclient,
 										kds_src,
 										kds_src_pathname,
+										&npages_direct_read,
 										&npages_vfs_read);
 		if (!s_chunk)
 			return;
 		m_kds_src = s_chunk->m_devptr;
-		rc = gpuMemoryPrefetchKDS((kern_data_store *)m_kds_src,
-								  MY_MEMLOCATION_PER_THREAD);
-		if (rc != CUDA_SUCCESS)
-		{
-			gpuClientELog(gclient, "failed on gpuMemoryPrefetchKDS: %s",
-						  cuStrError(rc));
-			return;
-		}
+		if (s_chunk->mseg->pool->is_managed)
+			(void)gpuMemoryPrefetchKDS((kern_data_store *)m_kds_src,
+									   MY_MEMLOCATION_PER_THREAD);
 	}
 	else
 	{

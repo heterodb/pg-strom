@@ -157,9 +157,9 @@
 #include <sys/uio.h>
 #include <sys/wait.h>
 #include <unistd.h>
-#include "arrow_fdw.h"
 #include "xpu_common.h"
 #include "cuda_common.h"
+#include "arrow_fdw.h"
 #include "pg_utils.h"
 #include "pg_compat.h"
 #include "heterodb_extra.h"
@@ -534,18 +534,6 @@ struct pgstromTaskState
 typedef struct pgstromTaskState		pgstromTaskState;
 
 /*
- * Global variables
- */
-extern long		PAGE_SIZE;
-extern long		PAGE_MASK;
-extern int		PAGE_SHIFT;
-extern long		PHYS_PAGES;
-extern long		PAGES_PER_BLOCK;	/* (BLCKSZ / PAGE_SIZE) */
-#define PAGE_ALIGN(x)			TYPEALIGN(PAGE_SIZE,(x))
-#define PAGE_ALIGN_DOWN(x)		TYPEALIGN_DOWN(PAGE_SIZE,(x))
-#define PGSTROM_CHUNK_SIZE		((size_t)(65534UL << 10))
-
-/*
  * codegen.c
  */
 typedef struct
@@ -687,6 +675,8 @@ extern Path	   *pgstromTryFindGistIndex(PlannerInfo *root,
 /*
  * relscan.c
  */
+#define PGSTROM_CHUNK_SIZE		((size_t)(65534UL << 10))
+
 extern Bitmapset *pickup_outer_referenced(PlannerInfo *root,
 										  RelOptInfo *base_rel,
 										  Bitmapset *referenced);
@@ -1017,11 +1007,6 @@ extern bool		kds_arrow_fetch_tuple(TupleTableSlot *slot,
 									  size_t index,
 									  const Bitmapset *referenced);
 extern void		pgstrom_init_arrow_fdw(void);
-
-/*
- * parquet_cache.c
- */
-extern void		pgstrom_init_parquet_cache(void);
 
 /*
  * select_into.c

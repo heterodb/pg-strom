@@ -494,13 +494,9 @@ __fallbackFileReadIOV(const char *pathname,
 					  uint32_t *p_npages_direct_read,
 					  uint32_t *p_npages_vfs_read)
 {
-	static __thread long PAGE_SIZE = 0;
 	int			fdesc;
 	uint32_t	nr_pages = 0;
 	struct stat	stat_buf;
-
-	if (PAGE_SIZE == 0)
-		PAGE_SIZE = sysconf(_SC_PAGESIZE);
 
 	fdesc = open(pathname, O_RDONLY);
 	if (fdesc < 0)
