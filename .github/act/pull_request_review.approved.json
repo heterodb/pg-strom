@@ -1,0 +1,17 @@
+{
+  "review": {
+    "state": "approved",
+    "user": {
+      "login": "local-reviewer"
+    }
+  },
+  "pull_request": {
+    "number": 1
+  },
+  "repository": {
+    "name": "pg-strom",
+    "owner": {
+      "login": "heterodb"
+    }
+  }
+}
