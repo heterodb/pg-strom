@@ -779,7 +779,7 @@ __parquetReadOneRowGroupFullyCached(const kern_data_store *kds_head,
 		if (cmeta->field_index < 0)
 			continue;
 		pq_cache = parquet_cached_chunks[cmeta->field_index];
-		kds_length += parquet_nvme_cache_length(pq_cache);
+		kds_length += parquetCacheLength(pq_cache);
 	}
 	/* allocation of GPU device buffer */
 	if (!malloc_gpu_callback(malloc_private, kds_length,
@@ -790,20 +790,17 @@ __parquetReadOneRowGroupFullyCached(const kern_data_store *kds_head,
 	{
 		kern_colmeta *cmeta = &kds_host->colmeta[j];
 		void	   *pq_cache;
-		ssize_t		sz;
+
 		if (cmeta->field_index < 0)
 			continue;
 		pq_cache = parquet_cached_chunks[cmeta->field_index];
-		sz = parquet_nvme_cache_read_chunks(pq_cache,
-											cmeta,
-											kds_offset,
-											m_segment,
-											m_offset + kds_offset,
-											p_npages_direct_read,
-											p_npages_vfs_read);
-		if (sz < 0)
-			__Elog("failed on parquet_nvme_cache_read_chunks");
-		kds_offset += sz;
+		kds_offset += parquetCacheReadChunks(pq_cache,
+											 cmeta,
+											 kds_offset,
+											 m_segment,
+											 m_offset + kds_offset,
+											 p_npages_direct_read,
+											 p_npages_vfs_read);
 	}
 	assert(kds_offset <= kds_length);
 	kds_host->length = kds_offset;
@@ -914,7 +911,7 @@ parquetReadArrowTableWithCache(std::shared_ptr<arrow::Table> table,
 	{
 		void   *pq_cache = parquet_cached_chunks[j];
 		if (pq_cache)
-			kds_length += PAGE_ALIGN(parquet_nvme_cache_length(pq_cache));
+			kds_length += PAGE_ALIGN(parquetCacheLength(pq_cache));
 	}
 	/* buffer allocation */
 	if (!malloc_gpu_callback(malloc_private,
@@ -946,19 +943,19 @@ parquetReadArrowTableWithCache(std::shared_ptr<arrow::Table> table,
 	for (int j=0; j < parquet_cached_chunks.size(); j++)
 	{
 		void   *pq_cache = parquet_cached_chunks[j];
-		size_t	sz;
+
 		if (pq_cache)
 		{
 			auto	cmeta = &kds_host->colmeta[revmap[j]];
 			
-			sz = parquet_nvme_cache_read_chunks(pq_cache,
-												cmeta,
-												kds_host->usage,
-												m_segment,
-												m_offset,
-												p_npages_direct_read,
-												p_npages_vfs_read);
-			kds_host->usage += sz;
+			kds_host->usage
+				+= parquetCacheReadChunks(pq_cache,
+										  cmeta,
+										  kds_host->usage,
+										  m_segment,
+										  m_offset,
+										  p_npages_direct_read,
+										  p_npages_vfs_read);
 		}
 	}
 	/* buffer copy (KDS header portion)  */
@@ -1172,9 +1169,9 @@ parquetReadOneRowGroup(const char *filename,
 					cmeta->idx_subattrs > 0 ||
 					cmeta->num_subattrs > 0)
 					continue;
-				pq_cache = parquet_nvme_cache_lookup(&stat_buf,
-													 row_group_id,
-													 field_index);
+				pq_cache = parquetCacheLookup(&stat_buf,
+											  row_group_id,
+											  field_index);
 				if (pq_cache)
 					num_cached_columns++;
 				else
@@ -1221,7 +1218,7 @@ parquetReadOneRowGroup(const char *filename,
 	{
 		void   *pq_cache = parquet_cached_chunks[j];
 		if (pq_cache)
-			parquet_nvme_cache_release(pq_cache);
+			parquetCacheRelease(pq_cache);
 	}
 	return kds;
 }

@@ -1,7 +1,7 @@
 /*
  * parquet_cache.c
  *
- * Routines to map Apache Arrow files as PG's Foreign-Table.
+ * Routines of Parquet flatten cache in C-portion
  * ----
  * Copyright 2011-2026 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
  * Copyright 2014-2026 (C) PG-Strom Developers Team
@@ -33,7 +33,7 @@ typedef struct {
 	/* LRU */
 	dlist_node		lru_chain;		/* LRU list */
 	uint64_t		lru_timestamp;	/* last referenced timestamp */
-} nvmeBlockCacheEntry;
+} parquetCacheEntry;
 
 typedef struct {
 	/* Hash slots */
@@ -51,23 +51,23 @@ typedef struct {
 	pg_atomic_uint64	num_active_blocks;
 	pg_atomic_uint64	num_cached_chunks;
 	pg_atomic_uint64	total_actual_usage;
-} nvmeBlockCacheHead;
+} parquetCacheHead;
 
 /*
  * Static variables
  */
 static shmem_request_hook_type shmem_request_next = NULL;
 static shmem_startup_hook_type shmem_startup_next = NULL;
-static char	   *pgstrom_parquet_nvme_cache_path;				/* GUC */
-static int		pgstrom_parquet_nvme_cache_size_mb;				/* GUC */
-static int		pgstrom_parquet_nvme_cache_unitsz_mb;			/* GUC */
-static int		pgstrom_parquet_nvme_cache_eviction_threshold;	/* GUC */
-static double	pgstrom_parquet_nvme_cache_adaptive_eviction_ratio; /* GUC */
-static int		pgstrom_parquet_nvme_cache_max_async_write;		/* GUC */
-static uint64_t	pgstrom_parquet_nvme_cache_nblocks;		/* immutable */
-static uint64_t	pgstrom_parquet_nvme_cache_nslots;		/* immutable */
-static int		pgstrom_parquet_nvme_cache_fdesc = -1;
-static nvmeBlockCacheHead  *nvme_cache_head = NULL;
+static char	   *pgstrom_parquet_cache_path;				/* GUC */
+static int		pgstrom_parquet_cache_size_mb;			/* GUC */
+static int		pgstrom_parquet_cache_unitsz_mb;		/* GUC */
+static int		pgstrom_parquet_cache_eviction_seconds;	/* GUC */
+static double	pgstrom_parquet_cache_target_usage;		/* GUC */
+static int		pgstrom_parquet_cache_max_async_write;	/* GUC */
+static uint64_t	pgstrom_parquet_cache_nblocks;		/* immutable */
+static uint64_t	pgstrom_parquet_cache_nslots;		/* immutable */
+static int		pgstrom_parquet_cache_fdesc = -1;
+static parquetCacheHead  *parquet_cache_head = NULL;
 
 /* __timespec_to_utime */
 static inline uint64_t
@@ -86,14 +86,14 @@ __timeval_to_uts(const struct timeval *t_val)
 }
 
 /*
- * parquet_nvme_cache_hash
+ * __parquetCacheHash
  */
 static uint32_t
-parquet_nvme_cache_hash(dev_t st_dev,
-						dev_t st_ino,
-						uint64_t st_utime,
-						int32_t rg_index,
-						int32_t field_id)
+__parquetCacheHash(dev_t st_dev,
+				   dev_t st_ino,
+				   uint64_t st_utime,
+				   int32_t rg_index,
+				   int32_t field_id)
 {
 	struct {
 		dev_t		st_dev;
@@ -114,32 +114,32 @@ parquet_nvme_cache_hash(dev_t st_dev,
 }
 
 /*
- * parquet_nvme_cache_lookup
+ * parquetCacheLookup
  */
 void *
-parquet_nvme_cache_lookup(const struct stat *pq_fstat,
-						  int32_t rg_index,
-						  int32_t field_id)
+parquetCacheLookup(const struct stat *pq_fstat,
+				   int32_t rg_index,
+				   int32_t field_id)
 {
-	nvmeBlockCacheEntry *result = NULL;
+	parquetCacheEntry *result = NULL;
 	uint32_t	hash, slot_id;
 	uint64_t	pq_utime;
 	dlist_iter	iter;
 
-	if (!nvme_cache_head)
+	if (!parquet_cache_head)
 		return NULL;
 
 	pq_utime = __timespec_to_uts(&pq_fstat->st_mtim);
-	hash = parquet_nvme_cache_hash(pq_fstat->st_dev,
-								   pq_fstat->st_ino,
-								   pq_utime,
-								   rg_index,
-								   field_id);
-	slot_id = hash % nvme_cache_head->hash_nslots;
-	pthreadMutexLock(&nvme_cache_head->hash_locks[slot_id]);
-	dlist_foreach(iter, &nvme_cache_head->hash_slots[slot_id])
+	hash = __parquetCacheHash(pq_fstat->st_dev,
+							  pq_fstat->st_ino,
+							  pq_utime,
+							  rg_index,
+							  field_id);
+	slot_id = hash % parquet_cache_head->hash_nslots;
+	pthreadMutexLock(&parquet_cache_head->hash_locks[slot_id]);
+	dlist_foreach(iter, &parquet_cache_head->hash_slots[slot_id])
 	{
-		nvmeBlockCacheEntry *entry = dlist_container(nvmeBlockCacheEntry,
+		parquetCacheEntry *entry = dlist_container(parquetCacheEntry,
 													 chain, iter.cur);
 		if (entry->hash     == hash &&
 			entry->st_dev   == pq_fstat->st_dev &&
@@ -164,38 +164,38 @@ parquet_nvme_cache_lookup(const struct stat *pq_fstat,
 			break;
 		}
 	}
-	pthreadMutexUnlock(&nvme_cache_head->hash_locks[slot_id]);
+	pthreadMutexUnlock(&parquet_cache_head->hash_locks[slot_id]);
 	return result;
 }
 
 /*
- * parquet_nvme_cache_release
+ * parquetCacheRelease
  */
 void
-parquet_nvme_cache_release(void *__entry)
+parquetCacheRelease(void *__entry)
 {
-	nvmeBlockCacheEntry *entry = (nvmeBlockCacheEntry *)__entry;
-	uint32_t	slot_id = entry->hash % nvme_cache_head->hash_nslots;
+	parquetCacheEntry *entry = (parquetCacheEntry *)__entry;
+	uint32_t	slot_id = entry->hash % parquet_cache_head->hash_nslots;
 	struct timeval tv;
 
-	pthreadMutexLock(&nvme_cache_head->hash_locks[slot_id]);
+	pthreadMutexLock(&parquet_cache_head->hash_locks[slot_id]);
 	assert(entry->refcnt > 0);
 	gettimeofday(&tv, NULL);
-	pthreadMutexLock(&nvme_cache_head->lru_lock);
+	pthreadMutexLock(&parquet_cache_head->lru_lock);
 	entry->lru_timestamp = __timeval_to_uts(&tv);
-	dlist_move_tail(&nvme_cache_head->lru_list, &entry->lru_chain);
-	pthreadMutexUnlock(&nvme_cache_head->lru_lock);
+	dlist_move_tail(&parquet_cache_head->lru_list, &entry->lru_chain);
+	pthreadMutexUnlock(&parquet_cache_head->lru_lock);
 	entry->refcnt--;
-	pthreadMutexUnlock(&nvme_cache_head->hash_locks[slot_id]);
+	pthreadMutexUnlock(&parquet_cache_head->hash_locks[slot_id]);
 }
 
 /*
- * parquet_nvme_cache_length
+ * parquetCacheLength
  */
 size_t
-parquet_nvme_cache_length(const void *__entry)
+parquetCacheLength(const void *__entry)
 {
-	const nvmeBlockCacheEntry *entry = (const nvmeBlockCacheEntry *)__entry;
+	const parquetCacheEntry *entry = (const parquetCacheEntry *)__entry;
 
 	return (PAGE_ALIGN(entry->nullmap_length) +
 			PAGE_ALIGN(entry->values_length) +
@@ -203,19 +203,19 @@ parquet_nvme_cache_length(const void *__entry)
 }
 
 /*
- * parquet_nvme_cache_read_chunk
+ * parquetCacheReadChunks
  */
-ssize_t
-parquet_nvme_cache_read_chunks(void *__entry,
-							   kern_colmeta *cmeta,
-							   size_t kds_offset,
-							   CUdeviceptr m_segment,
-							   off_t m_offset,
-							   uint32_t *p_npages_direct_read,
-							   uint32_t *p_npages_vfs_read)
+size_t
+parquetCacheReadChunks(void *__entry,
+					   kern_colmeta *cmeta,
+					   size_t kds_offset,
+					   CUdeviceptr m_segment,
+					   off_t m_offset,
+					   uint32_t *p_npages_direct_read,
+					   uint32_t *p_npages_vfs_read)
 {
-	nvmeBlockCacheEntry *entry = (nvmeBlockCacheEntry *)__entry;
-	size_t		block_sz = (size_t)pgstrom_parquet_nvme_cache_unitsz_mb << 20;
+	parquetCacheEntry *entry = (parquetCacheEntry *)__entry;
+	size_t		block_sz = (size_t)pgstrom_parquet_cache_unitsz_mb << 20;
 	dlist_iter	iter;
 	int			nr_chunks = 1;
 	int			chunk_id = 0;
@@ -266,8 +266,8 @@ parquet_nvme_cache_read_chunks(void *__entry,
 	/* setup other sibling blocks, if any */
 	dlist_foreach (iter, &entry->siblings)
 	{
-		nvmeBlockCacheEntry *buddy = dlist_container(nvmeBlockCacheEntry,
-													 chain, iter.cur);
+		parquetCacheEntry *buddy = dlist_container(parquetCacheEntry,
+												   chain, iter.cur);
 		assert(total_usage > 0);
 		__usage = Min(block_sz, total_usage);
 		ioc = &iovec->ioc[chunk_id++];
@@ -279,7 +279,7 @@ parquet_nvme_cache_read_chunks(void *__entry,
 	}
 	iovec->nr_chunks = chunk_id;
 	/* read the chunk array from the file */
-	if (!gpuDirectFileReadIOV(pgstrom_parquet_nvme_cache_path,
+	if (!gpuDirectFileReadIOV(pgstrom_parquet_cache_path,
 							  m_segment,
 							  m_offset,
 							  -1L,
@@ -294,10 +294,10 @@ parquet_nvme_cache_read_chunks(void *__entry,
 }
 
 /*
- * parquet_nvme_cache_reclaim_blocks
+ * __parquetCacheReclaimBlocks
  */
 static void
-parquet_nvme_cache_reclaim_blocks(int target)
+__parquetCacheReclaimBlocks(int target)
 {
 	int			reclaimed = 0;
 	uint64_t	lru_threshold;
@@ -307,18 +307,18 @@ parquet_nvme_cache_reclaim_blocks(int target)
 
 	gettimeofday(&tval, NULL);
 	lru_threshold = __timeval_to_uts(&tval)
-		- (uint64_t)pgstrom_parquet_nvme_cache_eviction_threshold * 1000000L;
+		- (uint64_t)pgstrom_parquet_cache_eviction_seconds * 1000000L;
 	dlist_init(&pending);
-	pthreadMutexLock(&nvme_cache_head->lru_lock);
-	dlist_foreach_modify (iter, &nvme_cache_head->lru_list)
+	pthreadMutexLock(&parquet_cache_head->lru_lock);
+	dlist_foreach_modify (iter, &parquet_cache_head->lru_list)
 	{
-		nvmeBlockCacheEntry *entry = dlist_container(nvmeBlockCacheEntry,
-													 lru_chain, iter.cur);
-		uint32_t	slot_id = entry->hash % nvme_cache_head->hash_nslots;
+		parquetCacheEntry *entry = dlist_container(parquetCacheEntry,
+												   lru_chain, iter.cur);
+		uint32_t	slot_id = entry->hash % parquet_cache_head->hash_nslots;
 		/* no recently accessed entry should exist */
 		if (entry->lru_timestamp >= lru_threshold)
 			break;
-		if (pthreadMutexTryLock(&nvme_cache_head->hash_locks[slot_id]))
+		if (pthreadMutexTryLock(&parquet_cache_head->hash_locks[slot_id]))
 		{
 			if (entry->refcnt == 0)
 			{
@@ -327,36 +327,36 @@ parquet_nvme_cache_reclaim_blocks(int target)
 				dlist_push_tail(&pending, &entry->chain);
 				reclaimed += 1 + __dlist_length(&entry->siblings);
 			}
-			pthreadMutexUnlock(&nvme_cache_head->hash_locks[slot_id]);
+			pthreadMutexUnlock(&parquet_cache_head->hash_locks[slot_id]);
 			if (reclaimed >= target)
 				break;
 		}
 	}
-	pthreadMutexUnlock(&nvme_cache_head->lru_lock);
+	pthreadMutexUnlock(&parquet_cache_head->lru_lock);
 	/* back to the free list */
-	pthreadMutexLock(&nvme_cache_head->free_lock);
+	pthreadMutexLock(&parquet_cache_head->free_lock);
 	while (!dlist_is_empty(&pending))
 	{
-		nvmeBlockCacheEntry *entry
-			= dlist_container(nvmeBlockCacheEntry, chain,
+		parquetCacheEntry *entry
+			= dlist_container(parquetCacheEntry, chain,
 							  dlist_pop_head_node(&pending));
 		int		nr_blocks = 1;
 		
 		while (!dlist_is_empty(&entry->siblings))
 		{
-			nvmeBlockCacheEntry *__entry
-				= dlist_container(nvmeBlockCacheEntry, chain,
+			parquetCacheEntry *__entry
+				= dlist_container(parquetCacheEntry, chain,
 								  dlist_pop_head_node(&entry->siblings));
 			dlist_delete(&__entry->chain);
-			dlist_push_head(&nvme_cache_head->free_list, &__entry->chain);
+			dlist_push_head(&parquet_cache_head->free_list, &__entry->chain);
 			nr_blocks++;
 		}
 		dlist_delete(&entry->chain);
-		dlist_push_head(&nvme_cache_head->free_list, &entry->chain);
-		pg_atomic_fetch_sub_u64(&nvme_cache_head->num_active_blocks, nr_blocks);
-		pg_atomic_fetch_sub_u64(&nvme_cache_head->num_cached_chunks, 1);
+		dlist_push_head(&parquet_cache_head->free_list, &entry->chain);
+		pg_atomic_fetch_sub_u64(&parquet_cache_head->num_active_blocks, nr_blocks);
+		pg_atomic_fetch_sub_u64(&parquet_cache_head->num_cached_chunks, 1);
 	}
-	pthreadMutexUnlock(&nvme_cache_head->free_lock);
+	pthreadMutexUnlock(&parquet_cache_head->free_lock);
 }
 
 /* ----------------------------------------------------------------
@@ -365,24 +365,6 @@ parquet_nvme_cache_reclaim_blocks(int target)
  *
  * ----------------------------------------------------------------
  */
-typedef struct
-{
-	dlist_node	chain;
-	dev_t		st_dev;
-	ino_t		st_ino;
-	uint64_t	st_utime;
-	int32_t		rg_index;
-	int32_t		field_id;
-	const char *nullmap_ptr;
-	size_t		nullmap_len;
-	const char *values_ptr;
-	size_t		values_len;
-	const char *extra_ptr;
-	size_t		extra_len;
-	void	  (*buffer_release_callback)(void *private);
-	void	   *buffer_release_private;
-} nvmeBlockCacheAsyncWrite;
-
 static pthread_mutex_t	parquet_cache_async_write_mutex;
 static pthread_cond_t	parquet_cache_async_write_cond;
 static dlist_head		parquet_cache_async_write_list;
@@ -391,14 +373,14 @@ static pg_atomic_uint32	parquet_cache_async_write_num_available_workers;
 static pg_atomic_uint32	parquet_cache_async_write_num_pending_tasks;
 
 static bool
-__parquet_cache_async_write_block(off_t *p_f_offset,
-								  char *block_buf,
-								  const off_t *fchunk_base,
-								  const uint8_t *arrow_ptr,
-								  size_t arrow_len,
-								  bool is_last_buffer)
+__parquetCacheAsyncWriteBlock(off_t *p_f_offset,
+							  char *block_buf,
+							  const off_t *fchunk_base,
+							  const uint8_t *arrow_ptr,
+							  size_t arrow_len,
+							  bool is_last_buffer)
 {
-	size_t		block_sz = (size_t)pgstrom_parquet_nvme_cache_unitsz_mb << 20;
+	size_t		block_sz = (size_t)pgstrom_parquet_cache_unitsz_mb << 20;
 	size_t		f_offset = *p_f_offset;
 	size_t		arrow_off = 0;
 
@@ -421,7 +403,7 @@ __parquet_cache_async_write_block(off_t *p_f_offset,
 			assert(block_off <= block_sz && arrow_off <= arrow_len);
 			while (off < block_off)
 			{
-				nbytes = pwrite(pgstrom_parquet_nvme_cache_fdesc,
+				nbytes = pwrite(pgstrom_parquet_cache_fdesc,
 								block_buf + off,
 								block_off - off,
 								fchunk_base[block_idx] + off);
@@ -437,10 +419,10 @@ __parquet_cache_async_write_block(off_t *p_f_offset,
 }
 
 static void
-__parquet_cache_async_write_one(parquetCacheWriteAsyncData *data, char *block_buf)
+__parquetCacheAsyncWriteOne(parquetCacheWriteAsyncData *data, char *block_buf)
 {
-	nvmeBlockCacheEntry *entry = NULL;
-	size_t		block_sz = (size_t)pgstrom_parquet_nvme_cache_unitsz_mb << 20;
+	parquetCacheEntry *entry = NULL;
+	size_t		block_sz = (size_t)pgstrom_parquet_cache_unitsz_mb << 20;
 	size_t		required = (PAGE_ALIGN(data->nullmap_len) +
 							PAGE_ALIGN(data->values_len) +
 							PAGE_ALIGN(data->extra_len));
@@ -453,30 +435,30 @@ __parquet_cache_async_write_one(parquetCacheWriteAsyncData *data, char *block_bu
 	dlist_iter	iter;
 
 	assert((uintptr_t)block_buf == PAGE_ALIGN((uintptr_t)block_buf));
-	if (nr_blocks)
+	if (nr_blocks == 0)
 		return;		/* should not happen */
 	/* 1. allocation of cache entry */
 again:
-	pthreadMutexLock(&nvme_cache_head->free_lock);
+	pthreadMutexLock(&parquet_cache_head->free_lock);
 	while (block_cnt < nr_blocks)
 	{
-		nvmeBlockCacheEntry *curr;
+		parquetCacheEntry *curr;
 		dlist_node	   *dnode;
 
-		if (dlist_is_empty(&nvme_cache_head->free_list))
+		if (dlist_is_empty(&parquet_cache_head->free_list))
 		{
-			pthreadMutexUnlock(&nvme_cache_head->free_lock);
+			pthreadMutexUnlock(&parquet_cache_head->free_lock);
 			if (!retry_done)
 			{
-				parquet_nvme_cache_reclaim_blocks(nr_blocks);
+				__parquetCacheReclaimBlocks(nr_blocks);
 				retry_done = true;
 				goto again;
 			}
 			goto bailout;	/* give up */
 		}
-		dnode = dlist_pop_head_node(&nvme_cache_head->free_list);
-		curr = dlist_container(nvmeBlockCacheEntry, chain, dnode);
-		memset(curr, 0, sizeof(nvmeBlockCacheEntry));
+		dnode = dlist_pop_head_node(&parquet_cache_head->free_list);
+		curr = dlist_container(parquetCacheEntry, chain, dnode);
+		memset(curr, 0, sizeof(parquetCacheEntry));
 		if (entry)
 			dlist_push_tail(&entry->siblings, &curr->chain);
 		else
@@ -486,7 +468,7 @@ again:
 		}
 		fchunk_base[block_cnt++] = (off_t)curr->fchunk_id * block_sz;
 	}
-	pthreadMutexUnlock(&nvme_cache_head->free_lock);
+	pthreadMutexUnlock(&parquet_cache_head->free_lock);
 
 	/* 2. setup new cache entry */
 	entry->st_dev   = data->pq_fstat.st_dev;
@@ -494,20 +476,20 @@ again:
 	entry->st_utime = __timespec_to_uts(&data->pq_fstat.st_mtim);
 	entry->rg_index = data->rg_index;
 	entry->field_id = data->field_id;
-	entry->hash     = parquet_nvme_cache_hash(entry->st_dev,
-											  entry->st_ino,
-											  entry->st_utime,
-											  entry->rg_index,
-											  entry->field_id);
+	entry->hash     = __parquetCacheHash(entry->st_dev,
+										 entry->st_ino,
+										 entry->st_utime,
+										 entry->rg_index,
+										 entry->field_id);
 	entry->refcnt = -1;		/* flag for WIP */
 
 	/* 3. check cache duplication */
-	slot_id = entry->hash % pgstrom_parquet_nvme_cache_nslots;
-	pthreadMutexLock(&nvme_cache_head->hash_locks[slot_id]);
-	dlist_foreach(iter, &nvme_cache_head->hash_slots[slot_id])
+	slot_id = entry->hash % pgstrom_parquet_cache_nslots;
+	pthreadMutexLock(&parquet_cache_head->hash_locks[slot_id]);
+	dlist_foreach(iter, &parquet_cache_head->hash_slots[slot_id])
 	{
-		nvmeBlockCacheEntry *curr = dlist_container(nvmeBlockCacheEntry,
-													chain, iter.cur);
+		parquetCacheEntry *curr = dlist_container(parquetCacheEntry,
+												  chain, iter.cur);
 		if (entry->hash     == curr->hash &&
 			entry->st_dev   == curr->st_dev &&
 			entry->st_ino   == curr->st_ino &&
@@ -516,84 +498,87 @@ again:
 			entry->field_id == curr->field_id)
 		{
 			/* found duplicated cache entry */
-			pthreadMutexUnlock(&nvme_cache_head->hash_locks[slot_id]);
+			pthreadMutexUnlock(&parquet_cache_head->hash_locks[slot_id]);
 			goto bailout;
 		}
 	}
 	/* ok, I am responsible to write out this cache entry */
-	dlist_push_tail(&nvme_cache_head->hash_slots[slot_id], &entry->chain);
-	pthreadMutexUnlock(&nvme_cache_head->hash_locks[slot_id]);
+	pthreadMutexLock(&parquet_cache_head->lru_lock);
+	dlist_push_tail(&parquet_cache_head->lru_list, &entry->lru_chain);
+	pthreadMutexUnlock(&parquet_cache_head->lru_lock);
+	dlist_push_tail(&parquet_cache_head->hash_slots[slot_id], &entry->chain);
+	pthreadMutexUnlock(&parquet_cache_head->hash_locks[slot_id]);
 
 	/* 4. direct write to cache file */
 	if (!data->nullmap_ptr)
 		entry->nullmap_length = 0;
-	else if (__parquet_cache_async_write_block(&f_offset,
-											   block_buf,
-											   fchunk_base,
-											   data->nullmap_ptr,
-											   data->nullmap_len,
-											   !data->values_ptr &&
-											   !data->extra_ptr))
+	else if (__parquetCacheAsyncWriteBlock(&f_offset,
+										   block_buf,
+										   fchunk_base,
+										   data->nullmap_ptr,
+										   data->nullmap_len,
+										   !data->values_ptr &&
+										   !data->extra_ptr))
 		entry->nullmap_length = data->nullmap_len;
 	else
 		goto bailout_unlink;
 
 	if (!data->values_ptr)
 		entry->values_length = 0;
-	else if (__parquet_cache_async_write_block(&f_offset,
-											   block_buf,
-											   fchunk_base,
-											   data->values_ptr,
-											   data->values_len,
-											   !data->extra_ptr))
+	else if (__parquetCacheAsyncWriteBlock(&f_offset,
+										   block_buf,
+										   fchunk_base,
+										   data->values_ptr,
+										   data->values_len,
+										   !data->extra_ptr))
 		entry->values_length = data->values_len;
 	else
 		goto bailout_unlink;
 
 	if (!data->extra_ptr)
 		entry->extra_length = 0;
-	else if (__parquet_cache_async_write_block(&f_offset,
-											   block_buf,
-											   fchunk_base,
-											   data->extra_ptr,
-											   data->extra_len,
-											   true))
+	else if (__parquetCacheAsyncWriteBlock(&f_offset,
+										   block_buf,
+										   fchunk_base,
+										   data->extra_ptr,
+										   data->extra_len,
+										   true))
 		entry->extra_length = data->extra_len;
 	else
 		goto bailout_unlink;
 	assert(f_offset == required);
 	/* 5. activate the cache entry */
-	pthreadMutexLock(&nvme_cache_head->hash_locks[slot_id]);
+	pthreadMutexLock(&parquet_cache_head->hash_locks[slot_id]);
 	assert(entry->refcnt == -1);
 	entry->refcnt = 0;
-	pthreadMutexUnlock(&nvme_cache_head->hash_locks[slot_id]);
+	pthreadMutexUnlock(&parquet_cache_head->hash_locks[slot_id]);
 	return;		/* ok */
 
 bailout_unlink:
 	/* unlink the entry from hash list */
-	pthreadMutexLock(&nvme_cache_head->hash_locks[slot_id]);
+	pthreadMutexLock(&parquet_cache_head->hash_locks[slot_id]);
 	dlist_delete(&entry->chain);
-	pthreadMutexUnlock(&nvme_cache_head->hash_locks[slot_id]);
+	pthreadMutexUnlock(&parquet_cache_head->hash_locks[slot_id]);
 bailout:
 	/* back the entry to the free list */
 	if (entry)
 	{
-		pthreadMutexLock(&nvme_cache_head->free_lock);
+		pthreadMutexLock(&parquet_cache_head->free_lock);
 		while (!dlist_is_empty(&entry->siblings))
 		{
 			dlist_node	   *dnode = dlist_pop_head_node(&entry->siblings);
-			dlist_push_head(&nvme_cache_head->free_list, dnode);
+			dlist_push_head(&parquet_cache_head->free_list, dnode);
 		}
-		memset(entry, 0, sizeof(nvmeBlockCacheEntry));
-		dlist_push_head(&nvme_cache_head->free_list, &entry->chain);
-		pthreadMutexUnlock(&nvme_cache_head->free_lock);
+		memset(entry, 0, sizeof(parquetCacheEntry));
+		dlist_push_head(&parquet_cache_head->free_list, &entry->chain);
+		pthreadMutexUnlock(&parquet_cache_head->free_lock);
 	}
 }
 
 static void *
-__parquet_cache_async_write_worker_main(void *__priv)
+__parquetCacheAsyncWriteWorker(void *__priv)
 {
-	size_t	block_sz = (size_t)pgstrom_parquet_nvme_cache_unitsz_mb;
+	size_t	block_sz = (size_t)pgstrom_parquet_cache_unitsz_mb << 20;
 	char   *block_buf, *malloc_ptr;
 	int		noop_counter = 0;
 
@@ -602,7 +587,7 @@ __parquet_cache_async_write_worker_main(void *__priv)
 	if (!malloc_ptr)
 		return NULL;	/* out of memory */
 	block_buf = (char *)PAGE_ALIGN(malloc_ptr);
-	
+
 	pthreadMutexLock(&parquet_cache_async_write_mutex);
 	pg_atomic_fetch_add_u32(&parquet_cache_async_write_num_workers, 1);
 	for (;;)
@@ -614,7 +599,7 @@ __parquet_cache_async_write_worker_main(void *__priv)
 				= dlist_container(parquetCacheWriteAsyncData, chain, dnode);
 			pthreadMutexUnlock(&parquet_cache_async_write_mutex);
 			memset(&data->chain, 0, sizeof(dlist_node));
-			__parquet_cache_async_write_one(data, block_buf);
+			__parquetCacheAsyncWriteOne(data, block_buf);
 			/* cleanup */
 			releaseParquetCacheWriteAsyncData(data);
 			/* reset */
@@ -638,15 +623,16 @@ __parquet_cache_async_write_worker_main(void *__priv)
 				/* maintenance work */
 				if (noop_counter++ < 30)
 				{
-					uint64_t	nactives = pg_atomic_read_u64(&nvme_cache_head->num_active_blocks);
-					uint64_t	nblocks =
-						(100.0 - pgstrom_parquet_nvme_cache_adaptive_eviction_ratio) / 100.0 *
-						(double)pgstrom_parquet_nvme_cache_nblocks;
+					uint64_t	nactives, nblocks;
+					double		free_ratio = (100.0 - pgstrom_parquet_cache_target_usage);
+
+					nactives = pg_atomic_read_u64(&parquet_cache_head->num_active_blocks);
+					nblocks = (free_ratio / 100.0) * (double)pgstrom_parquet_cache_nblocks;
 					if (nactives > nblocks)
 					{
 						int		target = Min(nactives - nblocks, 100);
 
-						parquet_nvme_cache_reclaim_blocks(target);
+						__parquetCacheReclaimBlocks(target);
 					}
 				}
 				else
@@ -668,6 +654,8 @@ parquetCacheWriteAsync(parquetCacheWriteAsyncData *data)
 {
 	uint32_t	ntasks;
 
+	if (!parquet_cache_head)
+		goto out;
 	/* launch worker thread if it looks lacking */
 	if (pg_atomic_read_u32(&parquet_cache_async_write_num_available_workers) == 0)
 	{
@@ -675,7 +663,7 @@ parquetCacheWriteAsync(parquetCacheWriteAsyncData *data)
 
 		if ((errno = pthread_create(&thread,
 									NULL,
-									__parquet_cache_async_write_worker_main,
+									__parquetCacheAsyncWriteWorker,
 									NULL)) != 0)
 			__FATAL("failed on pthread_create: %m\n");
 		if ((errno = pthread_detach(thread)) != 0)
@@ -683,18 +671,22 @@ parquetCacheWriteAsync(parquetCacheWriteAsyncData *data)
 	}
 	/* give up if too large async-write tasks are pending */
 	ntasks = pg_atomic_fetch_add_u32(&parquet_cache_async_write_num_pending_tasks, 1);
-	if (ntasks < pgstrom_parquet_nvme_cache_max_async_write)
+	if (ntasks < pgstrom_parquet_cache_max_async_write)
 	{
+		fprintf(stderr, "parquetCacheWriteAsync: dev_t=%ld ino=%ld rg_index=%u field_id=%u\n",
+				data->pq_fstat.st_dev,
+				data->pq_fstat.st_ino,
+				data->rg_index,
+				data->field_id);
 		pthreadMutexLock(&parquet_cache_async_write_mutex);
 		dlist_push_tail(&parquet_cache_async_write_list, &data->chain);
 		pthreadCondSignal(&parquet_cache_async_write_cond);
 		pthreadMutexUnlock(&parquet_cache_async_write_mutex);
+		return;
 	}
-	else
-	{
-		/* release immediately */
-		releaseParquetCacheWriteAsyncData(data);
-	}
+out:
+	/* release immediately */
+	releaseParquetCacheWriteAsyncData(data);
 }
 
 /*
@@ -708,14 +700,15 @@ pgstrom_parquet_cache_info(PG_FUNCTION_ARGS)
 	uint64_t	num_active_blocks;
 	uint64_t	num_cached_chunks;
 	uint64_t	total_actual_usage;
-	size_t		cache_size = (size_t)pgstrom_parquet_nvme_cache_size_mb << 20;
-	size_t		block_size = (size_t)pgstrom_parquet_nvme_cache_unitsz_mb << 20;
+	size_t		cache_size = (size_t)pgstrom_parquet_cache_size_mb << 20;
+	size_t		block_size = (size_t)pgstrom_parquet_cache_unitsz_mb << 20;
 
-	if (!pgstrom_parquet_nvme_cache_path)
+	if (!pgstrom_parquet_cache_path)
 		PG_RETURN_POINTER(cstring_to_text("{ \"cache_path\" : null }"));
-	num_active_blocks = pg_atomic_read_u64(&nvme_cache_head->num_active_blocks);
-	num_cached_chunks = pg_atomic_read_u64(&nvme_cache_head->num_cached_chunks);
-	total_actual_usage = pg_atomic_read_u64(&nvme_cache_head->total_actual_usage);
+	assert(parquet_cache_head != NULL);
+	num_active_blocks = pg_atomic_read_u64(&parquet_cache_head->num_active_blocks);
+	num_cached_chunks = pg_atomic_read_u64(&parquet_cache_head->num_cached_chunks);
+	total_actual_usage = pg_atomic_read_u64(&parquet_cache_head->total_actual_usage);
 
 	initStringInfo(&buf);
 	appendStringInfoSpaces(&buf, VARHDRSZ);
@@ -729,13 +722,13 @@ pgstrom_parquet_cache_info(PG_FUNCTION_ARGS)
 					 ", \"active_ratio\" : \"%.2f%%\""
 					 ", \"num_cached_chunks\" : %ld"
 					 ", \"total_actual_usage\" : \"%s\"",
-					 pgstrom_parquet_nvme_cache_path,
+					 pgstrom_parquet_cache_path,
 					 format_bytesz(cache_size),
 					 format_bytesz(block_size),
-					 nvme_cache_head->hash_nslots,
+					 parquet_cache_head->hash_nslots,
 					 num_active_blocks,
-					 nvme_cache_head->num_blocks - num_active_blocks,
-					 100.0 * (double)num_active_blocks / (double)nvme_cache_head->num_blocks,
+					 parquet_cache_head->num_blocks - num_active_blocks,
+					 100.0 * (double)num_active_blocks / (double)parquet_cache_head->num_blocks,
 					 num_cached_chunks,
 					 format_bytesz(total_actual_usage));
 	if (num_active_blocks > 0)
@@ -760,10 +753,10 @@ pgstrom_parquet_cache_info(PG_FUNCTION_ARGS)
 static size_t
 __request_parquet_cache_size(void)
 {
-	return (MAXALIGN(sizeof(nvmeBlockCacheHead)) +
-			MAXALIGN(sizeof(pthread_mutex_t)     * pgstrom_parquet_nvme_cache_nslots) +
-			MAXALIGN(sizeof(dlist_head)          * pgstrom_parquet_nvme_cache_nslots) +
-			MAXALIGN(sizeof(nvmeBlockCacheEntry) * pgstrom_parquet_nvme_cache_nblocks));
+	return (MAXALIGN(sizeof(parquetCacheHead)) +
+			MAXALIGN(sizeof(pthread_mutex_t)   * pgstrom_parquet_cache_nslots) +
+			MAXALIGN(sizeof(dlist_head)        * pgstrom_parquet_cache_nslots) +
+			MAXALIGN(sizeof(parquetCacheEntry) * pgstrom_parquet_cache_nblocks));
 }
 
 /*
@@ -783,7 +776,7 @@ pgstrom_request_parquet_cache(void)
 static void
 pgstrom_startup_parquet_cache(void)
 {
-	nvmeBlockCacheEntry *entry_base;
+	parquetCacheEntry *entry_base;
 	pthread_mutex_t *hash_locks;
 	dlist_head	   *hash_slots;
 	char		   *pos;
@@ -797,59 +790,59 @@ pgstrom_startup_parquet_cache(void)
 	/*
 	 * setup shared memory structure
 	 */
-	pos = ShmemInitStruct("nvmeBlockCacheHead",
+	pos = ShmemInitStruct("parquetCacheHead",
 						  __request_parquet_cache_size(),
 						  &found);
 	Assert(!found);
-	nvme_cache_head = (nvmeBlockCacheHead *)pos;
-	pos += MAXALIGN(sizeof(nvmeBlockCacheHead));
+	parquet_cache_head = (parquetCacheHead *)pos;
+	pos += MAXALIGN(sizeof(parquetCacheHead));
 	hash_locks = (pthread_mutex_t *)pos;
-	pos += MAXALIGN(sizeof(pthread_mutex_t) * pgstrom_parquet_nvme_cache_nslots);
+	pos += MAXALIGN(sizeof(pthread_mutex_t) * pgstrom_parquet_cache_nslots);
 	hash_slots = (dlist_head *)pos;
-	pos += MAXALIGN(sizeof(dlist_head)      * pgstrom_parquet_nvme_cache_nslots);
-	entry_base = (nvmeBlockCacheEntry *)pos;
-	for (uint32_t i=0; i < pgstrom_parquet_nvme_cache_nslots; i++)
+	pos += MAXALIGN(sizeof(dlist_head)      * pgstrom_parquet_cache_nslots);
+	entry_base = (parquetCacheEntry *)pos;
+	for (uint32_t i=0; i < pgstrom_parquet_cache_nslots; i++)
 	{
 		pthreadMutexInit(&hash_locks[i]);
 		dlist_init(&hash_slots[i]);
 	}
-	pos += MAXALIGN(sizeof(nvmeBlockCacheEntry) * pgstrom_parquet_nvme_cache_nblocks);
+	pos += MAXALIGN(sizeof(parquetCacheEntry) * pgstrom_parquet_cache_nblocks);
 
-	nvme_cache_head->hash_locks = hash_locks;
-	nvme_cache_head->hash_slots = hash_slots;
-	nvme_cache_head->hash_nslots = pgstrom_parquet_nvme_cache_nslots;
-	nvme_cache_head->num_blocks = pgstrom_parquet_nvme_cache_nblocks;
-	pthreadMutexInit(&nvme_cache_head->free_lock);
-	dlist_init(&nvme_cache_head->free_list);
-	pthreadMutexInit(&nvme_cache_head->lru_lock);
-	dlist_init(&nvme_cache_head->lru_list);
-	pg_atomic_init_u64(&nvme_cache_head->num_active_blocks, 0);
-	pg_atomic_init_u64(&nvme_cache_head->num_cached_chunks, 0);
-	pg_atomic_init_u64(&nvme_cache_head->total_actual_usage, 0);
+	parquet_cache_head->hash_locks = hash_locks;
+	parquet_cache_head->hash_slots = hash_slots;
+	parquet_cache_head->hash_nslots = pgstrom_parquet_cache_nslots;
+	parquet_cache_head->num_blocks = pgstrom_parquet_cache_nblocks;
+	pthreadMutexInit(&parquet_cache_head->free_lock);
+	dlist_init(&parquet_cache_head->free_list);
+	pthreadMutexInit(&parquet_cache_head->lru_lock);
+	dlist_init(&parquet_cache_head->lru_list);
+	pg_atomic_init_u64(&parquet_cache_head->num_active_blocks, 0);
+	pg_atomic_init_u64(&parquet_cache_head->num_cached_chunks, 0);
+	pg_atomic_init_u64(&parquet_cache_head->total_actual_usage, 0);
 
-	for (uint32_t i=0; i < pgstrom_parquet_nvme_cache_nblocks; i++)
+	for (uint32_t i=0; i < pgstrom_parquet_cache_nblocks; i++)
 	{
-		nvmeBlockCacheEntry *entry = &entry_base[i];
+		parquetCacheEntry *entry = &entry_base[i];
 
-		memset(entry, 0, sizeof(nvmeBlockCacheEntry));
+		memset(entry, 0, sizeof(parquetCacheEntry));
 		entry->fchunk_id = i;
-		dlist_push_tail(&nvme_cache_head->free_list, &entry->chain);
+		dlist_push_tail(&parquet_cache_head->free_list, &entry->chain);
 	}
 
 	/*
 	 * cache file creation
 	 */
-	fdesc = open(pgstrom_parquet_nvme_cache_path,
+	fdesc = open(pgstrom_parquet_cache_path,
 				 O_RDWR | O_CREAT | O_DIRECT,
 				 0600);
 	if (fdesc < 0)
 		elog(ERROR, "failed on open('%s'): %m [parquet cache file]",
-			 pgstrom_parquet_nvme_cache_path);
-	length = ((size_t)pgstrom_parquet_nvme_cache_size_mb << 20);
+			 pgstrom_parquet_cache_path);
+	length = ((size_t)pgstrom_parquet_cache_size_mb << 20);
 	if (ftruncate(fdesc, length) < 0)
 		elog(ERROR, "failed on ftruncate('%s', %ld): %m",
-			 pgstrom_parquet_nvme_cache_path, length);
-	pgstrom_parquet_nvme_cache_fdesc = fdesc;
+			 pgstrom_parquet_cache_path, length);
+	pgstrom_parquet_cache_fdesc = fdesc;
 }
 
 /*
@@ -858,77 +851,77 @@ pgstrom_startup_parquet_cache(void)
 void
 pgstrom_init_parquet_cache(void)
 {
-	DefineCustomStringVariable("pg_strom.parquet_nvme_cache_path",
-							   "Path of Parquet NVME cache file",
+	DefineCustomStringVariable("pg_strom.parquet_cache_path",
+							   "Path of Parquet cache file",
 							   NULL,
-							   &pgstrom_parquet_nvme_cache_path,
+							   &pgstrom_parquet_cache_path,
 							   NULL,	/* disabled by default */
 							   PGC_POSTMASTER,
 							   GUC_NOT_IN_SAMPLE,
 							   NULL, NULL, NULL);
-	DefineCustomIntVariable("pg_strom.parquet_nvme_cache_size",
-							"Size of Parquet NVME cache File",
+	DefineCustomIntVariable("pg_strom.parquet_cache_size",
+							"Size of Parquet cache file",
 							NULL,
-							&pgstrom_parquet_nvme_cache_size_mb,
+							&pgstrom_parquet_cache_size_mb,
 							160 * 1024,		/* 160GB */
 							32 * 1024,		/* 32GB */
 							INT_MAX,
 							PGC_POSTMASTER,
 							GUC_NOT_IN_SAMPLE | GUC_UNIT_MB,
 							NULL, NULL, NULL);
-	DefineCustomIntVariable("pg_strom.parquet_nvme_cache_unitsz",
-							"Size of Parquet NVME cache allocation unit",
+	DefineCustomIntVariable("pg_strom.parquet_cache_unitsz",
+							"Size of Parquet cache allocation unit",
 							NULL,
-							&pgstrom_parquet_nvme_cache_unitsz_mb,
+							&pgstrom_parquet_cache_unitsz_mb,
 							2,		/* 2MB */
 							1,		/* 1MB */
 							256,	/* 256MB */
 							PGC_POSTMASTER | GUC_NO_SHOW_ALL,
 							GUC_NOT_IN_SAMPLE | GUC_UNIT_MB,
 							NULL, NULL, NULL);
-	DefineCustomIntVariable("pg_strom.parquet_nvme_cache_eviction_threshold",
-							"threhold second of NVME cache eviction",
+	DefineCustomIntVariable("pg_strom.parquet_cache_eviction_seconds",
+							"minimum seconds before Parquet cache eviction",
 							NULL,
-							&pgstrom_parquet_nvme_cache_eviction_threshold,
+							&pgstrom_parquet_cache_eviction_seconds,
 							600,	/* 10min */
 							0,
 							INT_MAX,
 							PGC_POSTMASTER,
 							GUC_NOT_IN_SAMPLE | GUC_NO_SHOW_ALL,
 							NULL, NULL, NULL);
-	DefineCustomRealVariable("pg_strom.parquet_nvme_cache_adaptive_eviction_ratio",
-							 "active ratio of Parquet NVME cache adaptive eviction",
+	DefineCustomRealVariable("pg_strom.parquet_cache_target_usage",
+							 "kick Parquet cache eviction when active block ratio exceed this value",
 							 NULL,
-							 &pgstrom_parquet_nvme_cache_adaptive_eviction_ratio,
+							 &pgstrom_parquet_cache_target_usage,
 							 98.0,
 							 80.0,
 							 100.0,
 							 PGC_POSTMASTER | GUC_NO_SHOW_ALL,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
-	DefineCustomIntVariable("pg_strom.parquet_nvme_cache_max_async_write",
+	DefineCustomIntVariable("pg_strom.parquet_cache_max_async_write",
 							"max number of asynchronous cache writeback tasks",
 							NULL,
-							&pgstrom_parquet_nvme_cache_max_async_write,
-							256,
+							&pgstrom_parquet_cache_max_async_write,
+							80,
 							1,
 							INT_MAX,
 							PGC_POSTMASTER | GUC_NO_SHOW_ALL,
 							GUC_NOT_IN_SAMPLE,
 							NULL, NULL, NULL);
-	if ((pgstrom_parquet_nvme_cache_unitsz_mb & (pgstrom_parquet_nvme_cache_unitsz_mb-1)) != 0)
-		elog(ERROR, "pg_strom.parquet_nvme_cache_unitsz must be 2^N MB");
-	if (1000 * pgstrom_parquet_nvme_cache_unitsz_mb >= pgstrom_parquet_nvme_cache_size_mb)
-		elog(ERROR, "pg_strom.parquet_nvme_cache_size (%d) is too small. it must be 1000 * pg_strom.parquet_nvme_cache_unitsz (%d) for valuable disk caching",
-			 pgstrom_parquet_nvme_cache_unitsz_mb,
-			 pgstrom_parquet_nvme_cache_size_mb);
+	if ((pgstrom_parquet_cache_unitsz_mb & (pgstrom_parquet_cache_unitsz_mb-1)) != 0)
+		elog(ERROR, "pg_strom.parquet_cache_unitsz must be 2^N MB");
+	if (1000 * pgstrom_parquet_cache_unitsz_mb >= pgstrom_parquet_cache_size_mb)
+		elog(ERROR, "pg_strom.parquet_cache_size (%d) is too small. it must be 1000 * pg_strom.parquet_cache_unitsz (%d) for valuable disk caching",
+			 pgstrom_parquet_cache_unitsz_mb,
+			 pgstrom_parquet_cache_size_mb);
 	/* number of cache blocks */
-	pgstrom_parquet_nvme_cache_nblocks
-		= (pgstrom_parquet_nvme_cache_size_mb +
-		   pgstrom_parquet_nvme_cache_unitsz_mb - 1) / pgstrom_parquet_nvme_cache_unitsz_mb;
+	pgstrom_parquet_cache_nblocks
+		= (pgstrom_parquet_cache_size_mb +
+		   pgstrom_parquet_cache_unitsz_mb - 1) / pgstrom_parquet_cache_unitsz_mb;
 	/* number of hash slots */
-	pgstrom_parquet_nvme_cache_nslots
-		= (double)pgstrom_parquet_nvme_cache_nblocks / log((double)pgstrom_parquet_nvme_cache_nblocks) + 2000.0;
+	pgstrom_parquet_cache_nslots = ((double)pgstrom_parquet_cache_nblocks /
+									log((double)pgstrom_parquet_cache_nblocks)) + 2000.0;
 	/* async write stuff */
 	pthreadMutexInit(&parquet_cache_async_write_mutex);
 	pthreadCondInit(&parquet_cache_async_write_cond);
@@ -938,9 +931,13 @@ pgstrom_init_parquet_cache(void)
 	pg_atomic_init_u32(&parquet_cache_async_write_num_pending_tasks, 0);
 
 	/* shared memory allocation callback */
-	elog(LOG, "pgstrom_parquet_nvme_cache_path = '%s'", pgstrom_parquet_nvme_cache_path);
-	if (pgstrom_parquet_nvme_cache_path)
+	if (pgstrom_parquet_cache_path)
 	{
+		elog(LOG, "Parquet cache file [%s] (size: %s, block: %uMB, nslots: %lu)",
+			 pgstrom_parquet_cache_path,
+			 format_bytesz((size_t)pgstrom_parquet_cache_size_mb << 20),
+			 pgstrom_parquet_cache_unitsz_mb,
+			 pgstrom_parquet_cache_nslots);
 		shmem_request_next = shmem_request_hook;
 		shmem_request_hook = pgstrom_request_parquet_cache;
 		shmem_startup_next = shmem_startup_hook;
