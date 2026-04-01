@@ -768,7 +768,6 @@ extern bool		pgstrom_init_gpu_device(void);
 typedef struct gpuContext	gpuContext;
 typedef struct gpuClient	gpuClient;
 
-extern bool		isGpuServWorkerThread(void);
 extern void		__gpuClientELog(gpuClient *gclient,
 								int errcode,
 								const char *filename, int lineno,
@@ -797,7 +796,7 @@ extern void		gpuservLoggerReport(const char *fmt, ...)
 #define __Elog(fmt,...)										\
 	do {													\
 		int		__errno_saved = errno;						\
-		if (isGpuServWorkerThread())						\
+		if (MyProcPid != gettid())							\
 			__gsLogLabel("[error]",fmt,##__VA_ARGS__);		\
 		else												\
 			ereport(LOG,									\
@@ -808,12 +807,26 @@ extern void		gpuservLoggerReport(const char *fmt, ...)
 		errno = __errno_saved;								\
 	} while(0)
 
+#define __Notice(fmt,...)									\
+	do {													\
+		int		__errno_saved = errno;						\
+		if (MyProcPid != gettid())							\
+			__gsLogLabel("[notice]",fmt,##__VA_ARGS__);		\
+		else												\
+			ereport(LOG,									\
+					(errhidestmt(true),						\
+					 errmsg("[notice] " fmt " (%s:%d)",		\
+							##__VA_ARGS__,					\
+							__FILE__, __LINE__)));			\
+		errno = __errno_saved;								\
+	} while(0)
+
 #define __Info(fmt,...)										\
 	do {													\
 		int		__errno_saved = errno;						\
 		if (heterodbExtraEreportLevel() >= 1)				\
 		{													\
-			if (isGpuServWorkerThread())					\
+			if (MyProcPid != gettid())						\
 				__gsLogLabel("[info]",fmt,##__VA_ARGS__);	\
 			else											\
 				ereport(LOG,								\
@@ -829,7 +842,7 @@ extern void		gpuservLoggerReport(const char *fmt, ...)
 		int		__errno_saved = errno;						\
 		if (heterodbExtraEreportLevel() >= 2)				\
 		{													\
-			if (isGpuServWorkerThread())					\
+			if (MyProcPid != gettid())						\
 				__gsLogLabel("[debug]",fmt,##__VA_ARGS__);	\
 			else											\
 				ereport(LOG,								\

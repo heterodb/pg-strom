@@ -141,7 +141,9 @@ static __thread gpuContext		*GpuWorkerCurrentContext = NULL;
 #define MY_CONTEXT_PER_THREAD	(GpuWorkerCurrentContext->cuda_context)
 #define MY_STREAM_PER_THREAD	CU_STREAM_PER_THREAD
 #define MY_MEMLOCATION_PER_THREAD (GpuWorkerCurrentContext->cuda_mlocation)
-static CUmemLocation		host_mlocation = {CU_MEM_LOCATION_TYPE_HOST_NUMA_CURRENT, CU_DEVICE_CPU};
+static CUmemLocation		host_mlocation = {
+	.type = CU_MEM_LOCATION_TYPE_HOST_NUMA_CURRENT,
+	.id   = CU_DEVICE_CPU};
 static volatile int			gpuserv_bgworker_got_signal = 0;
 static gpuContext		   *gpuserv_gpucontext_array;
 static dlist_head			gpuserv_gpucontext_list;
@@ -193,15 +195,6 @@ static const char  *pgstrom_fatbin_image_filename = "/dev/null";
 			__gsLogCxt((gcontext),						\
 					   "[debug] " fmt, ##__VA_ARGS__);	\
 	} while(0)
-
-/*
- * isGpuServWorkerThread
- */
-bool
-isGpuServWorkerThread(void)
-{
-	return (GpuWorkerCurrentContext != NULL);
-}
 
 /*
  * pg_strom.max_async_tasks and related

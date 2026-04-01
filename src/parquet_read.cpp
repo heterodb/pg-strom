@@ -762,7 +762,6 @@ __parquetReadOneRowGroupFullyCached(const kern_data_store *kds_head,
 {
 	size_t		kds_headsz = KDS_HEAD_LENGTH(kds_head) + kds_head->arrow_virtual_usage;
 	size_t		kds_length = PAGE_ALIGN(kds_headsz);
-	size_t		kds_offset = kds_length;
 	std::vector<char> __buf(kds_headsz);
 	kern_data_store *kds_host = (kern_data_store *)__buf.data();
 	CUdeviceptr	m_segment;
@@ -774,42 +773,43 @@ __parquetReadOneRowGroupFullyCached(const kern_data_store *kds_head,
 	/* estimate KDS buffer length */
 	for (int j=0; j < kds_host->ncols; j++)
 	{
-		kern_colmeta *cmeta = &kds_host->colmeta[j];
-		void	   *pq_cache;
-		if (cmeta->field_index < 0)
-			continue;
-		pq_cache = parquet_cached_chunks[cmeta->field_index];
-		kds_length += parquetCacheLength(pq_cache);
+		void   *pq_cache = parquet_cached_chunks[j];
+		if (pq_cache)
+			kds_length += parquetCacheLength(pq_cache);
 	}
 	/* allocation of GPU device buffer */
 	if (!malloc_gpu_callback(malloc_private, kds_length,
 							 &m_segment, &m_offset))
 		__Elog("out of memory");
 	/* copy to GPU raw memory (and update kds_host) */
+	kds_host->usage = PAGE_ALIGN(kds_headsz);
 	for (int j=0; j < kds_host->ncols; j++)
 	{
 		kern_colmeta *cmeta = &kds_host->colmeta[j];
 		void	   *pq_cache;
-
+		ssize_t		nbytes;
 		if (cmeta->field_index < 0)
 			continue;
-		pq_cache = parquet_cached_chunks[cmeta->field_index];
-		kds_offset += parquetCacheReadChunks(pq_cache,
-											 cmeta,
-											 kds_offset,
-											 m_segment,
-											 m_offset + kds_offset,
-											 p_npages_direct_read,
-											 p_npages_vfs_read);
+		pq_cache = parquet_cached_chunks[j];
+		nbytes = parquetCacheReadChunks(pq_cache,
+										cmeta,
+										kds_host->usage,
+										m_segment,
+										m_offset,
+										p_npages_direct_read,
+										p_npages_vfs_read);
+		if (nbytes < 0)
+			__Elog("failed on parquetCacheReadChunks");
+		kds_host->usage += nbytes;
 	}
-	assert(kds_offset <= kds_length);
-	kds_host->length = kds_offset;
+	assert(kds_host->usage <= kds_length);
+	kds_host->length = kds_host->usage;
 	kds_host->format = KDS_FORMAT_ARROW;
 	rc = cuMemcpyHtoD(m_segment + m_offset, kds_host, kds_headsz);
 	if (rc != CUDA_SUCCESS)
 		__Elog("failed on cuMemcpyHtoD");
 	/* ok */
-	*p_npages_direct_read = (kds_offset - kds_headsz) / PAGE_SIZE;
+	*p_npages_direct_read = (kds_host->usage - kds_headsz) / PAGE_SIZE;
 	return (kern_data_store *)(m_segment + m_offset);
 }
 
@@ -862,7 +862,10 @@ parquetReadArrowTableSimple(std::shared_ptr<arrow::Table> table,
 		/* chunked-array must be single array */
 		assert(carray->num_chunks() <= 1);
 		if (carray->num_chunks() > 0)
-			fillupArrowColumnBuffer(kds, cmeta, 0UL, carray->chunk(0), pq_fstat);
+			fillupArrowColumnBuffer(kds, cmeta,
+									0UL,
+									carray->chunk(0),
+									pq_fstat);
 	}
 	assert(kds->usage <= kds_length);
 	kds->format = KDS_FORMAT_ARROW;
@@ -907,11 +910,11 @@ parquetReadArrowTableWithCache(std::shared_ptr<arrow::Table> table,
 		}
 	}
 	kds_length = PAGE_ALIGN(kds_length);
-	for (int j=0; j < parquet_cached_chunks.size(); j++)
+	for (int j=0; j < kds_host->ncols; j++)
 	{
 		void   *pq_cache = parquet_cached_chunks[j];
 		if (pq_cache)
-			kds_length += PAGE_ALIGN(parquetCacheLength(pq_cache));
+			kds_length += parquetCacheLength(pq_cache);
 	}
 	/* buffer allocation */
 	if (!malloc_gpu_callback(malloc_private,
@@ -940,22 +943,24 @@ parquetReadArrowTableWithCache(std::shared_ptr<arrow::Table> table,
 	}
 	/* buffer copy (Parquet Cache --> GPU memory) */
 	kds_host->usage = PAGE_ALIGN(kds_host->usage);
-	for (int j=0; j < parquet_cached_chunks.size(); j++)
+	for (int j=0; j < kds_host->ncols; j++)
 	{
+		auto	cmeta = &kds_host->colmeta[j];
 		void   *pq_cache = parquet_cached_chunks[j];
-
+		ssize_t	nbytes;
 		if (pq_cache)
 		{
-			auto	cmeta = &kds_host->colmeta[revmap[j]];
-			
-			kds_host->usage
-				+= parquetCacheReadChunks(pq_cache,
-										  cmeta,
-										  kds_host->usage,
-										  m_segment,
-										  m_offset,
-										  p_npages_direct_read,
-										  p_npages_vfs_read);
+			nbytes = parquetCacheReadChunks(pq_cache,
+											cmeta,
+											kds_host->usage,
+											m_segment,
+											m_offset,
+											p_npages_direct_read,
+											p_npages_vfs_read);
+			if (nbytes < 0)
+				__Elog("failed parquetCacheReadChunks");
+			fprintf(stderr, "cached read col=%d nbytes=%lu\n", j, nbytes);
+			kds_host->usage += nbytes;
 		}
 	}
 	/* buffer copy (KDS header portion)  */
@@ -1158,27 +1163,29 @@ parquetReadOneRowGroup(const char *filename,
 			int		num_cached_columns = 0;
 			int		num_uncached_columns = 0;
 
+			parquet_cached_chunks.resize(kds_head->ncols);
 			for (int j=0; j < kds_head->ncols; j++)
 			{
 				const kern_colmeta *cmeta = &kds_head->colmeta[j];
 				int			row_group_id = kds_head->parquet_row_group;
 				int			field_index = cmeta->field_index;
-				void	   *pq_cache;
+				void	   *pq_cache = NULL;
 
-				if (field_index < 0 ||
-					cmeta->idx_subattrs > 0 ||
-					cmeta->num_subattrs > 0)
-					continue;
-				pq_cache = parquetCacheLookup(&stat_buf,
-											  row_group_id,
-											  field_index);
-				if (pq_cache)
-					num_cached_columns++;
-				else
-					num_uncached_columns++;
-				if (field_index >= parquet_cached_chunks.size())
-					parquet_cached_chunks.resize(field_index + 1);
-				parquet_cached_chunks[field_index] = pq_cache;
+				if (field_index >= 0)
+				{
+					if (cmeta->idx_subattrs == 0 &&
+						cmeta->num_subattrs == 0)
+					{
+						pq_cache = parquetCacheLookup(&stat_buf,
+													  row_group_id,
+													  field_index);
+					}
+					if (pq_cache)
+						num_cached_columns++;
+					else
+						num_uncached_columns++;
+				}
+				parquet_cached_chunks[j] = pq_cache;
 			}
 			/*
 			 * Fast path if all the referenced columns are cached.
@@ -1216,9 +1223,8 @@ parquetReadOneRowGroup(const char *filename,
 	/* release parquet cache if any */
 	for (int j=0; j < parquet_cached_chunks.size(); j++)
 	{
-		void   *pq_cache = parquet_cached_chunks[j];
-		if (pq_cache)
-			parquetCacheRelease(pq_cache);
+		if (parquet_cached_chunks[j])
+			parquetCacheRelease(parquet_cached_chunks[j]);
 	}
 	return kds;
 }

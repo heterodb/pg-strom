@@ -25,7 +25,6 @@ typedef struct {
 	/* state control */
 	int32_t			refcnt;		/* -1: not ready (WIP), > 0: someone in use */
 	uint32_t		nr_pages;	/* usage of this block, by # of pages */
-	uint32_t		fchunk_id;	/* cache file offset (immutable) */
 	/* arrow buffer definitions */
 	uint64_t		nullmap_length;
 	uint64_t		values_length;
@@ -68,6 +67,15 @@ static uint64_t	pgstrom_parquet_cache_nblocks;		/* immutable */
 static uint64_t	pgstrom_parquet_cache_nslots;		/* immutable */
 static int		pgstrom_parquet_cache_fdesc = -1;
 static parquetCacheHead  *parquet_cache_head = NULL;
+static parquetCacheEntry *parquet_cache_array = NULL;
+
+/* parquetCacheEntry to the base file offset */
+static inline off_t
+__parquetCacheFileOffset(const parquetCacheEntry *entry)
+{
+	size_t	block_sz = (size_t)pgstrom_parquet_cache_unitsz_mb << 20;
+	return (size_t)(entry - parquet_cache_array) * block_sz;
+}
 
 /* __timespec_to_utime */
 static inline uint64_t
@@ -205,7 +213,7 @@ parquetCacheLength(const void *__entry)
 /*
  * parquetCacheReadChunks
  */
-size_t
+ssize_t
 parquetCacheReadChunks(void *__entry,
 					   kern_colmeta *cmeta,
 					   size_t kds_offset,
@@ -225,6 +233,9 @@ parquetCacheReadChunks(void *__entry,
 	strom_io_vector *iovec;
 	strom_io_chunk *ioc;
 
+	assert(m_segment  == MAXALIGN(m_segment) &&
+		   m_offset   == MAXALIGN(m_offset) &&
+		   kds_offset == MAXALIGN(kds_offset));
 	/* setup cmeta */
 	if (entry->nullmap_length == 0)
 		cmeta->nullmap_offset = cmeta->nullmap_length = 0;
@@ -258,10 +269,10 @@ parquetCacheReadChunks(void *__entry,
 	/* setup the primary block */
 	__usage = Min(block_sz, total_usage);
 	ioc = &iovec->ioc[chunk_id++];
-	ioc->m_offset = m_offset;
-	ioc->fchunk_id = entry->fchunk_id;
+	ioc->m_offset  = kds_offset;
+	ioc->fchunk_id = __parquetCacheFileOffset(entry) / PAGE_SIZE;
 	ioc->nr_pages  = __usage / PAGE_SIZE;
-	m_offset      += __usage;
+	kds_offset    += __usage;
 	total_usage   -= __usage;
 	/* setup other sibling blocks, if any */
 	dlist_foreach (iter, &entry->siblings)
@@ -271,10 +282,10 @@ parquetCacheReadChunks(void *__entry,
 		assert(total_usage > 0);
 		__usage = Min(block_sz, total_usage);
 		ioc = &iovec->ioc[chunk_id++];
-		ioc->m_offset  = m_offset;
-		ioc->fchunk_id = buddy->fchunk_id;
+		ioc->m_offset  = kds_offset;
+		ioc->fchunk_id = __parquetCacheFileOffset(buddy) / PAGE_SIZE;
 		ioc->nr_pages  = __usage / PAGE_SIZE;
-		m_offset      += __usage;
+		kds_offset    += __usage;
 		total_usage   -= __usage;
 	}
 	iovec->nr_chunks = chunk_id;
@@ -301,6 +312,7 @@ __parquetCacheReclaimBlocks(int target)
 {
 	int			reclaimed = 0;
 	uint64_t	lru_threshold;
+	uint64_t	lru_latest = 0;
 	dlist_head	pending;
 	struct timeval tval;
 	dlist_mutable_iter iter;
@@ -326,6 +338,8 @@ __parquetCacheReclaimBlocks(int target)
 				dlist_delete(&entry->chain);
 				dlist_push_tail(&pending, &entry->chain);
 				reclaimed += 1 + __dlist_length(&entry->siblings);
+				if (lru_latest < entry->lru_timestamp)
+					lru_latest = entry->lru_timestamp;
 			}
 			pthreadMutexUnlock(&parquet_cache_head->hash_locks[slot_id]);
 			if (reclaimed >= target)
@@ -340,6 +354,7 @@ __parquetCacheReclaimBlocks(int target)
 		parquetCacheEntry *entry
 			= dlist_container(parquetCacheEntry, chain,
 							  dlist_pop_head_node(&pending));
+		size_t	usage = parquetCacheLength(entry);
 		int		nr_blocks = 1;
 		
 		while (!dlist_is_empty(&entry->siblings))
@@ -353,10 +368,16 @@ __parquetCacheReclaimBlocks(int target)
 		}
 		dlist_delete(&entry->chain);
 		dlist_push_head(&parquet_cache_head->free_list, &entry->chain);
+		/* update statistics */
 		pg_atomic_fetch_sub_u64(&parquet_cache_head->num_active_blocks, nr_blocks);
 		pg_atomic_fetch_sub_u64(&parquet_cache_head->num_cached_chunks, 1);
+		pg_atomic_fetch_sub_u64(&parquet_cache_head->total_actual_usage, usage);
 	}
 	pthreadMutexUnlock(&parquet_cache_head->free_lock);
+	if (reclaimed > 0)
+		__Info("parquet-cache evicted %d blocks, latest access at %s",
+			   reclaimed,
+			   format_utime_utc(lru_latest));
 }
 
 /* ----------------------------------------------------------------
@@ -370,7 +391,7 @@ static pthread_cond_t	parquet_cache_async_write_cond;
 static dlist_head		parquet_cache_async_write_list;
 static pg_atomic_uint32	parquet_cache_async_write_num_workers;
 static pg_atomic_uint32	parquet_cache_async_write_num_available_workers;
-static pg_atomic_uint32	parquet_cache_async_write_num_pending_tasks;
+static pg_atomic_uint32	parquet_cache_async_write_num_active_tasks;
 
 static bool
 __parquetCacheAsyncWriteBlock(off_t *p_f_offset,
@@ -410,7 +431,12 @@ __parquetCacheAsyncWriteBlock(off_t *p_f_offset,
 				if (nbytes > 0)
 					off += nbytes;
 				else if (nbytes == 0 || errno != EINTR)
+				{
+					__Notice("parquet-cache: failed on pwrite at %08lx, sz=%ld: %m",
+							 fchunk_base[block_idx] + off,
+							 block_off - off);
 					return false;
+				}
 			}
 		}
 	}
@@ -422,6 +448,7 @@ static void
 __parquetCacheAsyncWriteOne(parquetCacheWriteAsyncData *data, char *block_buf)
 {
 	parquetCacheEntry *entry = NULL;
+	uint64_t	st_utime = __timespec_to_uts(&data->pq_fstat.st_mtim);
 	size_t		block_sz = (size_t)pgstrom_parquet_cache_unitsz_mb << 20;
 	size_t		required = (PAGE_ALIGN(data->nullmap_len) +
 							PAGE_ALIGN(data->values_len) +
@@ -466,14 +493,16 @@ again:
 			dlist_init(&curr->siblings);
 			entry = curr;
 		}
-		fchunk_base[block_cnt++] = (off_t)curr->fchunk_id * block_sz;
+		fchunk_base[block_cnt++] = __parquetCacheFileOffset(curr);
+		//stats update
+		pg_atomic_fetch_add_u64(&parquet_cache_head->num_active_blocks, 1);
 	}
 	pthreadMutexUnlock(&parquet_cache_head->free_lock);
 
 	/* 2. setup new cache entry */
 	entry->st_dev   = data->pq_fstat.st_dev;
 	entry->st_ino   = data->pq_fstat.st_ino;
-	entry->st_utime = __timespec_to_uts(&data->pq_fstat.st_mtim);
+	entry->st_utime = st_utime;
 	entry->rg_index = data->rg_index;
 	entry->field_id = data->field_id;
 	entry->hash     = __parquetCacheHash(entry->st_dev,
@@ -552,6 +581,17 @@ again:
 	assert(entry->refcnt == -1);
 	entry->refcnt = 0;
 	pthreadMutexUnlock(&parquet_cache_head->hash_locks[slot_id]);
+	/* 6. update statistics and debug message */
+	pg_atomic_fetch_add_u64(&parquet_cache_head->num_cached_chunks, 1);
+	pg_atomic_fetch_add_u64(&parquet_cache_head->total_actual_usage, required);
+	__Debug("parquet cache written: st_dev=%ld, st_ino=%ld, st_mtime=%s, row-group=%u, field-id=%u, nr-blocks=%u, length=%s",
+			data->pq_fstat.st_dev,
+			data->pq_fstat.st_ino,
+			format_utime_utc(st_utime),
+			data->rg_index,
+			data->field_id,
+			nr_blocks,
+			format_bytesz(required));
 	return;		/* ok */
 
 bailout_unlink:
@@ -563,16 +603,28 @@ bailout:
 	/* back the entry to the free list */
 	if (entry)
 	{
+		int		nblocks = 1;
+
 		pthreadMutexLock(&parquet_cache_head->free_lock);
 		while (!dlist_is_empty(&entry->siblings))
 		{
 			dlist_node	   *dnode = dlist_pop_head_node(&entry->siblings);
 			dlist_push_head(&parquet_cache_head->free_list, dnode);
+			nblocks++;
 		}
 		memset(entry, 0, sizeof(parquetCacheEntry));
 		dlist_push_head(&parquet_cache_head->free_list, &entry->chain);
 		pthreadMutexUnlock(&parquet_cache_head->free_lock);
+		pg_atomic_fetch_sub_u64(&parquet_cache_head->num_active_blocks, nblocks);
 	}
+	__Debug("parquet cache skipped: st_dev=%ld, st_ino=%ld, st_mtime=%s, row-group=%u, field-id=%u, nr-blocks=%u, length=%s",
+		   data->pq_fstat.st_dev,
+		   data->pq_fstat.st_ino,
+		   format_utime_utc(st_utime),
+		   data->rg_index,
+		   data->field_id,
+		   nr_blocks,
+		   format_bytesz(required));
 }
 
 static void *
@@ -582,10 +634,14 @@ __parquetCacheAsyncWriteWorker(void *__priv)
 	char   *block_buf, *malloc_ptr;
 	int		noop_counter = 0;
 
+	__Info("parquet-cache: async write worker start (tid: %u)", gettid());
 	/* alloc i/o buffer; aligned for O_DIRECT */
 	malloc_ptr = (char *)malloc(block_sz + PAGE_SIZE);
 	if (!malloc_ptr)
+	{
+		__Notice("parquet-cache: out of memory");
 		return NULL;	/* out of memory */
+	}
 	block_buf = (char *)PAGE_ALIGN(malloc_ptr);
 
 	pthreadMutexLock(&parquet_cache_async_write_mutex);
@@ -600,6 +656,7 @@ __parquetCacheAsyncWriteWorker(void *__priv)
 			pthreadMutexUnlock(&parquet_cache_async_write_mutex);
 			memset(&data->chain, 0, sizeof(dlist_node));
 			__parquetCacheAsyncWriteOne(data, block_buf);
+			pg_atomic_fetch_sub_u32(&parquet_cache_async_write_num_active_tasks, 1);
 			/* cleanup */
 			releaseParquetCacheWriteAsyncData(data);
 			/* reset */
@@ -646,6 +703,7 @@ __parquetCacheAsyncWriteWorker(void *__priv)
 	pg_atomic_fetch_sub_u32(&parquet_cache_async_write_num_workers, 1);
 	pthreadMutexUnlock(&parquet_cache_async_write_mutex);
 	free(malloc_ptr);
+	__Info("parquet-cache: async write worker exit (tid: %u)", gettid());
 	return NULL;
 }
 
@@ -656,36 +714,34 @@ parquetCacheWriteAsync(parquetCacheWriteAsyncData *data)
 
 	if (!parquet_cache_head)
 		goto out;
-	/* launch worker thread if it looks lacking */
-	if (pg_atomic_read_u32(&parquet_cache_async_write_num_available_workers) == 0)
+	ntasks = pg_atomic_read_u32(&parquet_cache_async_write_num_active_tasks);
+	while (ntasks < pgstrom_parquet_cache_max_async_write)
 	{
-		pthread_t	thread;
+		if (pg_atomic_compare_exchange_u32(&parquet_cache_async_write_num_active_tasks,
+										   &ntasks, ntasks+1))
+		{
+			pthreadMutexLock(&parquet_cache_async_write_mutex);
+			dlist_push_tail(&parquet_cache_async_write_list, &data->chain);
+			pthreadCondSignal(&parquet_cache_async_write_cond);
+			pthreadMutexUnlock(&parquet_cache_async_write_mutex);
+			/* launch worker thread if it looks lacking */
+			if (pg_atomic_read_u32(&parquet_cache_async_write_num_available_workers) == 0)
+			{
+				pthread_t	thread;
 
-		if ((errno = pthread_create(&thread,
-									NULL,
-									__parquetCacheAsyncWriteWorker,
-									NULL)) != 0)
-			__FATAL("failed on pthread_create: %m\n");
-		if ((errno = pthread_detach(thread)) != 0)
-			__FATAL("failed on pthread_detach: %m\n");
-	}
-	/* give up if too large async-write tasks are pending */
-	ntasks = pg_atomic_fetch_add_u32(&parquet_cache_async_write_num_pending_tasks, 1);
-	if (ntasks < pgstrom_parquet_cache_max_async_write)
-	{
-		fprintf(stderr, "parquetCacheWriteAsync: dev_t=%ld ino=%ld rg_index=%u field_id=%u\n",
-				data->pq_fstat.st_dev,
-				data->pq_fstat.st_ino,
-				data->rg_index,
-				data->field_id);
-		pthreadMutexLock(&parquet_cache_async_write_mutex);
-		dlist_push_tail(&parquet_cache_async_write_list, &data->chain);
-		pthreadCondSignal(&parquet_cache_async_write_cond);
-		pthreadMutexUnlock(&parquet_cache_async_write_mutex);
-		return;
+				if ((errno = pthread_create(&thread,
+											NULL,
+											__parquetCacheAsyncWriteWorker,
+											NULL)) != 0)
+					__FATAL("failed on pthread_create: %m\n");
+				if ((errno = pthread_detach(thread)) != 0)
+					__FATAL("failed on pthread_detach: %m\n");
+			}
+			return;
+		}
 	}
 out:
-	/* release immediately */
+	/* release async task immediately */
 	releaseParquetCacheWriteAsyncData(data);
 }
 
@@ -776,7 +832,6 @@ pgstrom_request_parquet_cache(void)
 static void
 pgstrom_startup_parquet_cache(void)
 {
-	parquetCacheEntry *entry_base;
 	pthread_mutex_t *hash_locks;
 	dlist_head	   *hash_slots;
 	char		   *pos;
@@ -800,7 +855,7 @@ pgstrom_startup_parquet_cache(void)
 	pos += MAXALIGN(sizeof(pthread_mutex_t) * pgstrom_parquet_cache_nslots);
 	hash_slots = (dlist_head *)pos;
 	pos += MAXALIGN(sizeof(dlist_head)      * pgstrom_parquet_cache_nslots);
-	entry_base = (parquetCacheEntry *)pos;
+	parquet_cache_array = (parquetCacheEntry *)pos;
 	for (uint32_t i=0; i < pgstrom_parquet_cache_nslots; i++)
 	{
 		pthreadMutexInit(&hash_locks[i]);
@@ -822,10 +877,9 @@ pgstrom_startup_parquet_cache(void)
 
 	for (uint32_t i=0; i < pgstrom_parquet_cache_nblocks; i++)
 	{
-		parquetCacheEntry *entry = &entry_base[i];
+		parquetCacheEntry *entry = &parquet_cache_array[i];
 
 		memset(entry, 0, sizeof(parquetCacheEntry));
-		entry->fchunk_id = i;
 		dlist_push_tail(&parquet_cache_head->free_list, &entry->chain);
 	}
 
@@ -928,7 +982,7 @@ pgstrom_init_parquet_cache(void)
 	dlist_init(&parquet_cache_async_write_list);
 	pg_atomic_init_u32(&parquet_cache_async_write_num_workers, 0);
 	pg_atomic_init_u32(&parquet_cache_async_write_num_available_workers, 0);
-	pg_atomic_init_u32(&parquet_cache_async_write_num_pending_tasks, 0);
+	pg_atomic_init_u32(&parquet_cache_async_write_num_active_tasks, 0);
 
 	/* shared memory allocation callback */
 	if (pgstrom_parquet_cache_path)

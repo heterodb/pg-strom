@@ -91,7 +91,7 @@ __EXTERN void
 parquetCacheRelease(void *entry);
 __EXTERN size_t
 parquetCacheLength(const void *entry);
-__EXTERN size_t
+__EXTERN ssize_t
 parquetCacheReadChunks(void *entry,
 					   struct kern_colmeta *cmeta,
 					   size_t kds_offset,

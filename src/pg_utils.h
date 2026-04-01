@@ -11,6 +11,7 @@
  */
 #ifndef PG_UTILS_H
 #define PG_UTILS_H
+#include <time.h>
 
 /* Max/Min macros that takes 3 or more arguments */
 #define Max3(a,b,c)		((a) > (b) ? Max((a),(c)) : Max((b),(c)))
@@ -284,6 +285,27 @@ __format_millisec(char *buffer, size_t bufsz, double msec)
 }
 #define format_millisec(msec)					\
 	__format_millisec(alloca(40), 40, (msec))
+
+static inline char *
+__format_utime_utc(char *buffer, size_t bufsz, uint64_t utime)
+{
+	time_t	ts   = utime / 1000000;
+	int		usec = utime % 1000000;
+	struct tm __tm;
+
+	localtime_r(&ts, &__tm);
+	snprintf(buffer, bufsz, "%04d-%02d-%02d %02d:%02d:%02d.%06d",
+			 __tm.tm_year + 1900,
+			 __tm.tm_mon  + 1,
+			 __tm.tm_mday,
+			 __tm.tm_hour,
+			 __tm.tm_min,
+			 __tm.tm_sec,
+			 usec);
+	return buffer;
+}
+#define format_utime_utc(utime)					\
+	__format_utime_utc(alloca(40), 40, (utime))
 
 /*
  * pmemdup
