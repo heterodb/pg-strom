@@ -793,20 +793,6 @@ extern void		gpuservLoggerReport(const char *fmt, ...)
 						__FUNCTION__,						\
 						##__VA_ARGS__)
 
-#define __Elog(fmt,...)										\
-	do {													\
-		int		__errno_saved = errno;						\
-		if (MyProcPid != gettid())							\
-			__gsLogLabel("[error]",fmt,##__VA_ARGS__);		\
-		else												\
-			ereport(LOG,									\
-					(errhidestmt(true),						\
-					 errmsg("[error] " fmt " (%s:%d)",		\
-							##__VA_ARGS__,					\
-							__FILE__, __LINE__)));			\
-		errno = __errno_saved;								\
-	} while(0)
-
 #define __Notice(fmt,...)									\
 	do {													\
 		int		__errno_saved = errno;						\

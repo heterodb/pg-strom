@@ -155,7 +155,7 @@ static char *
 heterodbExtraModuleInit(void)
 {
 	if (!p_heterodb_extra_module_init)
-		__Elog("HeteroDB Extra module is not loaded yet");
+		__Notice("HeteroDB Extra module is not loaded yet");
 	else
 	{
 #ifndef PG_VERSION_NUM
@@ -164,7 +164,7 @@ heterodbExtraModuleInit(void)
 		char   *signature = p_heterodb_extra_module_init(PG_VERSION_NUM);
 		if (signature)
 			return signature;
-		__Elog("out of memory");
+		__Notice("out of memory");
 	}
 	return NULL;
 }
@@ -307,18 +307,18 @@ gpuDirectOpenDriver(void)
 		case GPUDIRECT_DRIVER__CUFILE:
 			if (p_cufile__driver_open_v2)
 				return (p_cufile__driver_open_v2() == 0);
-			__Elog("cuFile is not available");
+			__Notice("cuFile is not available");
 			break;
 
 		case GPUDIRECT_DRIVER__NVME_STROM:
 			if (p_nvme_strom__driver_open)
 				return (p_nvme_strom__driver_open() == 0);
-			__Elog("nvme_strom is not available");
+			__Notice("nvme_strom is not available");
 			break;
 		case GPUDIRECT_DRIVER__VFS:
 			return true;
 		default:
-			__Elog("unknown GPU-Direct SQL driver");
+			__Notice("unknown GPU-Direct SQL driver");
 			break;
 	}
 	return false;
@@ -338,18 +338,18 @@ gpuDirectCloseDriver(void)
 		case GPUDIRECT_DRIVER__CUFILE:
 			if (p_cufile__driver_close_v2)
 				return (p_cufile__driver_close_v2() == 0);
-			__Elog("cuFile is not available");
+			__Notice("cuFile is not available");
 			break;
 
 		case GPUDIRECT_DRIVER__NVME_STROM:
 			if (p_nvme_strom__driver_close)
 				return (p_nvme_strom__driver_close() == 0);
-			__Elog("nvme_strom is not available");
+			__Notice("nvme_strom is not available");
 			break;
 		case GPUDIRECT_DRIVER__VFS:
 			return true;
 		default:
-			__Elog("unknown GPU-Direct SQL driver");
+			__Notice("unknown GPU-Direct SQL driver");
 	}
 	return false;
 }
@@ -501,13 +501,13 @@ __fallbackFileReadIOV(const char *pathname,
 	fdesc = open(pathname, O_RDONLY);
 	if (fdesc < 0)
 	{
-		__Elog("failed on open('%s'): %m", pathname);
+		__Notice("failed on open('%s'): %m", pathname);
 		goto error_0;
 	}
 
 	if (fstat(fdesc, &stat_buf) != 0)
 	{
-		__Elog("failed on fstat('%s'): %m", pathname);
+		__Notice("failed on fstat('%s'): %m", pathname);
 		goto error_1;
 	}
 
@@ -536,13 +536,13 @@ __fallbackFileReadIOV(const char *pathname,
 			{
 				if (errno == EINTR)
 					continue;
-				__Elog("failed on pread: %m");
+				__Notice("failed on pread: %m");
 				goto error_1;
 			}
 			rc = cuMemcpyHtoD(m_segment + dest_pos, vfs_dma_buffer, nbytes);
 			if (rc != CUDA_SUCCESS)
 			{
-				__Elog("failed on cuMemcpyHtoD");
+				__Notice("failed on cuMemcpyHtoD");
 				goto error_1;
 			}
 			file_pos += nbytes;
@@ -723,7 +723,7 @@ gpuDirectGetProperty(void)
 				buffer[nbytes] = '\0';
 				result = strdup(buffer);
 				if (!result)
-					__Elog("out of memory");
+					__Notice("out of memory");
 				break;
 			}
 		}
@@ -818,7 +818,7 @@ heterodb_extra_parse_signature(const char *extra_module_info,
 			api_version = strtol(tok+12, &end, 10);
 			if (api_version < 0 || *end != '\0')
 			{
-				__Elog("invalid extra module token [%s]", tok);
+				__Notice("invalid extra module token [%s]", tok);
 				return false;
 			}
 		}
@@ -830,7 +830,7 @@ heterodb_extra_parse_signature(const char *extra_module_info,
 				has_cufile = false;
 			else
 			{
-				__Elog("invalid extra module token [%s]", tok);
+				__Notice("invalid extra module token [%s]", tok);
 				return false;
 			}
 		}
@@ -842,14 +842,14 @@ heterodb_extra_parse_signature(const char *extra_module_info,
 				has_nvme_strom = false;
 			else
 			{
-				__Elog("invalid extra module token [%s]", tok);
+				__Notice("invalid extra module token [%s]", tok);
 				return false;
 			}
 		}
 	}
 	if (api_version < HETERODB_EXTRA_OLDEST_API_VERSION)
 	{
-		__Elog("HeteroDB Extra module API-version [%08ld] is too old, update to the latest version.", api_version);
+		__Notice("HeteroDB Extra module API-version [%08ld] is too old, update to the latest version.", api_version);
 		return false;
 	}
 	*p_api_version		= api_version;
@@ -883,7 +883,7 @@ heterodb_extra_init_module(const char *__extra_pathname)
 	}
 	if (!handle)
 	{
-		__Elog("HeteroDB Extra module is not available");
+		__Notice("HeteroDB Extra module is not available");
 		return NULL;
 	}
 
@@ -892,7 +892,7 @@ heterodb_extra_init_module(const char *__extra_pathname)
 		void   *fn_addr = dlsym(handle, #symbol);					\
 		if (!fn_addr)												\
 		{															\
-			__Elog("could not find extra symbol \"%s\" - %s",		\
+			__Notice("could not find extra symbol \"%s\" - %s",		\
 				   #symbol, dlerror());								\
 			goto bailout;											\
 		}															\
