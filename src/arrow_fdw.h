@@ -75,6 +75,8 @@ parquetReadOneRowGroup(const char *filename,
 					   void *malloc_private,
 					   uint32_t *p_npages_direct_read,
 					   uint32_t *p_npages_vfs_read,
+					   uint32_t *p_nchunks_parquet_read,
+					   uint32_t *p_ncaches_parquet_load,
 					   char *error_message,
 					   size_t error_message_sz);
 __EXTERN void

@@ -997,6 +997,9 @@ __updateStatsXpuCommand(pgstromTaskState *pts, const XpuCommand *xcmd)
 		if (xcmd->u.results.select_into_nblocks > 0)
 			pg_atomic_fetch_add_u32(&ps_state->select_into_nblocks,
 									xcmd->u.results.select_into_nblocks);
+		/* stats related to arrow_fdw */
+		if (pts->arrow_state)
+			arrowFdwUpdateExecStats(pts->arrow_state, &xcmd->u.results);
 	}
 }
 

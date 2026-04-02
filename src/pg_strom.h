@@ -416,6 +416,8 @@ typedef struct
 	pg_atomic_uint32	arrow_rbatch_index;
 	pg_atomic_uint32	arrow_rbatch_nload;	/* # of loaded record-batches */
 	pg_atomic_uint32	arrow_rbatch_nskip;	/* # of skipped record-batches */
+	pg_atomic_uint32	nchunks_parquet_read; /* # of chunks in file read by arrow/parquet */
+	pg_atomic_uint32	ncaches_parquet_load; /* # of caches loaded by parquet */
 	/* for gpu-cache */
 	pg_atomic_uint32	__gcache_fetch_count_data;
 	/* for brin-index */
@@ -1001,6 +1003,8 @@ extern void		pgstromArrowFdwExplain(ScanState *ss,
 									   ArrowFdwState *arrow_state,
 									   ExplainState *es,
 									   List *dcontext);
+extern void		arrowFdwUpdateExecStats(ArrowFdwState *arrow_state,
+										const kern_exec_results *kresults);
 extern bool		kds_arrow_fetch_tuple(TupleTableSlot *slot,
 									  kern_data_store *kds,
 									  size_t index,

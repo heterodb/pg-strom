@@ -2790,6 +2790,8 @@ typedef struct {
 	/* statistics */
 	uint32_t	npages_direct_read;	/* # of pages read by GPU-Direct Storage */
 	uint32_t	npages_vfs_read;	/* # of pages read by VFS (fallback) */
+	uint32_t	nchunks_parquet_read; /* # of chunks read by arrow/parquet (raw file) */
+	uint32_t	ncaches_parquet_load; /* # of caches loaded by parquet (nvme cache) */
 	uint32_t	nitems_raw;		/* # of visible rows kept in the relation */
 	uint32_t	nitems_in;		/* # of result rows in depth-0 after WHERE-clause */
 	uint32_t	nitems_out;		/* # of result rows in final depth before host quals */

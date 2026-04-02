@@ -758,7 +758,8 @@ __parquetReadOneRowGroupFullyCached(const kern_data_store *kds_head,
 																off_t *m_offset),
 									void *malloc_private,
 									uint32_t *p_npages_direct_read,
-									uint32_t *p_npages_vfs_read)
+									uint32_t *p_npages_vfs_read,
+									uint32_t *p_ncaches_parquet_load)
 {
 	size_t		kds_headsz = KDS_HEAD_LENGTH(kds_head) + kds_head->arrow_virtual_usage;
 	size_t		kds_length = PAGE_ALIGN(kds_headsz);
@@ -798,9 +799,10 @@ __parquetReadOneRowGroupFullyCached(const kern_data_store *kds_head,
 										m_offset,
 										p_npages_direct_read,
 										p_npages_vfs_read);
-		if (nbytes < 0)
+			if (nbytes < 0)
 			__Elog("failed on parquetCacheReadChunks");
 		kds_host->usage += nbytes;
+		(*p_ncaches_parquet_load)++;
 	}
 	assert(kds_host->usage <= kds_length);
 	kds_host->length = kds_host->usage;
@@ -809,7 +811,6 @@ __parquetReadOneRowGroupFullyCached(const kern_data_store *kds_head,
 	if (rc != CUDA_SUCCESS)
 		__Elog("failed on cuMemcpyHtoD");
 	/* ok */
-	*p_npages_direct_read = (kds_host->usage - kds_headsz) / PAGE_SIZE;
 	return (kern_data_store *)(m_segment + m_offset);
 }
 
@@ -825,7 +826,8 @@ parquetReadArrowTableSimple(std::shared_ptr<arrow::Table> table,
 														 size_t malloc_size),
 							void *malloc_private,
 							uint32_t *p_npages_vfs_read,
-							uint32_t *p_npages_direct_read)
+							uint32_t *p_npages_direct_read,
+							uint32_t *p_nchunks_parquet_read)
 {
 	size_t		kds_headsz = ARROW_ALIGN(KDS_HEAD_LENGTH(kds_head) +
 										 kds_head->arrow_virtual_usage);
@@ -866,6 +868,8 @@ parquetReadArrowTableSimple(std::shared_ptr<arrow::Table> table,
 									0UL,
 									carray->chunk(0),
 									pq_fstat);
+		/* ok, update stats */
+		(*p_nchunks_parquet_read)++;
 	}
 	assert(kds->usage <= kds_length);
 	kds->format = KDS_FORMAT_ARROW;
@@ -886,7 +890,10 @@ parquetReadArrowTableWithCache(std::shared_ptr<arrow::Table> table,
 														   off_t *m_offset),
 							   void *malloc_private,
 							   uint32_t *p_npages_vfs_read,
-							   uint32_t *p_npages_direct_read)
+							   uint32_t *p_npages_direct_read,
+							   uint32_t *p_nchunks_parquet_read,
+							   uint32_t *p_ncaches_parquet_load)
+							   
 {
 	size_t		kds_headsz = KDS_HEAD_LENGTH(kds_head) + kds_head->arrow_virtual_usage;
 	size_t		kds_length = ARROW_ALIGN(kds_headsz);
@@ -940,6 +947,8 @@ parquetReadArrowTableWithCache(std::shared_ptr<arrow::Table> table,
 									m_segment + m_offset,
 									carray->chunk(0),
 									pq_fstat);
+		/* ok, update stats */
+        (*p_nchunks_parquet_read)++;
 	}
 	/* buffer copy (Parquet Cache --> GPU memory) */
 	kds_host->usage = PAGE_ALIGN(kds_host->usage);
@@ -959,8 +968,8 @@ parquetReadArrowTableWithCache(std::shared_ptr<arrow::Table> table,
 											p_npages_vfs_read);
 			if (nbytes < 0)
 				__Elog("failed parquetCacheReadChunks");
-			fprintf(stderr, "cached read col=%d nbytes=%lu\n", j, nbytes);
 			kds_host->usage += nbytes;
+			(*p_ncaches_parquet_load)++;
 		}
 	}
 	/* buffer copy (KDS header portion)  */
@@ -996,7 +1005,9 @@ __parquetReadOneRowGroupNormal(std::shared_ptr<arrow::io::ReadableFile> parquet_
 															size_t malloc_size),
 							   void *malloc_private,
 							   uint32_t *p_npages_direct_read,
-							   uint32_t *p_npages_vfs_read)
+							   uint32_t *p_npages_vfs_read,
+							   uint32_t *p_nchunks_parquet_read,
+							   uint32_t *p_ncaches_parquet_load)
 {
 	std::unique_ptr<parquet::ParquetFileReader> raw_file_reader = nullptr;
 	std::unique_ptr<parquet::arrow::FileReader> arrow_file_reader = nullptr;
@@ -1080,7 +1091,9 @@ __parquetReadOneRowGroupNormal(std::shared_ptr<arrow::io::ReadableFile> parquet_
 												 malloc_gpu_callback,
 												 malloc_private,
 												 p_npages_direct_read,
-												 p_npages_vfs_read);
+												 p_npages_vfs_read,
+												 p_nchunks_parquet_read,
+												 p_ncaches_parquet_load);
 		}
 		else
 		{
@@ -1091,7 +1104,8 @@ __parquetReadOneRowGroupNormal(std::shared_ptr<arrow::io::ReadableFile> parquet_
 											  malloc_cpu_callback,
 											  malloc_private,
 											  p_npages_direct_read,
-											  p_npages_vfs_read);
+											  p_npages_vfs_read,
+											  p_nchunks_parquet_read);
 		}
 	}
 	return kds;
@@ -1112,6 +1126,8 @@ parquetReadOneRowGroup(const char *filename,
 					   void *malloc_private,
 					   uint32_t *p_npages_direct_read,
 					   uint32_t *p_npages_vfs_read,
+					   uint32_t *p_nchunks_parquet_read,
+                       uint32_t *p_ncaches_parquet_load,
 					   char *error_message,
 					   size_t error_message_sz)
 {
@@ -1197,7 +1213,8 @@ parquetReadOneRowGroup(const char *filename,
 														  malloc_gpu_callback,
 														  malloc_private,
 														  p_npages_direct_read,
-														  p_npages_vfs_read);
+														  p_npages_vfs_read,
+														  p_ncaches_parquet_load);
 			}
 		}
 		/*
@@ -1213,7 +1230,9 @@ parquetReadOneRowGroup(const char *filename,
 												 malloc_host_callback,
 												 malloc_private,
 												 p_npages_direct_read,
-												 p_npages_vfs_read);
+												 p_npages_vfs_read,
+												 p_nchunks_parquet_read,
+												 p_ncaches_parquet_load);
 	}
 	catch (const std::exception &e) {
 		if (error_message)

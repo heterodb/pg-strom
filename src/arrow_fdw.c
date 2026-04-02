@@ -130,6 +130,10 @@ struct ArrowFdwState
 	pg_atomic_uint32	__rbatch_nload_local;	/* if single process */
 	pg_atomic_uint32   *rbatch_nskip;
 	pg_atomic_uint32	__rbatch_nskip_local;	/* if single process */
+	pg_atomic_uint32   *nchunks_parquet_read;
+	pg_atomic_uint32	__nchunks_parquet_read;	/* if single process */
+	pg_atomic_uint32   *ncaches_parquet_load;
+	pg_atomic_uint32	__ncaches_parquet_load;	/* if single process */
 	LargeStringInfoData	chunk_buffer;	/* buffer to load record-batch */
 	File				curr_filp;		/* current arrow file to read */
 	kern_data_store	   *curr_kds;		/* current chunk to read */
@@ -4128,6 +4132,8 @@ parquetFillupRowGroup(Relation relation,
 	kern_data_store *kds;
 	uint32_t	npages_direct_read = 0;
 	uint32_t	npages_vfs_read = 0;
+	uint32_t	nchunks_parquet_read = 0;
+	uint32_t	ncaches_parquet_load = 0;
 	char		error_message[320];
 
 	/* prepare the KDS buffer */
@@ -4146,6 +4152,8 @@ parquetFillupRowGroup(Relation relation,
 								 (void *)chunk_buffer,
 								 &npages_direct_read,
 								 &npages_vfs_read,
+								 &nchunks_parquet_read,
+								 &ncaches_parquet_load,
 								 error_message,
 								 sizeof(error_message));
 	if (!kds)
@@ -5141,6 +5149,8 @@ __arrowFdwExecInit(ScanState *ss,
 	arrow_state->rbatch_index = &arrow_state->__rbatch_index_local;
 	arrow_state->rbatch_nload = &arrow_state->__rbatch_nload_local;
 	arrow_state->rbatch_nskip = &arrow_state->__rbatch_nskip_local;
+	arrow_state->nchunks_parquet_read = &arrow_state->__nchunks_parquet_read;
+	arrow_state->ncaches_parquet_load = &arrow_state->__ncaches_parquet_load;
 	initLargeStringInfo(&arrow_state->chunk_buffer);
 	arrow_state->curr_filp  = -1;
 	arrow_state->curr_kds   = NULL;
@@ -5429,6 +5439,18 @@ ArrowEndForeignScan(ForeignScanState *node)
 }
 
 /*
+ * arrowFdwUpdateExecStats
+ */
+void
+arrowFdwUpdateExecStats(ArrowFdwState *arrow_state, const kern_exec_results *kresults)
+{
+	pg_atomic_fetch_add_u32(arrow_state->nchunks_parquet_read,
+							kresults->nchunks_parquet_read);
+	pg_atomic_fetch_add_u32(arrow_state->ncaches_parquet_load,
+							kresults->ncaches_parquet_load);
+}
+
+/*
  * ArrowIsForeignScanParallelSafe
  */
 static bool
@@ -5459,6 +5481,8 @@ pgstromArrowFdwInitDSM(ArrowFdwState *arrow_state,
 	arrow_state->rbatch_index = &ps_state->arrow_rbatch_index;
 	arrow_state->rbatch_nload = &ps_state->arrow_rbatch_nload;
 	arrow_state->rbatch_nskip = &ps_state->arrow_rbatch_nskip;
+	arrow_state->nchunks_parquet_read = &ps_state->nchunks_parquet_read;
+	arrow_state->ncaches_parquet_load = &ps_state->ncaches_parquet_load;
 }
 
 static void
@@ -5482,6 +5506,8 @@ pgstromArrowFdwAttachDSM(ArrowFdwState *arrow_state,
 	arrow_state->rbatch_index = &ps_state->arrow_rbatch_index;
 	arrow_state->rbatch_nload = &ps_state->arrow_rbatch_nload;
 	arrow_state->rbatch_nskip = &ps_state->arrow_rbatch_nskip;
+	arrow_state->nchunks_parquet_read = &ps_state->nchunks_parquet_read;
+	arrow_state->ncaches_parquet_load = &ps_state->ncaches_parquet_load;
 }
 
 static void
@@ -5514,6 +5540,13 @@ pgstromArrowFdwShutdown(ArrowFdwState *arrow_state)
 	pg_atomic_write_u32(&arrow_state->__rbatch_nskip_local, temp);
 	arrow_state->rbatch_nskip = &arrow_state->__rbatch_nskip_local;
 
+	temp = pg_atomic_read_u32(arrow_state->nchunks_parquet_read);
+	pg_atomic_write_u32(&arrow_state->__nchunks_parquet_read, temp);
+	arrow_state->nchunks_parquet_read = &arrow_state->__nchunks_parquet_read;
+
+	temp = pg_atomic_read_u32(arrow_state->ncaches_parquet_load);
+	pg_atomic_write_u32(&arrow_state->__ncaches_parquet_load, temp);
+	arrow_state->ncaches_parquet_load = &arrow_state->__ncaches_parquet_load;
 }
 
 static void
@@ -5728,6 +5761,22 @@ pgstromArrowFdwExplain(ScanState *ss,	/* Foreign or Custom */
 			attr = TupleDescAttr(tupdesc, j);
 			snprintf(label, sizeof(label), "  %s", NameStr(attr->attname));
 			ExplainPropertyText(label, format_bytesz(chunk_sz[j]), es);
+		}
+	}
+
+	/* parquet cache statistics */
+	if (es->analyze && !pgstrom_explain_developer_mode)
+	{
+		uint32_t	nchunks = pg_atomic_read_u32(arrow_state->nchunks_parquet_read);
+		uint32_t	ncaches = pg_atomic_read_u32(arrow_state->ncaches_parquet_load);
+
+		if (ncaches > 0)
+		{
+			resetStringInfo(&buf);
+			appendStringInfo(&buf, "cache-hit: %u of total %u chunks (cache ratio: %.2f%%)",
+							 ncaches, ncaches + nchunks,
+							 100.0 * (double)ncaches / (double)(ncaches + nchunks));
+			ExplainPropertyText("Parquet cache", buf.data, es);
 		}
 	}
 	pfree(buf.data);
