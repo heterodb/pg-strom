@@ -104,6 +104,7 @@ parquetCacheReadChunks(void *entry,
 __EXTERN void
 parquetCacheWriteAsync(parquetCacheWriteAsyncData *data);
 
+__EXTERN bool		pgstrom_parquet_cache_enabled(void);
 __EXTERN void		pgstrom_init_parquet_cache(void);
 #undef __EXTERN
 #endif	/* _ARROW_FDW_H_ */

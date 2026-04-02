@@ -3677,7 +3677,8 @@ gpuservLoadKdsParquet(gpuClient *gclient,
 
 	kds = parquetReadOneRowGroup(pathname,
 								 kds_head,
-								 __loadKdsParquetGpuMallocCallback,
+								 (kds_head->parquet_cache_enabled
+								  ? __loadKdsParquetGpuMallocCallback : NULL),
 								 __loadKdsParquetCpuMallocCallback,
 								 (void *)&m_chunk,
 								 p_npages_direct_read,

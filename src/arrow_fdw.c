@@ -98,6 +98,7 @@ typedef struct ArrowFileState
 	const char *dpu_path;	/* relative pathname, if DPU */
 	struct stat	stat_buf;
 	ArrowMetadataVersion version; /* used to determine whether Arrow or Parquet */
+	int			parquet_cache; /* foreign-table option */
 	List	   *rb_list;	/* list of RecordBatchState */
 	uint32_t	ncols;
 	struct {
@@ -256,6 +257,7 @@ static bool			arrow_fdw_enabled;	/* GUC */
 static bool			arrow_fdw_stats_hint_enabled;	/* GUC */
 int					arrow_metadata_cache_size_kb;	/* GUC */
 static int			parquet_parallel_read_threshold;/* GUC */
+static bool			default_parquet_cache_enabled;	/* GUC */
 
 /* ----------------------------------------------------------------
  *
@@ -2993,6 +2995,7 @@ BuildArrowFileState(Relation frel,
 					const char *filename,
 					List *source_fields,
 					List *virtual_columns,
+					int parquet_cache,
 					Bitmapset **p_stat_pg_attrs)
 {
 	TupleDesc		tupdesc = RelationGetDescr(frel);
@@ -3011,8 +3014,9 @@ BuildArrowFileState(Relation frel,
 	af_state = palloc0(offsetof(ArrowFileState, attrs[tupdesc->natts]));
 	af_state->filename = pstrdup(filename);
 	memcpy(&af_state->stat_buf, &stat_buf, sizeof(struct stat));
+	af_state->parquet_cache = parquet_cache;
 	af_state->ncols = tupdesc->natts;
-	
+
 	LWLockAcquire(&arrow_metadata_cache->mutex, LW_SHARED);
 	mc_block = lookupArrowMetadataCache(&stat_buf, false);
 	if (mc_block)
@@ -3387,13 +3391,15 @@ arrowFdwExcludeFileNamesByPattern(List *filesList,
 static List *
 arrowFdwExtractFilesList(List *options_list,
 						 List **p_virtAttrsList,
-						 int *p_parallel_nworkers)
+						 int *p_parallel_nworkers,
+						 int *p_parquet_cache)
 {
 	List	   *filesList = NIL;
 	char	   *dir_path = NULL;
 	char	   *dir_suffix = NULL;
 	char	   *pattern = NULL;
 	int			parallel_nworkers = -1;
+	int			parquet_cache = -1;
 	ListCell   *lc;
 
 	foreach (lc, options_list)
@@ -3443,13 +3449,22 @@ arrowFdwExtractFilesList(List *options_list,
 		{
 			if (parallel_nworkers >= 0)
 				elog(ERROR, "'parallel_workers' appeared twice");
-			parallel_nworkers = atoi(strVal(defel->arg));
+			parallel_nworkers = defGetInt32(defel);
 		}
 		else if (strcmp(defel->defname, "pattern") == 0)
 		{
 			if (pattern)
 				elog(ERROR, "'pattern' appeared twice");
 			pattern = strVal(defel->arg);
+		}
+		else if (strcmp(defel->defname, "parquet_cache") == 0)
+		{
+			if (parquet_cache >= 0)
+				elog(ERROR, "'parquet_cache' appeared twice");
+			if (defGetBoolean(defel))
+				parquet_cache = 1;
+			else
+				parquet_cache = 0;
 		}
 		else
 			elog(ERROR, "arrow: unknown option (%s)", defel->defname);
@@ -3503,6 +3518,8 @@ arrowFdwExtractFilesList(List *options_list,
 	}
 	if (p_parallel_nworkers)
 		*p_parallel_nworkers = parallel_nworkers;
+	if (p_parquet_cache)
+		*p_parquet_cache = parquet_cache;
 	return filesList;
 }
 
@@ -3999,15 +4016,29 @@ __arrowFdwSetupKDSHead(Relation relation,
 		}
 	}
 	/*
-	 * turn on multi-threading read of parquet::arrow::FileReader,
-	 * if number of columns exceeds the threshold. (in case when small
-	 * number of columns are loaded, multi-threading is not efficient
-	 * so much.)
+	 * Special parameter setting for Parquet mode
 	 */
-	if (kds_format == KDS_FORMAT_PARQUET &&
-		parquet_parallel_read_threshold >= 0 &&
-		nr_loads >= parquet_parallel_read_threshold)
-		kds->parquet_parallel_load = true;
+	if (kds_format == KDS_FORMAT_PARQUET)
+	{
+		/*
+		 * turn on multi-threading read of parquet::arrow::FileReader,
+		 * if number of columns exceeds the threshold. (in case when small
+		 * number of columns are loaded, multi-threading is not efficient
+		 * so much.)
+		 */
+		if (parquet_parallel_read_threshold >= 0 &&
+			nr_loads >= parquet_parallel_read_threshold)
+			kds->parquet_parallel_load = true;
+		/*
+		 * User can control usage of Parquet-cache
+		 */
+		if (af_state->parquet_cache == 0)
+			kds->parquet_cache_enabled = false;
+		else if (af_state->parquet_cache > 0)
+			kds->parquet_cache_enabled = true;
+		else
+			kds->parquet_cache_enabled = default_parquet_cache_enabled;
+	}
 	kds->parquet_row_group = rb_state->rb_index;
 	kds->arrow_virtual_usage = (chunk_buffer->len
 								- (head_off + KDS_HEAD_LENGTH(kds)));
@@ -4183,6 +4214,7 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 	size_t			totalLen = 0;
 	double			ntuples = 0.0;
 	int				parallel_nworkers;
+	int				parquet_cache;
 
 	/* columns to be referenced */
 	foreach (lc1, baserel->baserestrictinfo)
@@ -4196,7 +4228,8 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 	/* read arrow-file metadta */
 	filesList = arrowFdwExtractFilesList(ft->options,
 										 &virtualColumnsList,
-										 &parallel_nworkers);
+										 &parallel_nworkers,
+										 &parquet_cache);
 	sourceFields = arrowFdwExtractSourceFields(frel);
 	forboth (lc1, filesList,
 			 lc2, virtualColumnsList)
@@ -4208,7 +4241,9 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 
 		af_state = BuildArrowFileState(frel, fname,
 									   sourceFields,
-									   virtual_columns, NULL);
+									   virtual_columns,
+									   parquet_cache,
+									   NULL);
 		if (!af_state)
 			continue;
 
@@ -5085,7 +5120,7 @@ __arrowFdwExecInit(ScanState *ss,
 
 	/* setup ArrowFileState */
 	filesList = arrowFdwExtractFilesList(ft->options,
-										 &virtualColumnsList, NULL);
+										 &virtualColumnsList, NULL, NULL);
 	sourceFields = arrowFdwExtractSourceFields(frel);
 	forboth (lc1, filesList,
 			 lc2, virtualColumnsList)
@@ -5097,6 +5132,7 @@ __arrowFdwExecInit(ScanState *ss,
 		af_state = BuildArrowFileState(frel, fname,
 									   sourceFields,
 									   virtual_columns,
+									   -1,
 									   &stat_attrs);
 		if (af_state)
 		{
@@ -5865,7 +5901,7 @@ ArrowAcquireSampleRows(Relation relation,
 	int				nitems = 0;
 
 	filesList = arrowFdwExtractFilesList(ft->options,
-										 &virtualColumnsList, NULL);
+										 &virtualColumnsList, NULL, NULL);
 	sourceFields = arrowFdwExtractSourceFields(relation);
 	forboth (lc1, filesList,
 			 lc2, virtualColumnsList)
@@ -5877,7 +5913,9 @@ ArrowAcquireSampleRows(Relation relation,
 
 		af_state = BuildArrowFileState(relation, fname,
 									   sourceFields,
-									   virtual_columns, NULL);
+									   virtual_columns,
+									   -1,
+									   NULL);
 		if (!af_state)
 			continue;
 		foreach (cell, af_state->rb_list)
@@ -5930,7 +5968,7 @@ ArrowAnalyzeForeignTable(Relation frel,
 	size_t			totalpages = 0;
 
 	filesList = arrowFdwExtractFilesList(ft->options,
-										 &virtualColumnsList, NULL);
+										 &virtualColumnsList, NULL, NULL);
 	foreach (lc, filesList)
 	{
 		const char	   *fname = strVal(lfirst(lc));
@@ -6036,7 +6074,7 @@ ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 			break;
 	}
 	filesList = arrowFdwExtractFilesList(stmt->options,
-										 &virtualColumnsList, NULL);
+										 &virtualColumnsList, NULL, NULL);
 	if (filesList == NIL)
 		ereport(ERROR,
 				(errmsg("No valid apache arrow files are specified"),
@@ -6397,7 +6435,8 @@ pgstrom_arrow_fdw_validator(PG_FUNCTION_ARGS)
 		ListCell   *lc;
 
 		filesList = arrowFdwExtractFilesList(options,
-											 &virtualColumnsList, NULL);
+											 &virtualColumnsList,
+											 NULL, NULL);
 		foreach (lc, filesList)
 		{
 			const char *fname = strVal(lfirst(lc));
@@ -6526,7 +6565,8 @@ pgstrom_arrow_fdw_precheck_schema(PG_FUNCTION_ARGS)
 		List	   *virtualColumnsList;
 
 		filesList = arrowFdwExtractFilesList(ft->options,
-											 &virtualColumnsList, NULL);
+											 &virtualColumnsList,
+											 NULL, NULL);
 		sourceFields = arrowFdwExtractSourceFields(frel);
 		forboth (lc1, filesList,
 				 lc2, virtualColumnsList)
@@ -6536,7 +6576,9 @@ pgstrom_arrow_fdw_precheck_schema(PG_FUNCTION_ARGS)
 
 			(void)BuildArrowFileState(frel, fname,
 									  sourceFields,
-									  virtual_columns, NULL);
+									  virtual_columns,
+									  -1,
+									  NULL);
 		}
 	}
 	if (frel)
@@ -6662,7 +6704,7 @@ static dlist_head *
 __setup_arrow_fdw_metadata_info(Oid frelid)
 {
 	ForeignTable   *ft = GetForeignTable(frelid);
-	List		   *filesList = arrowFdwExtractFilesList(ft->options, NULL, NULL);
+	List		   *filesList = arrowFdwExtractFilesList(ft->options, NULL, NULL, NULL);
 	ListCell	   *lc;
 	dlist_head	   *md_info_dlist = palloc(sizeof(dlist_head));
 
@@ -7013,6 +7055,17 @@ pgstrom_init_arrow_fdw(void)
 							PGC_USERSET,
 							GUC_NOT_IN_SAMPLE,
 							NULL, NULL, NULL);
+	/*
+	 * Default behavior of Parquet cache usage
+	 */
+	DefineCustomBoolVariable("arrow_fdw.parquet_cache_enabled",
+							 "Enables the planner's use of Parquet cache",
+							 NULL,
+							 &default_parquet_cache_enabled,
+							 true,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
 	/* shared memory size */
 	shmem_request_next = shmem_request_hook;
 	shmem_request_hook = pgstrom_request_arrow_fdw;
