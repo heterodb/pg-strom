@@ -1,0 +1,399 @@
+---
+--- Micro test cases for text to inet conversion on GPU
+---
+SET pg_strom.regression_test_mode = on;
+SET client_min_messages = error;
+DROP SCHEMA IF EXISTS regtest_dtype_inet_temp CASCADE;
+CREATE SCHEMA regtest_dtype_inet_temp;
+RESET client_min_messages;
+
+SET search_path = regtest_dtype_inet_temp,public;
+
+CREATE TABLE rt_inet (
+  id    int,
+  addr  text
+);
+
+\set ip_mixed_with_masks_10k_path `echo -n ${ARROW_TEST_DATA_DIR:-$PWD/test/data}/ip_mixed_with_masks_10k.tsv`
+\copy rt_inet FROM :'ip_mixed_with_masks_10k_path' WITH (DELIMITER E'\t')
+VACUUM ANALYZE;
+
+-- force to use GpuScan, instead of SeqScan
+SET enable_seqscan = off;
+
+-- '=' operator (IPv4 exact match)
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, addr::inet
+  INTO test10g
+  FROM rt_inet
+ WHERE addr::inet = '187.215.79.78'::inet;
+SELECT id, addr::inet
+  INTO test10g
+  FROM rt_inet
+ WHERE addr::inet = '187.215.79.78'::inet;
+SET pg_strom.enabled = off;
+SELECT id, addr::inet
+  INTO test10p
+  FROM rt_inet
+ WHERE addr::inet = '187.215.79.78'::inet;
+(SELECT * FROM test10g EXCEPT ALL SELECT * FROM test10p) ORDER BY id;
+(SELECT * FROM test10p EXCEPT ALL SELECT * FROM test10g) ORDER BY id;
+
+-- '=' operator (IPv6 exact match)
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, addr::inet
+  INTO test11g
+  FROM rt_inet
+ WHERE addr::inet = 'a67d:8fe6:96ee:e8cd:cc60:84fc:7c63:e7ad'::inet;
+SELECT id, addr::inet
+  INTO test11g
+  FROM rt_inet
+ WHERE addr::inet = 'a67d:8fe6:96ee:e8cd:cc60:84fc:7c63:e7ad'::inet;
+SET pg_strom.enabled = off;
+SELECT id, addr::inet
+  INTO test11p
+  FROM rt_inet
+ WHERE addr::inet = 'a67d:8fe6:96ee:e8cd:cc60:84fc:7c63:e7ad'::inet;
+(SELECT * FROM test11g EXCEPT ALL SELECT * FROM test11p) ORDER BY id;
+(SELECT * FROM test11p EXCEPT ALL SELECT * FROM test11g) ORDER BY id;
+
+-- '<>' operator (IPv4)
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, addr::inet
+  INTO test12g
+  FROM rt_inet
+ WHERE addr::inet <> '187.215.79.78'::inet
+   AND addr::inet <<= '0.0.0.0/0'::inet;
+SELECT id, addr::inet
+  INTO test12g
+  FROM rt_inet
+ WHERE addr::inet <> '187.215.79.78'::inet
+   AND addr::inet <<= '0.0.0.0/0'::inet;
+SET pg_strom.enabled = off;
+SELECT id, addr::inet
+  INTO test12p
+  FROM rt_inet
+ WHERE addr::inet <> '187.215.79.78'::inet
+   AND addr::inet <<= '0.0.0.0/0'::inet;
+(SELECT * FROM test12g EXCEPT ALL SELECT * FROM test12p) ORDER BY id;
+(SELECT * FROM test12p EXCEPT ALL SELECT * FROM test12g) ORDER BY id;
+
+-- '<>' operator (IPv6)
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, addr::inet
+  INTO test13g
+  FROM rt_inet
+ WHERE addr::inet <> '::1'::inet
+   AND addr::inet <<= '::/0'::inet;
+SELECT id, addr::inet
+  INTO test13g
+  FROM rt_inet
+ WHERE addr::inet <> '::1'::inet
+   AND addr::inet <<= '::/0'::inet;
+SET pg_strom.enabled = off;
+SELECT id, addr::inet
+  INTO test13p
+  FROM rt_inet
+ WHERE addr::inet <> '::1'::inet
+   AND addr::inet <<= '::/0'::inet;
+(SELECT * FROM test13g EXCEPT ALL SELECT * FROM test13p) ORDER BY id;
+(SELECT * FROM test13p EXCEPT ALL SELECT * FROM test13g) ORDER BY id;
+
+-- '<' operator (IPv4)
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, addr::inet
+  INTO test14g
+  FROM rt_inet
+ WHERE addr::inet < '128.0.0.0'::inet
+   AND addr::inet <<= '0.0.0.0/0'::inet;
+SELECT id, addr::inet
+  INTO test14g
+  FROM rt_inet
+ WHERE addr::inet < '128.0.0.0'::inet
+   AND addr::inet <<= '0.0.0.0/0'::inet;
+SET pg_strom.enabled = off;
+SELECT id, addr::inet
+  INTO test14p
+  FROM rt_inet
+ WHERE addr::inet < '128.0.0.0'::inet
+   AND addr::inet <<= '0.0.0.0/0'::inet;
+(SELECT * FROM test14g EXCEPT ALL SELECT * FROM test14p) ORDER BY id;
+(SELECT * FROM test14p EXCEPT ALL SELECT * FROM test14g) ORDER BY id;
+
+-- '<=' operator (IPv4)
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, addr::inet
+  INTO test15g
+  FROM rt_inet
+ WHERE addr::inet <= '128.0.0.0'::inet
+   AND addr::inet <<= '0.0.0.0/0'::inet;
+SELECT id, addr::inet
+  INTO test15g
+  FROM rt_inet
+ WHERE addr::inet <= '128.0.0.0'::inet
+   AND addr::inet <<= '0.0.0.0/0'::inet;
+SET pg_strom.enabled = off;
+SELECT id, addr::inet
+  INTO test15p
+  FROM rt_inet
+ WHERE addr::inet <= '128.0.0.0'::inet
+   AND addr::inet <<= '0.0.0.0/0'::inet;
+(SELECT * FROM test15g EXCEPT ALL SELECT * FROM test15p) ORDER BY id;
+(SELECT * FROM test15p EXCEPT ALL SELECT * FROM test15g) ORDER BY id;
+
+-- '>' operator (IPv4)
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, addr::inet
+  INTO test16g
+  FROM rt_inet
+ WHERE addr::inet > '200.0.0.0'::inet
+   AND addr::inet <<= '0.0.0.0/0'::inet;
+SELECT id, addr::inet
+  INTO test16g
+  FROM rt_inet
+ WHERE addr::inet > '200.0.0.0'::inet
+   AND addr::inet <<= '0.0.0.0/0'::inet;
+SET pg_strom.enabled = off;
+SELECT id, addr::inet
+  INTO test16p
+  FROM rt_inet
+ WHERE addr::inet > '200.0.0.0'::inet
+   AND addr::inet <<= '0.0.0.0/0'::inet;
+(SELECT * FROM test16g EXCEPT ALL SELECT * FROM test16p) ORDER BY id;
+(SELECT * FROM test16p EXCEPT ALL SELECT * FROM test16g) ORDER BY id;
+
+-- '>=' operator (IPv4)
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, addr::inet
+  INTO test17g
+  FROM rt_inet
+ WHERE addr::inet >= '200.0.0.0'::inet
+   AND addr::inet <<= '0.0.0.0/0'::inet;
+SELECT id, addr::inet
+  INTO test17g
+  FROM rt_inet
+ WHERE addr::inet >= '200.0.0.0'::inet
+   AND addr::inet <<= '0.0.0.0/0'::inet;
+SET pg_strom.enabled = off;
+SELECT id, addr::inet
+  INTO test17p
+  FROM rt_inet
+ WHERE addr::inet >= '200.0.0.0'::inet
+   AND addr::inet <<= '0.0.0.0/0'::inet;
+(SELECT * FROM test17g EXCEPT ALL SELECT * FROM test17p) ORDER BY id;
+(SELECT * FROM test17p EXCEPT ALL SELECT * FROM test17g) ORDER BY id;
+
+-- '<' operator (IPv6)
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, addr::inet
+  INTO test18g
+  FROM rt_inet
+ WHERE addr::inet < '8000::'::inet
+   AND addr::inet <<= '::/0'::inet;
+SELECT id, addr::inet
+  INTO test18g
+  FROM rt_inet
+ WHERE addr::inet < '8000::'::inet
+   AND addr::inet <<= '::/0'::inet;
+SET pg_strom.enabled = off;
+SELECT id, addr::inet
+  INTO test18p
+  FROM rt_inet
+ WHERE addr::inet < '8000::'::inet
+   AND addr::inet <<= '::/0'::inet;
+(SELECT * FROM test18g EXCEPT ALL SELECT * FROM test18p) ORDER BY id;
+(SELECT * FROM test18p EXCEPT ALL SELECT * FROM test18g) ORDER BY id;
+
+-- '>=' operator (IPv6)
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, addr::inet
+  INTO test19g
+  FROM rt_inet
+ WHERE addr::inet >= '8000::'::inet
+   AND addr::inet <<= '::/0'::inet;
+SELECT id, addr::inet
+  INTO test19g
+  FROM rt_inet
+ WHERE addr::inet >= '8000::'::inet
+   AND addr::inet <<= '::/0'::inet;
+SET pg_strom.enabled = off;
+SELECT id, addr::inet
+  INTO test19p
+  FROM rt_inet
+ WHERE addr::inet >= '8000::'::inet
+   AND addr::inet <<= '::/0'::inet;
+(SELECT * FROM test19g EXCEPT ALL SELECT * FROM test19p) ORDER BY id;
+(SELECT * FROM test19p EXCEPT ALL SELECT * FROM test19g) ORDER BY id;
+
+-- '<<' operator : is strictly contained within (IPv4)
+-- host address 185.240.35.111 is strictly within 185.0.0.0/8
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, addr::inet
+  INTO test20g
+  FROM rt_inet
+ WHERE addr::inet << '185.0.0.0/8'::inet;
+SELECT id, addr::inet
+  INTO test20g
+  FROM rt_inet
+ WHERE addr::inet << '185.0.0.0/8'::inet;
+SET pg_strom.enabled = off;
+SELECT id, addr::inet
+  INTO test20p
+  FROM rt_inet
+ WHERE addr::inet << '185.0.0.0/8'::inet;
+(SELECT * FROM test20g EXCEPT ALL SELECT * FROM test20p) ORDER BY id;
+(SELECT * FROM test20p EXCEPT ALL SELECT * FROM test20g) ORDER BY id;
+
+-- '<<=' operator : is contained within or equal (IPv4)
+-- 239.10.84.244/8 <<= 239.0.0.0/8 should be true (same network)
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, addr::inet
+  INTO test21g
+  FROM rt_inet
+ WHERE addr::inet <<= '239.0.0.0/8'::inet;
+SELECT id, addr::inet
+  INTO test21g
+  FROM rt_inet
+ WHERE addr::inet <<= '239.0.0.0/8'::inet;
+SET pg_strom.enabled = off;
+SELECT id, addr::inet
+  INTO test21p
+  FROM rt_inet
+ WHERE addr::inet <<= '239.0.0.0/8'::inet;
+(SELECT * FROM test21g EXCEPT ALL SELECT * FROM test21p) ORDER BY id;
+(SELECT * FROM test21p EXCEPT ALL SELECT * FROM test21g) ORDER BY id;
+
+-- '>>' operator : strictly contains (IPv4)
+-- 239.10.84.244/8 >> 239.10.84.244 (host /32) should be true
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, addr::inet
+  INTO test22g
+  FROM rt_inet
+ WHERE addr::inet >> '239.10.84.244'::inet;
+SELECT id, addr::inet
+  INTO test22g
+  FROM rt_inet
+ WHERE addr::inet >> '239.10.84.244'::inet;
+SET pg_strom.enabled = off;
+SELECT id, addr::inet
+  INTO test22p
+  FROM rt_inet
+ WHERE addr::inet >> '239.10.84.244'::inet;
+(SELECT * FROM test22g EXCEPT ALL SELECT * FROM test22p) ORDER BY id;
+(SELECT * FROM test22p EXCEPT ALL SELECT * FROM test22g) ORDER BY id;
+
+-- '>>=' operator : contains or equal (IPv4)
+-- 239.10.84.244/8 >>= 239.10.84.244/8 should be true (equal)
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, addr::inet
+  INTO test23g
+  FROM rt_inet
+ WHERE addr::inet >>= '239.10.84.244/8'::inet;
+SELECT id, addr::inet
+  INTO test23g
+  FROM rt_inet
+ WHERE addr::inet >>= '239.10.84.244/8'::inet;
+SET pg_strom.enabled = off;
+SELECT id, addr::inet
+  INTO test23p
+  FROM rt_inet
+ WHERE addr::inet >>= '239.10.84.244/8'::inet;
+(SELECT * FROM test23g EXCEPT ALL SELECT * FROM test23p) ORDER BY id;
+(SELECT * FROM test23p EXCEPT ALL SELECT * FROM test23g) ORDER BY id;
+
+-- '&&' operator : overlaps (IPv4)
+-- 222.204.44.186 overlaps 222.0.0.0/8
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, addr::inet
+  INTO test24g
+  FROM rt_inet
+ WHERE addr::inet && '222.0.0.0/8'::inet;
+SELECT id, addr::inet
+  INTO test24g
+  FROM rt_inet
+ WHERE addr::inet && '222.0.0.0/8'::inet;
+SET pg_strom.enabled = off;
+SELECT id, addr::inet
+  INTO test24p
+  FROM rt_inet
+ WHERE addr::inet && '222.0.0.0/8'::inet;
+(SELECT * FROM test24g EXCEPT ALL SELECT * FROM test24p) ORDER BY id;
+(SELECT * FROM test24p EXCEPT ALL SELECT * FROM test24g) ORDER BY id;
+
+-- '<<' operator : is strictly contained within (IPv6)
+-- a9ce:3f69:.../54 is strictly within a9ce::/16
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, addr::inet
+  INTO test25g
+  FROM rt_inet
+ WHERE addr::inet << 'a9ce::/16'::inet;
+SELECT id, addr::inet
+  INTO test25g
+  FROM rt_inet
+ WHERE addr::inet << 'a9ce::/16'::inet;
+SET pg_strom.enabled = off;
+SELECT id, addr::inet
+  INTO test25p
+  FROM rt_inet
+ WHERE addr::inet << 'a9ce::/16'::inet;
+(SELECT * FROM test25g EXCEPT ALL SELECT * FROM test25p) ORDER BY id;
+(SELECT * FROM test25p EXCEPT ALL SELECT * FROM test25g) ORDER BY id;
+
+-- '>>' operator : strictly contains (IPv6)
+-- a9ce:3f69:b77f:cff5:b5bf:ae5f:7f59:a275/54 >> a9ce:3f69:b77f:cff5:b5bf:ae5f:7f59:a275
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, addr::inet
+  INTO test26g
+  FROM rt_inet
+ WHERE addr::inet >> 'a9ce:3f69:b77f:cff5:b5bf:ae5f:7f59:a275'::inet;
+SELECT id, addr::inet
+  INTO test26g
+  FROM rt_inet
+ WHERE addr::inet >> 'a9ce:3f69:b77f:cff5:b5bf:ae5f:7f59:a275'::inet;
+SET pg_strom.enabled = off;
+SELECT id, addr::inet
+  INTO test26p
+  FROM rt_inet
+ WHERE addr::inet >> 'a9ce:3f69:b77f:cff5:b5bf:ae5f:7f59:a275'::inet;
+(SELECT * FROM test26g EXCEPT ALL SELECT * FROM test26p) ORDER BY id;
+(SELECT * FROM test26p EXCEPT ALL SELECT * FROM test26g) ORDER BY id;
+
+-- '&&' operator : overlaps (IPv6)
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, addr::inet
+  INTO test27g
+  FROM rt_inet
+ WHERE addr::inet && 'a000::/4'::inet;
+SELECT id, addr::inet
+  INTO test27g
+  FROM rt_inet
+ WHERE addr::inet && 'a000::/4'::inet;
+SET pg_strom.enabled = off;
+SELECT id, addr::inet
+  INTO test27p
+  FROM rt_inet
+ WHERE addr::inet && 'a000::/4'::inet;
+(SELECT * FROM test27g EXCEPT ALL SELECT * FROM test27p) ORDER BY id;
+(SELECT * FROM test27p EXCEPT ALL SELECT * FROM test27g) ORDER BY id;
+
+-- cleanup temporary resource
+SET client_min_messages = error;
+DROP SCHEMA regtest_dtype_inet_temp CASCADE;
