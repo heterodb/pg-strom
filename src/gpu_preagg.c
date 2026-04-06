@@ -16,11 +16,6 @@ static create_upper_paths_hook_type	create_upper_paths_next = NULL;
 static CustomPathMethods	gpupreagg_path_methods;
 static CustomScanMethods	gpupreagg_plan_methods;
 static CustomExecMethods	gpupreagg_exec_methods;
-static CustomPathMethods	dpupreagg_path_methods;
-static CustomScanMethods	dpupreagg_plan_methods;
-static CustomExecMethods	dpupreagg_exec_methods;
-static bool					pgstrom_enable_dpupreagg = false;
-static bool					pgstrom_enable_partitionwise_dpupreagg = false;
 static bool					pgstrom_enable_gpupreagg = false;
 static bool					pgstrom_enable_partitionwise_gpupreagg = false;
 static bool					pgstrom_enable_numeric_aggfuncs;
@@ -2154,32 +2149,7 @@ __buildXpuPreAggCustomPath(xpugroupby_build_path_context *con)
 	pgstromPlanInfo *pp_info = copy_pgstrom_plan_info(con->pp_info);
 	double		input_nrows = PP_INFO_NUM_ROWS(pp_info);
 	double		num_group_keys;
-	double		xpu_ratio;
-	Cost		xpu_operator_cost;
-	Cost		xpu_tuple_cost;
-	const CustomPathMethods *xpu_cpath_methods;
 
-	/*
-	 * Parameters related to devices
-	 */
-	if ((pp_info->xpu_task_flags & DEVKIND__ANY) == DEVKIND__NVIDIA_GPU)
-	{
-		xpu_operator_cost = pgstrom_gpu_operator_cost;
-		xpu_tuple_cost    = pgstrom_gpu_tuple_cost;
-		xpu_ratio         = pgstrom_gpu_operator_ratio();
-		xpu_cpath_methods = &gpupreagg_path_methods;
-	}
-	else if ((pp_info->xpu_task_flags & DEVKIND__ANY) == DEVKIND__NVIDIA_DPU)
-	{
-		xpu_operator_cost = pgstrom_dpu_operator_cost;
-		xpu_tuple_cost    = pgstrom_dpu_tuple_cost;
-		xpu_ratio         = pgstrom_dpu_operator_ratio();
-		xpu_cpath_methods = &dpupreagg_path_methods;
-	}
-	else
-	{
-		elog(ERROR, "Bug? unexpected task_kind: %08x", pp_info->xpu_task_flags);
-	}
 	pp_info->xpu_task_flags &= ~DEVTASK__MASK;
 	if (parse->groupClause || parse->distinctClause)
 		pp_info->xpu_task_flags |= (DEVTASK__PREAGG | DEVTASK__PINNED_HASH_RESULTS);
@@ -2195,15 +2165,15 @@ __buildXpuPreAggCustomPath(xpugroupby_build_path_context *con)
 							 pp_info->run_cost);
 	/* Cost estimation for grouping */
 	num_group_keys = list_length(parse->groupClause);
-	pp_info->startup_cost += (xpu_operator_cost *
+	pp_info->startup_cost += (pgstrom_gpu_operator_cost *
 							  num_group_keys *
 							  input_nrows);
 	/* Cost estimation for aggregate function */
 	pp_info->startup_cost += (target_partial->cost.per_tuple * input_nrows +
-							  target_partial->cost.startup) * xpu_ratio;
+							  target_partial->cost.startup) * pgstrom_gpu_operator_ratio();
 	/* Cost for DMA receive (xPU --> Host) */
 	pp_info->run_cost = (con->target_partial->cost.per_tuple +
-						 xpu_tuple_cost) * con->num_groups / pp_info->parallel_divisor;
+						 pgstrom_gpu_tuple_cost) * con->num_groups / pp_info->parallel_divisor;
 	pp_info->final_cost = 0.0;
 
 	cpath->path.pathtype         = T_CustomScan;
@@ -2222,7 +2192,7 @@ __buildXpuPreAggCustomPath(xpugroupby_build_path_context *con)
 	cpath->flags                 = 0;	/* prevent Result pushdown before plan creation */
 	cpath->custom_paths          = con->inner_paths_list;
 	cpath->custom_private        = list_make3(pp_info, NULL, NULL);
-	cpath->methods               = xpu_cpath_methods;
+	cpath->methods               = &gpupreagg_path_methods;
 	return cpath;
 }
 
@@ -2756,15 +2726,14 @@ __try_add_xpupreagg_partition_path(PlannerInfo *root,
 }
 
 static void
-__xpuPreAggAddCustomPathCommon(PlannerInfo *root,
-							   UpperRelationKind upper_stage,
-							   RelOptInfo *input_rel,
-							   RelOptInfo *group_rel,
-							   void *extra,
-							   uint32_t xpu_task_flags,
-							   bool consider_partition)
+tryGpuPreAggAddCustomPath(PlannerInfo *root,
+						  UpperRelationKind upper_stage,
+						  RelOptInfo *input_rel,
+						  RelOptInfo *group_rel,
+						  void *extra)
 {
 	Query	   *parse = root->parse;
+	uint32_t	xpu_task_flags = TASK_KIND__GPUPREAGG;
 
 	/* quick bailout if not supported */
 	if (parse->groupingSets != NIL)
@@ -2813,7 +2782,7 @@ __xpuPreAggAddCustomPathCommon(PlannerInfo *root,
 		/*
 		 * Try partition-wise XpuPreAgg Path
 		 */
-		if (consider_partition)
+		if (pgstrom_enable_partitionwise_gpupreagg)
 		{
 			List   *op_leaf_list;
 			bool	identical_inners;
@@ -3331,21 +3300,11 @@ XpuPreAggAddCustomPath(PlannerInfo *root,
 	if (upper_stage == UPPERREL_GROUP_AGG || upper_stage == UPPERREL_DISTINCT)
 	{
 		if (pgstrom_enable_gpupreagg && gpuserv_ready_accept())
-			__xpuPreAggAddCustomPathCommon(root,
-										   upper_stage,
-										   input_rel,
-										   upper_rel,
-										   extra,
-										   TASK_KIND__GPUPREAGG,
-										   pgstrom_enable_partitionwise_gpupreagg);
-		if (pgstrom_enable_dpupreagg)
-			__xpuPreAggAddCustomPathCommon(root,
-										   upper_stage,
-										   input_rel,
-										   upper_rel,
-										   extra,
-										   TASK_KIND__DPUPREAGG,
-										   pgstrom_enable_partitionwise_dpupreagg);
+			tryGpuPreAggAddCustomPath(root,
+									  upper_stage,
+									  input_rel,
+									  upper_rel,
+									  extra);
 	}
 	else if (upper_stage == UPPERREL_WINDOW && pgstrom_enable_gpusort)
 	{
@@ -3389,7 +3348,7 @@ PlanGpuPreAggPath(PlannerInfo *root,
 	pgstromPlanInfo *pp_info = linitial(cpath->custom_private);
 	CustomScan	   *cscan;
 
-	cscan = PlanXpuJoinPathCommon(root,
+	cscan = PlanGpuJoinPathCommon(root,
 								  joinrel,
 								  cpath,
 								  tlist,
@@ -3405,31 +3364,6 @@ PlanGpuPreAggPath(PlannerInfo *root,
 			elog(ERROR, "Bug? GPU-Sort and HAVING clause are not usable together");
 		cscan->scan.plan.qual = having_proj_quals;
 	}
-	form_pgstrom_plan_info(cscan, pp_info);
-	return &cscan->scan.plan;
-}
-
-/*
- * PlanDpuPreAggPath
- */
-static Plan *
-PlanDpuPreAggPath(PlannerInfo *root,
-				  RelOptInfo *joinrel,
-				  CustomPath *cpath,
-				  List *tlist,
-				  List *clauses,
-				  List *custom_plans)
-{
-	pgstromPlanInfo *pp_info = linitial(cpath->custom_private);
-	CustomScan	   *cscan;
-
-	cscan = PlanXpuJoinPathCommon(root,
-								  joinrel,
-								  cpath,
-								  tlist,
-								  custom_plans,
-								  pp_info,
-								  &dpupreagg_plan_methods);
 	form_pgstrom_plan_info(cscan, pp_info);
 	return &cscan->scan.plan;
 }
@@ -3539,34 +3473,6 @@ CreateGpuPreAggScanState(CustomScan *cscan)
 }
 
 /*
- * CreateDpuPreAggScanState
- */
-static Node *
-CreateDpuPreAggScanState(CustomScan *cscan)
-{
-	Assert(cscan->methods == &dpupreagg_plan_methods);
-	return pgstromCreateTaskState(cscan, &dpupreagg_exec_methods);
-}
-
-/*
- * __pgstrom_init_xpupreagg_common
- */
-static void
-__pgstrom_init_xpupreagg_common(void)
-{
-	static bool		xpupreagg_common_initialized = false;
-
-	if (!xpupreagg_common_initialized)
-	{
-		create_upper_paths_next = create_upper_paths_hook;
-		create_upper_paths_hook = XpuPreAggAddCustomPath;
-		CacheRegisterSyscacheCallback(PROCOID, aggfunc_catalog_htable_invalidator, 0);
-
-		xpupreagg_common_initialized = true;
-	}
-}
-
-/*
  * Entrypoint of GpuPreAgg
  */
 void
@@ -3632,57 +3538,8 @@ pgstrom_init_gpu_preagg(void)
 	gpupreagg_exec_methods.ShutdownCustomScan  = pgstromSharedStateShutdownDSM;
 	gpupreagg_exec_methods.ExplainCustomScan   = pgstromExplainTaskState;
 
-	/* common portion */
-	__pgstrom_init_xpupreagg_common();
-}
-
-/*
- * pgstrom_init_dpu_preagg
- */
-void
-pgstrom_init_dpu_preagg(void)
-{
-	/* turn on/off gpu_groupby */
-	DefineCustomBoolVariable("pg_strom.enable_dpupreagg",
-							 "Enables the use of DPU PreAgg",
-							 NULL,
-							 &pgstrom_enable_dpupreagg,
-							 true,
-							 PGC_USERSET,
-							 GUC_NOT_IN_SAMPLE,
-							 NULL, NULL, NULL);
-	/* pg_strom.enable_partitionwise_dpupreagg */
-	DefineCustomBoolVariable("pg_strom.enable_partitionwise_dpupreagg",
-							 "Enabled Enables partition wise DpuPreAgg",
-							 NULL,
-							 &pgstrom_enable_partitionwise_dpupreagg,
-							 true,
-							 PGC_USERSET,
-							 GUC_NOT_IN_SAMPLE,
-							 NULL, NULL, NULL);
-	/* initialization of path method table */
-	memset(&dpupreagg_path_methods, 0, sizeof(CustomPathMethods));
-	dpupreagg_path_methods.CustomName     = "DpuPreAgg";
-	dpupreagg_path_methods.PlanCustomPath = PlanDpuPreAggPath;
-
-    /* initialization of plan method table */
-    memset(&dpupreagg_plan_methods, 0, sizeof(CustomScanMethods));
-    dpupreagg_plan_methods.CustomName     = "DpuPreAgg";
-    dpupreagg_plan_methods.CreateCustomScanState = CreateDpuPreAggScanState;
-    RegisterCustomScanMethods(&dpupreagg_plan_methods);
-
-    /* initialization of exec method table */
-    memset(&dpupreagg_exec_methods, 0, sizeof(CustomExecMethods));
-    dpupreagg_exec_methods.CustomName          = "GpuPreAgg";
-    dpupreagg_exec_methods.BeginCustomScan     = pgstromExecInitTaskState;
-    dpupreagg_exec_methods.ExecCustomScan      = pgstromExecTaskState;
-    dpupreagg_exec_methods.EndCustomScan       = pgstromExecEndTaskState;
-    dpupreagg_exec_methods.ReScanCustomScan    = pgstromExecResetTaskState;
-    dpupreagg_exec_methods.EstimateDSMCustomScan = pgstromSharedStateEstimateDSM;
-    dpupreagg_exec_methods.InitializeDSMCustomScan = pgstromSharedStateInitDSM;
-    dpupreagg_exec_methods.InitializeWorkerCustomScan = pgstromSharedStateAttachDSM;
-    dpupreagg_exec_methods.ShutdownCustomScan  = pgstromSharedStateShutdownDSM;
-    dpupreagg_exec_methods.ExplainCustomScan   = pgstromExplainTaskState;
-	/* common portion */
-	__pgstrom_init_xpupreagg_common();
+	/* hook registration */
+	create_upper_paths_next = create_upper_paths_hook;
+	create_upper_paths_hook = XpuPreAggAddCustomPath;
+	CacheRegisterSyscacheCallback(PROCOID, aggfunc_catalog_htable_invalidator, 0);
 }

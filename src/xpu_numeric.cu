@@ -1,7 +1,7 @@
 /*
  * xpu_numeric.cu
  *
- * collection of numeric type support for both of GPU and DPU
+ * collection of numeric type support for GPU devices
  * ----
  * Copyright 2011-2026 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
  * Copyright 2014-2026 (C) PG-Strom Developers Team

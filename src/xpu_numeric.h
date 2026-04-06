@@ -1,7 +1,7 @@
 /*
  * xpu_numeric.h
  *
- * Collection of numeric functions for both of GPU and DPU
+ * Collection of numeric functions for GPU devices
  * --
  * Copyright 2011-2026 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
  * Copyright 2014-2026 (C) PG-Strom Developers Team

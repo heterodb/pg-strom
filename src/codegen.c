@@ -4214,7 +4214,7 @@ codegen_build_gpusort_keydesc(codegen_context *context,
 /*
  * pgstrom_xpu_expression
  *
- * checks whether the expression is executable on GPU/DPU devices.
+ * checks whether the expression is executable on GPU devices
  */
 bool
 pgstrom_xpu_expression(Expr *expr,
@@ -4229,8 +4229,7 @@ pgstrom_xpu_expression(Expr *expr,
 	int			depth;
 	ListCell   *lc;
 
-	Assert((xpu_task_flags & DEVKIND__ANY) == DEVKIND__NVIDIA_GPU ||
-		   (xpu_task_flags & DEVKIND__ANY) == DEVKIND__NVIDIA_DPU);
+	Assert((xpu_task_flags & DEVKIND__ANY) == DEVKIND__NVIDIA_GPU);
 	context = alloca(sz);
 	memset(context, 0, sz);
 	context->elevel = DEBUG2;

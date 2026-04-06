@@ -1512,8 +1512,6 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 					pts->optimal_gpus = GetSystemAvailableGpus();
 				}
 			}
-			if ((pts->xpu_task_flags & DEVKIND__NVIDIA_DPU) != 0)
-				pts->ds_entry = GetOptimalDpuForRelation(rel, &kds_pathname);
 		}
 		pts->kds_pathname = kds_pathname;
 	}
@@ -1686,7 +1684,6 @@ pgstromExecScanAccess(pgstromTaskState *pts)
 			if (resp->u.results.right_outer_join)
 			{
 				Assert(resp->u.results.final_plan_task);
-				ExecFallbackCpuJoinOuterJoinMap(pts, resp);
 				ExecFallbackCpuJoinRightOuter(pts);
 			}
 			if (resp->u.results.chunks_nitems == 0)
@@ -1836,11 +1833,6 @@ __pgstromExecTaskOpenConnection(pgstromTaskState *pts)
 	{
 		gpuClientOpenSession(pts, session);
 		GpuJoinInnerPreloadAfterWorks(pts);
-	}
-	else if ((pts->xpu_task_flags & DEVKIND__NVIDIA_DPU) != 0)
-	{
-		Assert(pts->ds_entry != NULL);
-		DpuClientOpenSession(pts, session);
 	}
 	else
 	{
@@ -2181,7 +2173,7 @@ pgstromSharedStateInitDSM(CustomScanState *node,
 	ConditionVariableInit(&ps_state->preload_cond);
 	SpinLockInit(&ps_state->preload_mutex);
 	if (num_rels > 0)
-		ps_state->preload_shmem_handle = __shmemCreate(pts->ds_entry);
+		ps_state->preload_shmem_handle = __shmemCreate();
 	pts->ps_state = ps_state;
 	pts->css.ss.ss_currentScanDesc = scan;
 }
@@ -2537,9 +2529,8 @@ pgstromExplainTaskState(CustomScanState *node,
 	List			   *dcontext;
 	StringInfoData		buf;
 	ListCell		   *lc;
-	const char		   *xpu_label;
-	char				label[100];
 	char			   *str;
+	char				label[100];
 	double				ntuples;
 	uint64_t			stat_ntuples = 0;
 	uint64_t			prev_ntuples = 0;
@@ -2548,14 +2539,7 @@ pgstromExplainTaskState(CustomScanState *node,
 	dcontext = set_deparse_context_plan(es->deparse_cxt,
 										node->ss.ps.plan,
 										ancestors);
-	if ((pts->xpu_task_flags & DEVKIND__NVIDIA_GPU) != 0)
-		xpu_label = "GPU";
-	else if ((pts->xpu_task_flags & DEVKIND__NVIDIA_DPU) != 0)
-		xpu_label = "DPU";
-	else
-		xpu_label = "???";
-
-	/* xPU Projection */
+	/* GPU Projection */
 	initStringInfo(&buf);
 	foreach (lc, cscan->custom_scan_tlist)
 	{
@@ -2568,9 +2552,7 @@ pgstromExplainTaskState(CustomScanState *node,
 			appendStringInfoString(&buf, ", ");
 		appendStringInfoString(&buf, str);
 	}
-	snprintf(label, sizeof(label),
-			 "%s Projection", xpu_label);
-	ExplainPropertyText(label, buf.data, es);
+	ExplainPropertyText("GPU Projection", buf.data, es);
 
 	/* Pinned Inner Buffer */
 	if ((pts->xpu_task_flags & (DEVTASK__PINNED_HASH_RESULTS |
@@ -2601,12 +2583,9 @@ pgstromExplainTaskState(CustomScanState *node,
 					appendStringInfo(&buf, ", num-partitions: %d", num_partitions);
 			}
 		}
-		snprintf(label, sizeof(label),
-				 "%s Pinned Buffer", xpu_label);
-		ExplainPropertyText(label, buf.data, es);
+		ExplainPropertyText("GPU Pinned Buffer", buf.data, es);
 	}
-
-	/* xPU Scan Quals */
+	/* GPU Scan Quals */
 	if (ps_state)
 	{
 		stat_ntuples = pg_atomic_read_u64(&ps_state->source_ntuples_in);
@@ -2642,11 +2621,9 @@ pgstromExplainTaskState(CustomScanState *node,
 			}
 			appendStringInfoString(&buf, "]");
 		}
-		snprintf(label, sizeof(label), "%s Scan Quals", xpu_label);
-		ExplainPropertyText(label, buf.data, es);
+		ExplainPropertyText("GPU Scan Quals", buf.data, es);
 	}
-
-	/* xPU JOIN */
+	/* GPU JOIN */
 	ntuples = pp_info->scan_nrows;
 	for (int i=0; i < pp_info->num_rels; i++)
 	{
@@ -2724,7 +2701,7 @@ pgstromExplainTaskState(CustomScanState *node,
 				default:         join_label = "??? Join"; break;
 			}
 			snprintf(label, sizeof(label),
-					 "%s %s Quals [%d]", xpu_label, join_label, i+1);
+					 "GPU %s Quals [%d]", join_label, i+1);
 			ExplainPropertyText(label, buf.data, es);
 		}
 		ntuples = pp_inner->join_nrows;
@@ -2742,7 +2719,7 @@ pgstromExplainTaskState(CustomScanState *node,
 				appendStringInfoString(&buf, str);
 			}
 			snprintf(label, sizeof(label),
-					 "%s Outer Hash [%d]", xpu_label, i+1);
+					 "GPU Outer Hash [%d]", i+1);
 			ExplainPropertyText(label, buf.data, es);
 		}
 		if (pp_inner->hash_inner_keys != NIL)
@@ -2758,7 +2735,7 @@ pgstromExplainTaskState(CustomScanState *node,
 				appendStringInfoString(&buf, str);
 			}
 			snprintf(label, sizeof(label),
-					 "%s Inner Hash [%d]", xpu_label, i+1);
+					 "GPU Inner Hash [%d]", i+1);
 			ExplainPropertyText(label, buf.data, es);
 		}
 		if (pp_inner->gist_clause)
@@ -2779,7 +2756,7 @@ pgstromExplainTaskState(CustomScanState *node,
 								 pg_atomic_read_u64(&ps_state->inners[i].stats_gist));
 			}
 			snprintf(label, sizeof(label),
-					 "%s GiST Join [%d]", xpu_label, i+1);
+					 "GPU GiST Join [%d]", i+1);
 			ExplainPropertyText(label, buf.data, es);
 		}
 	}
@@ -2790,7 +2767,7 @@ pgstromExplainTaskState(CustomScanState *node,
 		ExplainPropertyInteger("Inner Siblings-Id", NULL,
 							   pp_info->sibling_param_id, es);
 	/*
-	 * xPU-PreAgg
+	 * GPU-PreAgg
 	 */
 	if ((pp_info->xpu_task_flags & DEVTASK__PREAGG) != 0)
 	{
@@ -2811,11 +2788,8 @@ pgstromExplainTaskState(CustomScanState *node,
 									 dcontext, es->verbose, true);
 			appendStringInfoString(&buf, str);
 		}
-		snprintf(label, sizeof(label),
-				 "%s Group Key", xpu_label);
-		ExplainPropertyText(label, buf.data, es);
+		ExplainPropertyText("GPU Group Key", buf.data, es);
 	}
-
 	/*
 	 * CPU Fallback
 	 */
@@ -2844,7 +2818,6 @@ pgstromExplainTaskState(CustomScanState *node,
 			ExplainPropertyText("Fallback-stats", buf.data, es);
 		}
 	}
-
 	/*
 	 * Storage related info
 	 */
@@ -2859,11 +2832,6 @@ pgstromExplainTaskState(CustomScanState *node,
 	{
 		/* GPU-Cache */
 		pgstromGpuCacheExplain(pts, es, dcontext);
-	}
-	else if (pts->ds_entry)
-	{
-		/* DPU-Entry */
-		explainDpuStorageEntry(pts->ds_entry, es);
 	}
 	else
 	{

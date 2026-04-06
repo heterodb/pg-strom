@@ -247,7 +247,6 @@ typedef struct devfunc_info
 
 typedef struct XpuConnection	XpuConnection;
 typedef struct GpuCacheDesc		GpuCacheDesc;
-typedef struct DpuStorageEntry	DpuStorageEntry;
 typedef struct ArrowFdwState	ArrowFdwState;
 typedef struct BrinIndexState	BrinIndexState;
 
@@ -279,7 +278,6 @@ typedef struct
 typedef struct
 {
 	uint32_t	xpu_task_flags;		/* mask of device flags */
-	const DpuStorageEntry *ds_entry; /* target DPU if DpuJoin */
 	/* Plan information */
 	const Bitmapset *outer_refs;	/* referenced columns */
 	List	   *used_params;		/* param list in use */
@@ -481,7 +479,6 @@ struct pgstromTaskState
 	CustomScanState		css;
 	uint32_t			xpu_task_flags;	/* mask of device flags */
 	gpumask_t			optimal_gpus;	/* candidate GPUs to connect */
-	const DpuStorageEntry *ds_entry;	/* candidate DPUs to connect */
 	XpuConnection	   *conn;
 	pgstromSharedState *ps_state;		/* on the shared-memory segment */
 	pgstromPlanInfo	   *pp_info;
@@ -904,7 +901,6 @@ extern List	   *buildOuterScanPlanInfo(PlannerInfo *root,
 									   bool allow_no_device_quals);
 extern void		gpuservHandleGpuScanExec(gpuClient *gclient, XpuCommand *xcmd);
 extern void		pgstrom_init_gpu_scan(void);
-extern void		pgstrom_init_dpu_scan(void);
 
 /*
  * gpu_join.c
@@ -923,7 +919,7 @@ extern List	   *buildOuterJoinPlanInfo(PlannerInfo *root,
 									   uint32_t xpu_task_flags,
 									   bool try_parallel_path,
 									   bool consider_partition);
-extern CustomScan *PlanXpuJoinPathCommon(PlannerInfo *root,
+extern CustomScan *PlanGpuJoinPathCommon(PlannerInfo *root,
 										 RelOptInfo *joinrel,
 										 CustomPath *cpath,
 										 List *tlist,
@@ -937,7 +933,6 @@ extern bool		ExecFallbackCpuJoin(pgstromTaskState *pts,
 									uint64_t l_state,
 									bool matched);
 extern void		pgstrom_init_gpu_join(void);
-extern void		pgstrom_init_dpu_join(void);
 
 /*
  * gpu_preagg.c
@@ -960,7 +955,6 @@ extern bool		ExecFallbackCpuPreAgg(pgstromTaskState *pts,
 									  uint64_t l_state,
 									  bool matched);
 extern void		pgstrom_init_gpu_preagg(void);
-extern void		pgstrom_init_dpu_preagg(void);
 
 /*
  * gpu_sort.c
@@ -979,8 +973,6 @@ extern bool		baseRelIsArrowFdw(RelOptInfo *baserel);
 extern bool 	RelationIsArrowFdw(Relation frel);
 extern gpumask_t GetOptimalGpusForArrowFdw(PlannerInfo *root,
 										   RelOptInfo *baserel);
-extern const DpuStorageEntry *GetOptimalDpuForArrowFdw(PlannerInfo *root,
-													   RelOptInfo *baserel);
 extern bool		pgstromArrowFdwExecInit(pgstromTaskState *pts,
 										List *outer_quals,
 										const Bitmapset *outer_refs);
@@ -1050,33 +1042,6 @@ extern void		execCpuFallbackOneChunk(pgstromTaskState *pts);
 extern void		ExecFallbackCpuJoinRightOuter(pgstromTaskState *pts);
 extern void		ExecFallbackCpuJoinOuterJoinMap(pgstromTaskState *pts,
 												XpuCommand *resp);
-/*
- * dpu_device.c
- */
-extern double	pgstrom_dpu_setup_cost;
-extern double	pgstrom_dpu_operator_cost;
-extern double	pgstrom_dpu_seq_page_cost;
-extern double	pgstrom_dpu_tuple_cost;
-extern bool		pgstrom_dpu_handle_cached_pages;
-extern double	pgstrom_dpu_operator_ratio(void);
-
-extern const DpuStorageEntry *GetOptimalDpuForFile(const char *filename,
-												   const char **p_dpu_pathname);
-extern const DpuStorageEntry *GetOptimalDpuForBaseRel(PlannerInfo *root,
-													  RelOptInfo *baserel);
-extern const DpuStorageEntry *GetOptimalDpuForRelation(Relation relation,
-													   const char **p_dpu_pathname);
-extern const char *DpuStorageEntryBaseDir(const DpuStorageEntry *ds_entry);
-extern bool		DpuStorageEntryIsEqual(const DpuStorageEntry *ds_entry1,
-									   const DpuStorageEntry *ds_entry2);
-extern int		DpuStorageEntryGetEndpointId(const DpuStorageEntry *ds_entry);
-extern const DpuStorageEntry *DpuStorageEntryByEndpointId(int endpoint_id);
-extern int		DpuStorageEntryCount(void);
-extern void		DpuClientOpenSession(pgstromTaskState *pts,
-									 const XpuCommand *session);
-extern void		explainDpuStorageEntry(const DpuStorageEntry *ds_entry,
-									   ExplainState *es);
-extern bool		pgstrom_init_dpu_device(void);
 
 /*
  * misc.c
@@ -1128,11 +1093,10 @@ extern ssize_t	__preadFile(int fdesc, void *buffer, size_t nbytes, off_t f_pos);
 extern ssize_t	__writeFile(int fdesc, const void *buffer, size_t nbytes);
 extern ssize_t	__pwriteFile(int fdesc, const void *buffer, size_t nbytes, off_t f_pos);
 
-extern uint32_t	__shmemCreate(const DpuStorageEntry *ds_entry);
+extern uint32_t	__shmemCreate(void);
 extern void		__shmemDrop(uint32_t shmem_handle);
 extern void	   *__mmapShmem(uint32_t shmem_handle,
-							size_t shmem_length,
-							const DpuStorageEntry *ds_entry);
+							size_t shmem_length);
 extern bool		__munmapShmem(void *mmap_addr);
 
 extern Path	   *pgstrom_copy_pathnode(const Path *pathnode);

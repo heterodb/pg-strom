@@ -1,7 +1,7 @@
 /*
  * xpu_common.cu
  *
- * Core implementation of GPU/DPU device code
+ * Core implementation of GPU device code
  * ----
  * Copyright 2011-2026 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
  * Copyright 2014-2026 (C) PG-Strom Developers Team

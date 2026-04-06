@@ -947,13 +947,6 @@ _PG_init(void)
 		pgstrom_init_gpu_cache();
 		pgstrom_init_select_into();
 	}
-	/* init DPU related stuff */
-	if (pgstrom_init_dpu_device())
-	{
-		pgstrom_init_dpu_scan();
-		pgstrom_init_dpu_join();
-		pgstrom_init_dpu_preagg();
-	}
 	/* callback for the extension checker */
 	CacheRegisterSyscacheCallback(NAMESPACEOID, pgstrom_extension_checker_callback, 0);
 	/* dummy custom-scan node */

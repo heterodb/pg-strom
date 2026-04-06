@@ -95,7 +95,6 @@ typedef struct virtualColumnDef
 typedef struct ArrowFileState
 {
 	const char *filename;
-	const char *dpu_path;	/* relative pathname, if DPU */
 	struct stat	stat_buf;
 	ArrowMetadataVersion version; /* used to determine whether Arrow or Parquet */
 	int			parquet_cache; /* foreign-table option */
@@ -3287,36 +3286,6 @@ GetOptimalGpusForArrowFdw(PlannerInfo *root, RelOptInfo *baserel)
 }
 
 /*
- * GetOptimalDpuForArrowFdw
- */
-const DpuStorageEntry *
-GetOptimalDpuForArrowFdw(PlannerInfo *root, RelOptInfo *baserel)
-{
-	const DpuStorageEntry *ds_entry = NULL;
-	List	   *priv_list = (List *)baserel->fdw_private;
-
-	if (baseRelIsArrowFdw(baserel) &&
-		IsA(priv_list, List) && list_length(priv_list) == 2)
-	{
-		List	   *af_list = linitial(priv_list);
-		ListCell   *lc;
-
-		foreach (lc, af_list)
-		{
-			ArrowFileState *af_state = lfirst(lc);
-			const DpuStorageEntry *__ds_entry;
-
-			__ds_entry = GetOptimalDpuForFile(af_state->filename, NULL);
-			if (lc == list_head(af_list))
-				ds_entry = __ds_entry;
-			else if (ds_entry && ds_entry != __ds_entry)
-				ds_entry = NULL;
-		}
-	}
-	return ds_entry;
-}
-
-/*
  * arrowFdwExcludeFileNamesByPattern
  */
 static List *
@@ -5092,7 +5061,6 @@ __arrowFdwExecInit(ScanState *ss,
 	Bitmapset	   *referenced = NULL;
 	Bitmapset	   *stat_attrs = NULL;
 	gpumask_t		optimal_gpus = 0UL;
-	const DpuStorageEntry *ds_entry = NULL;
 	bool			whole_row_ref = false;
 	List		   *filesList;
 	List		   *sourceFields;
@@ -5159,19 +5127,6 @@ __arrowFdwExecInit(ScanState *ss,
 						optimal_gpus = __optimal_gpus;
 					}
 				}
-				else if ((pts->xpu_task_flags & DEVKIND__NVIDIA_DPU) != 0)
-				{
-					const DpuStorageEntry *ds_temp;
-
-					if (af_states_list == NIL)
-						ds_entry = GetOptimalDpuForFile(fname, &af_state->dpu_path);
-					else if (ds_entry)
-					{
-						ds_temp = GetOptimalDpuForFile(fname, &af_state->dpu_path);
-						if (!DpuStorageEntryIsEqual(ds_entry, ds_temp))
-							ds_entry = NULL;
-					}
-				}
 			}
 			af_states_list = lappend(af_states_list, af_state);
 		}
@@ -5208,25 +5163,15 @@ __arrowFdwExecInit(ScanState *ss,
 
 	if (pts)
 	{
-		if ((pts->xpu_task_flags & DEVKIND__NVIDIA_GPU) != 0)
+		Assert((pts->xpu_task_flags & DEVKIND__NVIDIA_GPU) != 0);
+		if (optimal_gpus != 0)
 		{
-			if (optimal_gpus != 0)
-			{
-				pts->xpu_task_flags |= DEVTASK__USED_GPUDIRECT;
-				pts->optimal_gpus = optimal_gpus;
-			}
-			else
-			{
-				pts->optimal_gpus = GetSystemAvailableGpus();
-			}
-		}
-		else if ((pts->xpu_task_flags & DEVKIND__NVIDIA_DPU) != 0)
-		{
-			pts->ds_entry = ds_entry;
+			pts->xpu_task_flags |= DEVTASK__USED_GPUDIRECT;
+			pts->optimal_gpus = optimal_gpus;
 		}
 		else
 		{
-			elog(ERROR, "ExecPlan is neither GPU nor DPU");
+			pts->optimal_gpus = GetSystemAvailableGpus();
 		}
 	}
 	return arrow_state;
@@ -5354,11 +5299,7 @@ pgstromScanChunkArrowFdw(pgstromTaskState *pts,
 	}
 	/* arrow/parquet filename */
 	kds_src_pathname = chunk_buffer->len;
-	if (!pts->ds_entry)
-		appendStringLargeStringInfo(chunk_buffer, af_state->filename);
-	else
-		appendStringLargeStringInfo(chunk_buffer, af_state->dpu_path);
-
+	appendStringLargeStringInfo(chunk_buffer, af_state->filename);
 	/* assign offset of XpuCommand */
 	xcmd = (XpuCommand *)chunk_buffer->data;
 	xcmd->length = chunk_buffer->len;

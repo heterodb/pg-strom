@@ -1,7 +1,7 @@
 /*
  * xpu_common.h
  *
- * Common header portion for both of GPU and DPU device code
+ * Common header portion for GPU device code
  * --
  * Copyright 2011-2026 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
  * Copyright 2014-2026 (C) PG-Strom Developers Team
@@ -2148,8 +2148,8 @@ typedef struct
  * ---------------------------------------------------------------- */
 #define DEVKIND__NONE				0x00000000U	/* no accelerator device */
 #define DEVKIND__NVIDIA_GPU			0x00000001U	/* for CUDA-based GPU */
-#define DEVKIND__NVIDIA_DPU			0x00000002U	/* for BlueField-X DPU */
-#define DEVKIND__ANY				0x00000003U	/* Both of GPU and DPU */
+#define DEVKIND__ANY				0x00000001U	/* Any kind of supported devices
+												 * [*] right now, only NVIDIA GPU) */
 #define DEVFUNC__LOCALE_AWARE		0x00000100U	/* Device function is locale aware,
 												 * thus, available only if "C" or
 												 * no locale configuration */
@@ -2176,11 +2176,6 @@ typedef struct
 #define TASK_KIND__GPUSCAN		(DEVTASK__SCAN   | DEVKIND__NVIDIA_GPU)
 #define TASK_KIND__GPUJOIN		(DEVTASK__JOIN   | DEVKIND__NVIDIA_GPU)
 #define TASK_KIND__GPUPREAGG	(DEVTASK__PREAGG | DEVKIND__NVIDIA_GPU)
-
-#define TASK_KIND__DPUSCAN		(DEVTASK__SCAN   | DEVKIND__NVIDIA_DPU)
-#define TASK_KIND__DPUJOIN		(DEVTASK__JOIN   | DEVKIND__NVIDIA_DPU)
-#define TASK_KIND__DPUPREAGG	(DEVTASK__PREAGG | DEVKIND__NVIDIA_DPU)
-
 #define TASK_KIND__MASK			(DEVTASK__MASK   | DEVKIND__ANY)
 
 /* ----------------------------------------------------------------

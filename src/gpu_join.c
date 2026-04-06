@@ -25,14 +25,6 @@ static bool					pgstrom_enable_gpugistindex = false;/* GUC */
 static bool					pgstrom_enable_partitionwise_gpujoin = false;
 static int					__pinned_inner_buffer_threshold_mb = 0; /* GUC */
 static int					__pinned_inner_buffer_partition_size_mb = 0; /* GUC */
-static CustomPathMethods	dpujoin_path_methods;
-static CustomScanMethods	dpujoin_plan_methods;
-static CustomExecMethods	dpujoin_exec_methods;
-static bool					pgstrom_enable_dpujoin = false;		/* GUC */
-static bool					pgstrom_enable_dpuhashjoin = false;	/* GUC */
-static bool					pgstrom_enable_dpugistindex = false;/* GUC */
-static bool					pgstrom_enable_partitionwise_dpujoin = false;
-
 static bool					pgstrom_debug_xpujoinpath = false;
 
 /*
@@ -175,9 +167,7 @@ try_fetch_xpujoin_planinfo(const Path *path)
 {
 	const CustomPath *cpath = (const CustomPath *)path;
 
-	if (IsA(cpath, CustomPath) &&
-		(cpath->methods == &gpujoin_path_methods ||
-		 cpath->methods == &dpujoin_path_methods))
+	if (IsA(cpath, CustomPath) && cpath->methods == &gpujoin_path_methods)
 		return (pgstromPlanInfo *)linitial(cpath->custom_private);
 	return NULL;
 }
@@ -383,11 +373,8 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 	Cost			final_cost;
 	Cost			comp_cost = 0.0;
 	Cost			inner_final_cost = 0.0;
-	bool			enable_xpuhashjoin;
-	bool			enable_xpugistindex;
-	double			xpu_tuple_cost;
-	Cost			xpu_operator_cost;
-	Cost			xpu_ratio;
+	Cost			gpu_ratio = pgstrom_gpu_operator_ratio();
+	Cost			gpu_operator_cost = gpu_ratio * cpu_operator_cost;
 	QualCost		join_quals_cost;
 	List		   *join_quals = NIL;
 	List		   *other_quals = NIL;
@@ -400,31 +387,6 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 	/* cross join is not welcome */
 	if (!restrict_clauses)
 		return NULL;
-
-	/*
-	 * device specific parameters
-	 */
-	if ((pp_prev->xpu_task_flags & DEVKIND__ANY) == DEVKIND__NVIDIA_GPU)
-	{
-		enable_xpuhashjoin  = pgstrom_enable_gpuhashjoin;
-		enable_xpugistindex = pgstrom_enable_gpugistindex;
-		xpu_tuple_cost      = pgstrom_gpu_tuple_cost;
-		xpu_operator_cost   = cpu_operator_cost * pgstrom_gpu_operator_ratio();
-		xpu_ratio           = pgstrom_gpu_operator_ratio();
-	}
-	else if ((pp_prev->xpu_task_flags & DEVKIND__ANY) == DEVKIND__NVIDIA_DPU)
-	{
-		enable_xpuhashjoin  = pgstrom_enable_dpuhashjoin;
-		enable_xpugistindex = pgstrom_enable_dpugistindex;
-		xpu_tuple_cost      = pgstrom_dpu_tuple_cost;
-		xpu_operator_cost   = cpu_operator_cost * pgstrom_dpu_operator_ratio();
-		xpu_ratio           = pgstrom_dpu_operator_ratio();
-	}
-	else
-	{
-		elog(ERROR, "Bug? unexpected xpu_task_flags: %08x",
-			 pp_prev->xpu_task_flags);
-	}
 
 	/* setup inner_target_list */
 	foreach (lc, inner_paths_list)
@@ -484,7 +446,7 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 			join_quals = lappend(join_quals, rinfo->clause);
 		}
 		/* Is the hash-join enabled? */
-		if (!enable_xpuhashjoin)
+		if (!pgstrom_enable_gpuhashjoin)
 			continue;
 		/* Is it hash-joinable clause? */
 		if (!rinfo->can_join || !OidIsValid(rinfo->hashjoinoperator))
@@ -553,7 +515,7 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 	pp_inner->join_quals = join_quals;
 	pp_inner->other_quals = other_quals;
 	/* GiST-Index availability checks */
-	if (enable_xpugistindex &&
+	if (pgstrom_enable_gpugistindex &&
 		hash_outer_keys == NIL &&
 		hash_inner_keys == NIL)
 	{
@@ -627,12 +589,12 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 
 		/* cost to compute inner hash value by CPU */
 		startup_cost += (pp_inner->inner_pinned_buffer
-						 ? xpu_operator_cost
+						 ? gpu_operator_cost
 						 : cpu_operator_cost) * num_hashkeys * inner_path->rows;
 		/* cost to comput hash value by GPU */
-		comp_cost += xpu_operator_cost * num_hashkeys * outer_nrows;
+		comp_cost += gpu_operator_cost * num_hashkeys * outer_nrows;
 		/* cost to evaluate join qualifiers */
-		comp_cost += join_quals_cost.per_tuple * xpu_ratio * outer_nrows;
+		comp_cost += join_quals_cost.per_tuple * gpu_ratio * outer_nrows;
 	}
 	else if (OidIsValid(pp_inner->gist_index_oid))
 	{
@@ -649,9 +611,9 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 		startup_cost += seq_page_cost * pp_inner->gist_npages;
 		/* cost to evaluate GiST index by GPU */
 		cost_qual_eval_node(&gist_clause_cost, (Node *)gist_clause, root);
-		comp_cost += gist_clause_cost.per_tuple * xpu_ratio * outer_nrows;
+		comp_cost += gist_clause_cost.per_tuple * gpu_ratio * outer_nrows;
 		/* cost to evaluate join qualifiers by GPU */
-		comp_cost += (join_quals_cost.per_tuple * xpu_ratio *
+		comp_cost += (join_quals_cost.per_tuple * gpu_ratio *
 					  outer_nrows *
 					  gist_selectivity *
 					  inner_path->rows);
@@ -669,14 +631,14 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 			startup_cost += cpu_tuple_cost * inner_path->rows;
 
 		/* cost to evaluate join qualifiers by GPU */
-		comp_cost += (join_quals_cost.per_tuple * xpu_ratio *
+		comp_cost += (join_quals_cost.per_tuple * gpu_ratio *
 					  inner_path->rows *
 					  outer_nrows);
 	}
 	/* discount if CPU parallel is enabled */
 	run_cost += (comp_cost / pp_info->parallel_divisor);
-	/* cost for DMA receive (xPU --> Host) */
-	run_cost += (xpu_tuple_cost * joinrel->rows) / pp_info->parallel_divisor;
+	/* cost for DMA receive (GPU --> Host) */
+	run_cost += (pgstrom_gpu_tuple_cost * joinrel->rows) / pp_info->parallel_divisor;
 	/* cost for host projection */
 	final_cost += (joinrel->reltarget->cost.per_tuple *
 				   joinrel->rows / pp_info->parallel_divisor);
@@ -1547,41 +1509,23 @@ XpuJoinAddCustomPath(PlannerInfo *root,
 							   join_type,
 							   extra);
 	/* quick bailout if PG-Strom is not enabled */
-	if (pgstrom_enabled())
+	if (pgstrom_enabled() &&
+		gpuserv_ready_accept() &&
+		pgstrom_enable_gpujoin)
 	{
-		if (pgstrom_enable_gpujoin && gpuserv_ready_accept())
+		__xpuJoinAddCustomPathCommon(root,
+									 joinrel,
+									 outerrel,
+									 innerrel,
+									 join_type,
+									 extra,
+									 TASK_KIND__GPUJOIN,
+									 &gpujoin_path_methods,
+									 pgstrom_enable_partitionwise_gpujoin);
+		if (joinrel->reloptkind == RELOPT_OTHER_JOINREL)
 		{
-			__xpuJoinAddCustomPathCommon(root,
-										 joinrel,
-										 outerrel,
-										 innerrel,
-										 join_type,
-										 extra,
-										 TASK_KIND__GPUJOIN,
-										 &gpujoin_path_methods,
-										 pgstrom_enable_partitionwise_gpujoin);
-			if (joinrel->reloptkind == RELOPT_OTHER_JOINREL)
-			{
-				__xpuJoinTryAddPartitionLeafs(root, joinrel, TASK_KIND__GPUJOIN, false);
-				__xpuJoinTryAddPartitionLeafs(root, joinrel, TASK_KIND__GPUJOIN, true);
-			}
-		}
-		if (pgstrom_enable_dpujoin)
-		{
-			__xpuJoinAddCustomPathCommon(root,
-										 joinrel,
-										 outerrel,
-										 innerrel,
-										 join_type,
-										 extra,
-										 TASK_KIND__DPUJOIN,
-										 &dpujoin_path_methods,
-										 pgstrom_enable_partitionwise_dpujoin);
-			if (joinrel->reloptkind == RELOPT_OTHER_JOINREL)
-			{
-				__xpuJoinTryAddPartitionLeafs(root, joinrel, TASK_KIND__DPUJOIN, false);
-				__xpuJoinTryAddPartitionLeafs(root, joinrel, TASK_KIND__DPUJOIN, true);
-			}
+			__xpuJoinTryAddPartitionLeafs(root, joinrel, TASK_KIND__GPUJOIN, false);
+			__xpuJoinTryAddPartitionLeafs(root, joinrel, TASK_KIND__GPUJOIN, true);
 		}
 	}
 }
@@ -1864,18 +1808,18 @@ build_explain_tlist_junks(codegen_context *context,
 }
 
 /*
- * PlanXpuJoinPathCommon
+ * PlanGpuJoinPath
  */
 CustomScan *
-PlanXpuJoinPathCommon(PlannerInfo *root,
+PlanGpuJoinPathCommon(PlannerInfo *root,
 					  RelOptInfo *joinrel,
 					  CustomPath *cpath,
 					  List *tlist,
 					  List *custom_plans,
 					  pgstromPlanInfo *pp_info,
-					  const CustomScanMethods *xpujoin_plan_methods)
+					  const CustomScanMethods *__gpujoin_plan_methods)
 {
-	codegen_context *context;
+	codegen_context *context = create_codegen_context(root, cpath, pp_info);
 	CustomScan *cscan;
 	Bitmapset  *outer_refs = NULL;
 	List	   *join_quals_stacked = NIL;
@@ -1884,8 +1828,6 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 	List	   *gist_quals_stacked = NIL;
 
 	Assert(pp_info->num_rels == list_length(custom_plans));
-	context = create_codegen_context(root, cpath, pp_info);
-
 	/* codegen for outer scan, if any */
 	if (pp_info->scan_quals)
 	{
@@ -1996,16 +1938,13 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 	cscan->scan.plan.targetlist = tlist;
 	cscan->scan.scanrelid = pp_info->scan_relid;
 	cscan->flags = cpath->flags;
-	cscan->methods = xpujoin_plan_methods;
+	cscan->methods = __gpujoin_plan_methods;
 	cscan->custom_plans = custom_plans;
-	cscan->custom_scan_tlist = assign_custom_cscan_tlist(context->tlist_dev,
-														 pp_info);
+	cscan->custom_scan_tlist = assign_custom_cscan_tlist(context->tlist_dev, pp_info);
+
 	return cscan;
 }
 
-/*
- * PlanGpuJoinPath
- */
 static Plan *
 PlanGpuJoinPath(PlannerInfo *root,
 				RelOptInfo *joinrel,
@@ -2014,41 +1953,16 @@ PlanGpuJoinPath(PlannerInfo *root,
 				List *clauses,
 				List *custom_plans)
 {
-	pgstromPlanInfo	*pp_info = linitial(cpath->custom_private);
+	pgstromPlanInfo *pp_info = linitial(cpath->custom_private);
 	CustomScan	   *cscan;
 
-	cscan = PlanXpuJoinPathCommon(root,
+	cscan = PlanGpuJoinPathCommon(root,
 								  joinrel,
 								  cpath,
 								  tlist,
 								  custom_plans,
 								  pp_info,
 								  &gpujoin_plan_methods);
-	form_pgstrom_plan_info(cscan, pp_info);
-	return &cscan->scan.plan;
-}
-
-/*
- * PlanDpuJoinPath
- */
-static Plan *
-PlanDpuJoinPath(PlannerInfo *root,
-				RelOptInfo *joinrel,
-				CustomPath *cpath,
-				List *tlist,
-				List *clauses,
-				List *custom_plans)
-{
-	pgstromPlanInfo *pp_info = linitial(cpath->custom_private);
-	CustomScan *cscan;
-
-	cscan = PlanXpuJoinPathCommon(root,
-								  joinrel,
-								  cpath,
-								  tlist,
-								  custom_plans,
-								  pp_info,
-								  &dpujoin_plan_methods);
 	form_pgstrom_plan_info(cscan, pp_info);
 	return &cscan->scan.plan;
 }
@@ -2068,16 +1982,6 @@ CreateGpuJoinState(CustomScan *cscan)
 {
 	Assert(cscan->methods == &gpujoin_plan_methods);
 	return pgstromCreateTaskState(cscan, &gpujoin_exec_methods);
-}
-
-/*
- * CreateDpuJoinState
- */
-static Node *
-CreateDpuJoinState(CustomScan *cscan)
-{
-	Assert(cscan->methods == &dpujoin_plan_methods);
-	return pgstromCreateTaskState(cscan, &dpujoin_exec_methods);
 }
 
 /* ---------------------------------------------------------------- *
@@ -2595,8 +2499,7 @@ again:
 	if (!h_kmrels)
 	{
 		Assert(ps_state->preload_shmem_handle != 0);
-		h_kmrels = __mmapShmem(ps_state->preload_shmem_handle,
-							   offset, pts->ds_entry);
+		h_kmrels = __mmapShmem(ps_state->preload_shmem_handle, offset);
 		memset(h_kmrels, 0, offsetof(kern_multirels,
 									 chunks[pts->num_rels]));
 		h_kmrels->length = offset;
@@ -2803,8 +2706,7 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 			if (!pts->h_kmrels)
 			{
 				pts->h_kmrels = __mmapShmem(ps_state->preload_shmem_handle,
-											ps_state->preload_shmem_length,
-											pts->ds_entry);
+											ps_state->preload_shmem_length);
 			}
 
 			for (int depth=1; depth <= leader->num_rels; depth++)
@@ -2891,8 +2793,7 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 			if (!pts->h_kmrels)
 			{
 				pts->h_kmrels = __mmapShmem(ps_state->preload_shmem_handle,
-											ps_state->preload_shmem_length,
-											pts->ds_entry);
+											ps_state->preload_shmem_length);
 			}
 			break;
 
@@ -2950,33 +2851,6 @@ GpuJoinInnerPreloadAfterWorks(pgstromTaskState *pts)
 }
 
 /*
- * __pgstrom_init_xpujoin_common
- */
-static void
-__pgstrom_init_xpujoin_common(void)
-{
-	static bool	__initialized = false;
-
-	if (!__initialized)
-	{
-		/* pg_strom.debug_xpujoinpath */
-		DefineCustomBoolVariable("pg_strom.debug_xpujoinpath",
-								 "Turn on/off debug output for XpuJoin paths",
-								 NULL,
-								 &pgstrom_debug_xpujoinpath,
-								 false,
-								 PGC_USERSET,
-								 GUC_NOT_IN_SAMPLE,
-								 NULL, NULL, NULL);
-		/* hook registration */
-		set_join_pathlist_next = set_join_pathlist_hook;
-		set_join_pathlist_hook = XpuJoinAddCustomPath;
-
-		__initialized = true;
-	}
-}
-
-/*
  * pgstrom_init_gpu_join
  */
 void
@@ -3017,6 +2891,15 @@ pgstrom_init_gpu_join(void)
 							 NULL,
 							 &pgstrom_enable_partitionwise_gpujoin,
 							 true,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+	/* pg_strom.debug_xpujoinpath */
+	DefineCustomBoolVariable("pg_strom.debug_xpujoinpath",
+							 "Turn on/off debug output for XpuJoin paths",
+							 NULL,
+							 &pgstrom_debug_xpujoinpath,
+							 false,
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
@@ -3077,76 +2960,7 @@ pgstrom_init_gpu_join(void)
 	gpujoin_exec_methods.InitializeWorkerCustomScan = pgstromSharedStateAttachDSM;
 	gpujoin_exec_methods.ShutdownCustomScan		= pgstromSharedStateShutdownDSM;
 	gpujoin_exec_methods.ExplainCustomScan		= pgstromExplainTaskState;
-	/* common portion */
-	__pgstrom_init_xpujoin_common();
-}
-
-
-/*
- * pgstrom_init_dpu_join
- */
-void
-pgstrom_init_dpu_join(void)
-{
-	/* turn on/off dpujoin */
-	DefineCustomBoolVariable("pg_strom.enable_dpujoin",
-							 "Enables the use of DpuJoin logic",
-							 NULL,
-							 &pgstrom_enable_dpujoin,
-							 true,
-							 PGC_USERSET,
-							 GUC_NOT_IN_SAMPLE,
-							 NULL, NULL, NULL);
-	/* turn on/off dpuhashjoin */
-	DefineCustomBoolVariable("pg_strom.enable_dpuhashjoin",
-							 "Enables the use of DpuHashJoin logic",
-							 NULL,
-							 &pgstrom_enable_dpuhashjoin,
-							 true,
-							 PGC_USERSET,
-							 GUC_NOT_IN_SAMPLE,
-							 NULL, NULL, NULL);
-	/* turn on/off dpugistindex */
-	DefineCustomBoolVariable("pg_strom.enable_dpugistindex",
-							 "Enables the use of DpuGistIndex logic",
-							 NULL,
-							 &pgstrom_enable_dpugistindex,
-							 true,
-							 PGC_USERSET,
-							 GUC_NOT_IN_SAMPLE,
-							 NULL, NULL, NULL);
-	/* turn on/off partition-wise dpujoin */
-	DefineCustomBoolVariable("pg_strom.enable_partitionwise_dpujoin",
-							 "Enables the use of partition-wise DpuJoin",
-							 NULL,
-							 &pgstrom_enable_partitionwise_dpujoin,
-							 true,
-							 PGC_USERSET,
-							 GUC_NOT_IN_SAMPLE,
-							 NULL, NULL, NULL);
-	/* setup path methods */
-	memset(&dpujoin_path_methods, 0, sizeof(CustomPathMethods));
-	dpujoin_path_methods.CustomName             = "DpuJoin";
-	dpujoin_path_methods.PlanCustomPath         = PlanDpuJoinPath;
-
-	/* setup plan methods */
-	memset(&dpujoin_plan_methods, 0, sizeof(CustomScanMethods));
-	dpujoin_plan_methods.CustomName             = "DpuJoin";
-	dpujoin_plan_methods.CreateCustomScanState  = CreateDpuJoinState;
-	RegisterCustomScanMethods(&dpujoin_plan_methods);
-
-	/* setup exec methods */
-	memset(&dpujoin_exec_methods, 0, sizeof(CustomExecMethods));
-	dpujoin_exec_methods.CustomName             = "DpuJoin";
-	dpujoin_exec_methods.BeginCustomScan        = pgstromExecInitTaskState;
-	dpujoin_exec_methods.ExecCustomScan         = pgstromExecTaskState;
-	dpujoin_exec_methods.EndCustomScan          = pgstromExecEndTaskState;
-	dpujoin_exec_methods.ReScanCustomScan       = pgstromExecResetTaskState;
-	dpujoin_exec_methods.EstimateDSMCustomScan  = pgstromSharedStateEstimateDSM;
-	dpujoin_exec_methods.InitializeDSMCustomScan = pgstromSharedStateInitDSM;
-	dpujoin_exec_methods.InitializeWorkerCustomScan = pgstromSharedStateAttachDSM;
-	dpujoin_exec_methods.ShutdownCustomScan     = pgstromSharedStateShutdownDSM;
-	dpujoin_exec_methods.ExplainCustomScan      = pgstromExplainTaskState;
-	/* common portion */
-	__pgstrom_init_xpujoin_common();
+	/* hook registration */
+	set_join_pathlist_next = set_join_pathlist_hook;
+	set_join_pathlist_hook = XpuJoinAddCustomPath;
 }

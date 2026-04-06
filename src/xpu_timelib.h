@@ -1,7 +1,7 @@
 /*
  * xpu_timelib.h
  *
- * Date and time related definitions for both of GPU and DPU
+ * Date and time related definitions for GPU devices
  * --
  * Copyright 2011-2026 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
  * Copyright 2014-2026 (C) PG-Strom Developers Team

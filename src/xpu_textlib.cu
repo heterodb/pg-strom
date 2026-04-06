@@ -1,7 +1,7 @@
 /*
  * xpu_textlib.cu
  *
- * Collection of text functions and operators for both of GPU and DPU
+ * Collection of text functions and operators for GPU devices
  * ----
  * Copyright 2011-2026 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
  * Copyright 2014-2026 (C) PG-Strom Developers Team

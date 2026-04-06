@@ -7,7 +7,7 @@ include ../Makefile.common
 # Source of PG-Strom host code
 #
 STROM_OBJS = main.o githash.o extra.o codegen.o executor.o fallback.o \
-             gpu_device.o gpu_service.o dpu_device.o \
+             gpu_device.o gpu_service.o \
              gpu_scan.o gpu_join.o gpu_preagg.o \
              relscan.o brin.o gist.o gpu_cache.o select_into.o \
              arrow_fdw.o arrow_meta.o parquet_read.o parquet_cache.o \

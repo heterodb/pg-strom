@@ -592,36 +592,3 @@ ExecFallbackCpuJoinRightOuter(pgstromTaskState *pts)
 			__execFallbackCpuJoinRightOuterOneDepth(pts, depth);
 	}
 }
-
-/*
- * ExecFallbackCpuJoinOuterJoinMap
- *
- * NOTE: GPU-Service updates the outer-join-map of the host-buffer by itself,
- *       so this routine makes sense only if DPU-mode.
- */
-void
-ExecFallbackCpuJoinOuterJoinMap(pgstromTaskState *pts, XpuCommand *resp)
-{
-	kern_multirels *h_kmrels = pts->h_kmrels;
-	bool	   *ojmap_resp = (bool *)((char *)resp + resp->u.results.ojmap_offset);
-
-	if (resp->u.results.ojmap_offset == 0)
-		return;
-
-	Assert(resp->u.results.ojmap_offset +
-		   resp->u.results.ojmap_length <= resp->length);
-	for (int depth=1; depth <= pts->num_rels; depth++)
-	{
-		kern_data_store *kds_in = KERN_MULTIRELS_INNER_KDS(h_kmrels, depth);
-		bool   *ojmap_curr = KERN_MULTIRELS_OUTER_JOIN_MAP(h_kmrels, depth);
-
-		if (!ojmap_curr)
-			continue;
-
-		for (uint32_t i=0; i < kds_in->nitems; i++)
-		{
-			ojmap_curr[i] |= ojmap_resp[i];
-		}
-		ojmap_resp += MAXALIGN(sizeof(bool) * kds_in->nitems);
-	}
-}

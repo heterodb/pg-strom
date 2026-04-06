@@ -108,11 +108,8 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 	List	   *kvars_deflist_privs = NIL;
 	List	   *kvars_deflist_exprs = NIL;
 	ListCell   *lc;
-	int			endpoint_id;
 
 	privs = lappend(privs, makeInteger(pp_info->xpu_task_flags));
-	endpoint_id = DpuStorageEntryGetEndpointId(pp_info->ds_entry);
-	privs = lappend(privs, makeInteger(endpoint_id));
 	/* plan information */
 	privs = lappend(privs, bms_to_pglist(pp_info->outer_refs));
 	exprs = lappend(exprs, pp_info->used_params);
@@ -226,13 +223,10 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	List	   *kvars_deflist_privs;
 	List	   *kvars_deflist_exprs;
 	ListCell   *lc1, *lc2;
-	int			endpoint_id;
 
 	memset(&pp_data, 0, sizeof(pgstromPlanInfo));
 	/* device identifiers */
 	pp_data.xpu_task_flags = intVal(list_nth(privs, pindex++));
-	endpoint_id = intVal(list_nth(privs, pindex++));
-	pp_data.ds_entry = DpuStorageEntryByEndpointId(endpoint_id);
 	/* plan information */
 	pp_data.outer_refs   = bms_from_pglist(list_nth(privs, pindex++));
 	pp_data.used_params  = list_nth(exprs, eindex++);
@@ -2356,7 +2350,7 @@ cleanup_mmap_chunks(ResourceReleasePhase phase,
 }
 
 uint32_t
-__shmemCreate(const DpuStorageEntry *ds_entry)
+__shmemCreate(void)
 {
 	static uint	my_random_seed = 0;
 	const char *shmem_dir = "/dev/shm";
@@ -2380,9 +2374,6 @@ __shmemCreate(const DpuStorageEntry *ds_entry)
 										 HASH_ELEM | HASH_BLOBS);
 		RegisterResourceReleaseCallback(cleanup_shmem_chunks, 0);
 	}
-
-	if (ds_entry)
-		shmem_dir = DpuStorageEntryBaseDir(ds_entry);
 	off = snprintf(namebuf, sizeof(namebuf), "%s/", shmem_dir);
 	do {
 		handle = rand_r(&my_random_seed);
@@ -2456,8 +2447,7 @@ __shmemDrop(uint32_t shmem_handle)
 
 void *
 __mmapShmem(uint32_t shmem_handle,
-			size_t   shmem_length,
-			const DpuStorageEntry *ds_entry)
+			size_t   shmem_length)
 {
 	void	   *mmap_addr = MAP_FAILED;
 	size_t		mmap_size = TYPEALIGN(PAGE_SIZE, shmem_length);
@@ -2472,8 +2462,6 @@ __mmapShmem(uint32_t shmem_handle,
 	bool		found;
 	char		namebuf[MAXPGPATH];
 
-	if (ds_entry)
-		shmem_dir = DpuStorageEntryBaseDir(ds_entry);
 	if (!mmap_tracker_htab)
 	{
 		HASHCTL		hctl;

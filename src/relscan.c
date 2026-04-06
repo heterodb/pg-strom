@@ -388,57 +388,6 @@ estimate_kern_data_store(TupleDesc tupdesc)
 	((kern_data_store *)((buf)->data + __XCMD_KDS_SRC_OFFSET(buf)))
 
 static void
-__relScanDirectFallbackBlock(pgstromTaskState *pts,
-							 kern_data_store *kds,
-							 BlockNumber block_num)
-{
-	pgstromSharedState *ps_state = pts->ps_state;
-	Relation	relation = pts->css.ss.ss_currentRelation;
-	HeapScanDesc h_scan = (HeapScanDesc)pts->css.ss.ss_currentScanDesc;
-	Snapshot	snapshot = pts->css.ss.ps.state->es_snapshot;
-	Buffer		buffer;
-	Page		page;
-	int			lines;
-	OffsetNumber lineoff;
-	ItemId		lpp;
-
-	buffer = ReadBufferExtended(relation,
-								MAIN_FORKNUM,
-								block_num,
-								RBM_NORMAL,
-								h_scan->rs_strategy);
-	/* just like heapgetpage() */
-	heap_page_prune_opt(relation, buffer);
-	/* pick up valid tuples from the target page */
-	LockBuffer(buffer, BUFFER_LOCK_SHARE);
-	page = BufferGetPage(buffer);
-	lines = PageGetMaxOffsetNumber(page);
-	for (lineoff = FirstOffsetNumber, lpp = PageGetItemId(page, lineoff);
-		 lineoff <= lines;
-		 lineoff++, lpp++)
-	{
-		HeapTupleData htup;
-		bool		valid;
-
-		if (!ItemIdIsNormal(lpp))
-			continue;
-
-		htup.t_tableOid = RelationGetRelid(relation);
-		htup.t_data = (HeapTupleHeader) PageGetItem((Page)page, lpp);
-		htup.t_len = ItemIdGetLength(lpp);
-		ItemPointerSet(&htup.t_self, block_num, lineoff);
-
-		valid = HeapTupleSatisfiesVisibility(&htup, snapshot, buffer);
-		HeapCheckForSerializableConflictOut(valid, relation, &htup,
-											buffer, snapshot);
-		if (valid)
-			execCpuFallbackBaseTuple(pts, &htup);
-	}
-	UnlockReleaseBuffer(buffer);
-	pg_atomic_fetch_add_u64(&ps_state->npages_buffer_read, PAGES_PER_BLOCK);
-}
-
-static void
 __relScanDirectCachedBlock(pgstromTaskState *pts, BlockNumber block_num)
 {
 	Relation	relation = pts->css.ss.ss_currentRelation;
@@ -607,36 +556,6 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 				= (pts->curr_block_num +
 				   ps_state->scan_block_start) % ps_state->scan_block_nums;
 			/*
-			 * MEMO: Usually, CPU is (much) more powerful than DPUs.
-			 * In case when the source cache is already on the shared-
-			 * buffer, it makes no sense to handle this page on the
-			 * DPU device.
-			 */
-			if (pts->ds_entry && !pgstrom_dpu_handle_cached_pages)
-			{
-				BufferTag	bufTag;
-				uint32		bufHash;
-				LWLock	   *bufLock;
-				int			buf_id;
-
-				smgr_init_buffer_tag(&bufTag, smgr, MAIN_FORKNUM, block_num);
-				bufHash = BufTableHashCode(&bufTag);
-				bufLock = BufMappingPartitionLock(bufHash);
-
-				/* check whether the block exists on the shared buffer? */
-				LWLockAcquire(bufLock, LW_SHARED);
-				buf_id = BufTableLookup(&bufTag, bufHash);
-				if (buf_id >= 0)
-				{
-					LWLockRelease(bufLock);
-					__relScanDirectFallbackBlock(pts, kds, block_num);
-					pts->curr_block_num++;
-					continue;
-				}
-				LWLockRelease(bufLock);
-			}
-
-			/*
 			 * MEMO: right now, we allow GPU Direct SQL for the all-visible
 			 * pages only, due to the restrictions about MVCC checks.
 			 * However, it is too strict for the purpose. If we would have
@@ -679,15 +598,6 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 				kds->nitems++;
 				strom_blknums[strom_nblocks++] = block_num;
 				m_offset += BLCKSZ;
-			}
-			else if (pts->ds_entry)
-			{
-				/*
-				 * For DPU devices, it makes no sense to move the data blocks
-				 * to the (relatively) poor performance devices instead of CPUs.
-				 * So, we run CPU fallback for the tuples in dirty pages.
-				 */
-				__relScanDirectFallbackBlock(pts, kds, block_num);
 			}
 			else
 			{
