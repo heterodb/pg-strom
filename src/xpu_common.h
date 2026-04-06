@@ -2826,7 +2826,6 @@ typedef struct
 	uint32_t	magic;
 	uint32_t	tag;
 	uint64_t	length;
-	int32_t		repeat_id;
 	void	   *priv;
 	dlist_node	chain;
 	union {

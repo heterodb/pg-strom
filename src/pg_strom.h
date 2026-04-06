@@ -274,7 +274,6 @@ typedef struct
 	int				gist_height;	/* index tree height, or -1 if unknown */
 	/* inner pinned buffer? */
 	bool			inner_pinned_buffer;
-	int				inner_partitions_divisor;
 } pgstromPlanInnerInfo;
 
 typedef struct
@@ -390,8 +389,6 @@ typedef struct
 	pg_atomic_uint64	scan_block_count;	/* scan counter */
 	uint32_t			scan_block_nums;	/* = HeapScanDesc::rs_numblocks */
 	uint32_t			scan_block_start;	/* = HeapScanDesc::rs_startblock */
-	pg_atomic_uint64	scan_repeat_sync_control; /* sync variable when repeat_id is
-												   * incremented to the next loop. */
 	/* control variables to detect the last plan-node at parallel execution */
 	pg_atomic_uint32	parallel_task_control;
 	/* statistics */
@@ -502,7 +499,6 @@ struct pgstromTaskState
 	int64_t				curr_index;
 	bool				scan_done;
 	bool				final_done;
-	uint32_t			num_scan_repeats;
 	/* base relation scan, if any */
 	TupleTableSlot	   *base_slot;
 	ExprState		   *base_quals;	/* equivalent to device quals */
@@ -523,7 +519,6 @@ struct pgstromTaskState
 	Buffer				curr_vm_buffer;		/* for visibility-map */
 	uint64_t			curr_block_num;		/* for KDS_FORMAT_BLOCK */
 	uint64_t			curr_block_tail;	/* for KDS_FORMAT_BLOCK */
-	int32_t				last_repeat_id;		/* for debug */
 	StringInfoData		xcmd_buf;
 	/* callbacks */
 	TupleTableSlot	 *(*cb_next_tuple)(struct pgstromTaskState *pts);
@@ -652,7 +647,7 @@ extern void		pgstromBrinIndexExecBegin(pgstromTaskState *pts,
 										  Oid index_oid,
 										  List *index_conds,
 										  List *index_quals);
-extern int		pgstromBrinIndexNextChunk(pgstromTaskState *pts);
+extern bool		pgstromBrinIndexNextChunk(pgstromTaskState *pts);
 extern void		pgstromBrinIndexExecEnd(pgstromTaskState *pts);
 extern void		pgstromBrinIndexExecReset(pgstromTaskState *pts);
 extern Size		pgstromBrinIndexEstimateDSM(pgstromTaskState *pts);

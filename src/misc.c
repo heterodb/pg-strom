@@ -203,7 +203,6 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 		__privs = lappend(__privs, __makeFloat(pp_inner->gist_npages));
 		__privs = lappend(__privs, makeInteger(pp_inner->gist_height));
 		__privs = lappend(__privs, makeBoolean(pp_inner->inner_pinned_buffer));
-		__privs = lappend(__privs, makeInteger(pp_inner->inner_partitions_divisor));
 
 		exprs = lappend(exprs, __exprs);
 		privs = lappend(privs, __privs);
@@ -327,7 +326,6 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 		pp_inner->gist_npages     = floatVal(list_nth(__privs, __pindex++));
 		pp_inner->gist_height     = intVal(list_nth(__privs, __pindex++));
 		pp_inner->inner_pinned_buffer = boolVal(list_nth(__privs, __pindex++));
-		pp_inner->inner_partitions_divisor = intVal(list_nth(__privs, __pindex++));
 	}
 	return pp_info;
 }

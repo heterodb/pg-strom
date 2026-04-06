@@ -204,7 +204,6 @@ tryPinnedInnerJoinBufferPath(pgstromPlanInfo *pp_info,
 	size_t		inner_threshold_sz;
 	int			nattrs;
 	int			unitsz = 0;
-	int			projection_hash_divisor = 0;
 	double		bufsz;
 
 	/*
@@ -269,7 +268,6 @@ tryPinnedInnerJoinBufferPath(pgstromPlanInfo *pp_info,
 
 		/* turn on inner_pinned_buffer */
 		pp_inner->inner_pinned_buffer = true;
-		pp_inner->inner_partitions_divisor = projection_hash_divisor;
 
 		*p_inner_final_cost = pp_temp->final_cost;
 		return (Path *)cpath;
@@ -2333,6 +2331,9 @@ innerPreloadSetupPinnedInnerBufferPartitions(kern_multirels *h_kmrels,
 		int		divisor = (largest_sz + partition_sz - 1) / partition_sz;
 		size_t	kbuf_parts_sz = MAXALIGN(offsetof(kern_buffer_partitions,
 												  parts[divisor]));
+		if (divisor > numGpuDevAttrs)
+			elog(ERROR, "# of inner-hash-partitions (%d) is larger than GPUs (%d) [partition-sz: %s]",
+				 divisor, numGpuDevAttrs, format_bytesz(partition_sz));
 		if (h_kmrels)
 		{
 			PlanState  *__inner_ps = pts->inners[largest_depth-1].ps;
@@ -2687,7 +2688,6 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 {
 	pgstromTaskState   *leader = pts;
 	pgstromSharedState *ps_state;
-	kern_buffer_partitions *kbuf_parts;
 	MemoryContext		memcxt;
 
 	//pick up leader's ps_state if partitionwise plan
@@ -2893,18 +2893,6 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 				pts->h_kmrels = __mmapShmem(ps_state->preload_shmem_handle,
 											ps_state->preload_shmem_length,
 											pts->ds_entry);
-			}
-
-			/*
-			 * Inner-buffer partitioning often requires multiple outer-scan,
-			 * if number of partitions is larger than the number of GPU devices.
-			 */
-			kbuf_parts = KERN_MULTIRELS_PARTITION_DESC(pts->h_kmrels, -1);
-			if (kbuf_parts)
-			{
-				pts->num_scan_repeats = (kbuf_parts->hash_divisor +
-										 numGpuDevAttrs - 1) / numGpuDevAttrs;
-				assert(pts->num_scan_repeats > 0);
 			}
 			break;
 

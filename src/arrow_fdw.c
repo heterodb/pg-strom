@@ -5280,22 +5280,15 @@ ArrowBeginForeignScan(ForeignScanState *node, int eflags)
  * ExecArrowScanChunk
  */
 static inline RecordBatchState *
-__arrowFdwNextRecordBatch(ArrowFdwState *arrow_state,
-						  int32_t num_scan_repeats,
-						  int32_t *p_scan_repeat_id)
+__arrowFdwNextRecordBatch(ArrowFdwState *arrow_state)
 {
 	RecordBatchState *rb_state;
-	uint32_t	raw_index;
 	uint32_t	rb_index;
 
-	Assert(num_scan_repeats > 0);
 retry:
-	raw_index = pg_atomic_fetch_add_u32(arrow_state->rbatch_index, 1);
-	if (raw_index >= arrow_state->rb_nitems * num_scan_repeats)
+	rb_index = pg_atomic_fetch_add_u32(arrow_state->rbatch_index, 1);
+	if (rb_index >= arrow_state->rb_nitems)
 		return NULL;	/* no more chunks to load */
-	rb_index = (raw_index % arrow_state->rb_nitems);
-	if (p_scan_repeat_id)
-		*p_scan_repeat_id = (raw_index / arrow_state->rb_nitems);
 	rb_state = arrow_state->rb_states[rb_index];
 	if (arrow_state->stats_hint)
 	{
@@ -5325,11 +5318,8 @@ pgstromScanChunkArrowFdw(pgstromTaskState *pts,
 	uint32_t	kds_src_offset = 0;
 	uint32_t	kds_src_iovec = 0;
 	uint32_t	kds_src_pathname;
-	int32_t		scan_repeat_id;
 
-	rb_state = __arrowFdwNextRecordBatch(arrow_state,
-										 pts->num_scan_repeats,
-										 &scan_repeat_id);
+	rb_state = __arrowFdwNextRecordBatch(arrow_state);
 	if (!rb_state)
 	{
 		pts->scan_done = true;
@@ -5372,7 +5362,6 @@ pgstromScanChunkArrowFdw(pgstromTaskState *pts,
 	/* assign offset of XpuCommand */
 	xcmd = (XpuCommand *)chunk_buffer->data;
 	xcmd->length = chunk_buffer->len;
-	xcmd->repeat_id = scan_repeat_id;
 	xcmd->u.task.kds_src_pathname = kds_src_pathname;
 	xcmd->u.task.kds_src_iovec    = kds_src_iovec;
 	xcmd->u.task.kds_src_offset   = kds_src_offset;
@@ -5380,14 +5369,6 @@ pgstromScanChunkArrowFdw(pgstromTaskState *pts,
 	xcmd_iov->iov_base = xcmd;
 	xcmd_iov->iov_len  = xcmd->length;
 	*xcmd_iovcnt = 1;
-
-	/* XXX - debug message */
-    if (scan_repeat_id > 0 && scan_repeat_id != pts->last_repeat_id)
-        elog(NOTICE, "arrow scan on '%s' moved into %dth loop for inner-buffer partitions (pid: %u)",
-             RelationGetRelationName(pts->css.ss.ss_currentRelation),
-			 scan_repeat_id+1,
-			 MyProcPid);
-    pts->last_repeat_id = scan_repeat_id;
 
 	return xcmd;
 }
@@ -5409,7 +5390,7 @@ ArrowIterateForeignScan(ForeignScanState *node)
 
 		arrow_state->curr_index = 0;
 		arrow_state->curr_kds = NULL;
-		rb_state = __arrowFdwNextRecordBatch(arrow_state, 1, NULL);
+		rb_state = __arrowFdwNextRecordBatch(arrow_state);
 		if (!rb_state)
 			return NULL;
 		if (ArrowMetadataVersionIsParquet(rb_state->af_state->version))

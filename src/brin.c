@@ -449,7 +449,7 @@ typedef struct
 	volatile int	build_status;
 	slock_t			lock;	/* once 'build_status' is set, no need to take
 							 * this lock again. */
-	pg_atomic_uint64 index;
+	pg_atomic_uint32 index;
 	uint32_t		nitems;
 	BlockNumber		chunks[FLEXIBLE_ARRAY_MEMBER];
 } BrinIndexResults;
@@ -572,7 +572,7 @@ pgstromBrinIndexExecReset(pgstromTaskState *pts)
 		BrinIndexResults *br_results = br_state->brinResults;
 		br_results->build_status = 0;
 		br_results->nitems   = 0;
-		pg_atomic_init_u64(&br_results->index, 0);
+		pg_atomic_init_u32(&br_results->index, 0);
 	}
 }
 
@@ -634,7 +634,6 @@ __BrinIndexExecBuildResults(pgstromTaskState *pts)
 {
 	/* see bringetbitmap() */
 	pgstromSharedState *ps_state = pts->ps_state;
-	EState		   *estate = pts->css.ss.ps.state;
 	BrinIndexState *br_state = pts->br_state;
 	BrinIndexResults *br_results = br_state->brinResults;
 	BrinDesc	   *bdesc = br_state->brinDesc;
@@ -919,29 +918,25 @@ __BrinIndexGetResults(pgstromTaskState *pts)
 	return br_results;
 }
 
-int
+bool
 pgstromBrinIndexNextChunk(pgstromTaskState *pts)
 {
 	BrinIndexState *br_state = pts->br_state;
 	BrinIndexResults *br_results = __BrinIndexGetResults(pts);
-	uint64_t	raw_index;
-
-again:
-	raw_index = pg_atomic_fetch_add_u64(&br_results->index, 1);
-	if (raw_index < br_results->nitems * pts->num_scan_repeats)
+	uint32_t	index = pg_atomic_fetch_add_u32(&br_results->index, 1);
+	if (index < br_results->nitems)
 	{
 		BlockNumber	pagesPerRange = br_state->pagesPerRange;
-		uint32_t	index = (raw_index % br_results->nitems);
 
 		pts->curr_block_num  = br_results->chunks[index] * pagesPerRange;
 		pts->curr_block_tail = pts->curr_block_num + pagesPerRange;
 		if (pts->curr_block_num >= br_state->nblocks)
-			goto again;
+			return false;
 		if (pts->curr_block_tail > br_state->nblocks)
 			pts->curr_block_tail = br_state->nblocks;
-		return (raw_index / br_results->nitems);
+		return true;
 	}
-	return -1;
+	return false;
 }
 
 void

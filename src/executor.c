@@ -28,8 +28,6 @@ struct XpuConnection
 	int				num_ready_cmds;
 	dlist_head		ready_cmds_list;	/* ready, but not fetched yet  */
 	dlist_head		active_cmds_list;	/* currently in-use */
-	pg_atomic_uint64 *scan_repeat_sync_control; /* sync variable when repeat-id
-												 * is incremented to the next. */
 	kern_errorbuf	errorbuf;
 };
 
@@ -71,25 +69,8 @@ __xpuConnectAttachCommand(void *__priv, XpuCommand *xcmd)
 	{
 		if (xcmd->tag == XpuCommandTag__Success)
 		{
-			uint64_t	control;
-
 			Assert(conn->num_running_cmds > 0);
 			conn->num_running_cmds--;
-			/*
-			 * NOTE: When repeating the outer scan multiple times, it is prohibited
-			 * to submit a task with a new repeat-id until all tasks with old repeat-ids
-			 * are completed.
-			 * This is because the pinned inner buffer is partitioned, and if it is
-			 * necessary to switch buffers based on repeat-id, GPU-Join cannot properly
-			 * switch the buffers used.
-			 * The upper 32bit of the scan_repeat_sync_control is the repeat-id that
-			 * is currently running, and the lower 32bit is the number of tasks
-			 * currently in running. So, if lower 32bit is zero, we can submit further
-			 * tasks with different repeat-id.
-			 */
-			control = pg_atomic_fetch_sub_u64(conn->scan_repeat_sync_control, 1);
-			assert((control >> 32) == xcmd->repeat_id &&
-				   (control & 0xffffffffUL) > 0);
 			SetLatch(MyLatch);
 		}
 		else
@@ -185,79 +166,6 @@ __xpuConnectSessionWorker(void *__priv)
 }
 
 /*
- * __syncScanRepeatIdChangingPoint
- *
- * wait for completion of any running tasks that has different scan repeat-id
- */
-static void
-__syncScanRepeatIdChangingPoint(XpuConnection *conn, const XpuCommand *xcmd)
-{
-	int32_t		repeat_id;
-	uint64_t	control;
-
-	control = pg_atomic_read_u64(conn->scan_repeat_sync_control);
-	/*
-	 * MEMO: When OpenSession is processed, other worker process already reached
-	 * to the of the relation once and scan_repeat_sync_control may be non-zero.
-	 */
-	if (xcmd->tag == XpuCommandTag__OpenSession)
-		((XpuCommand *)xcmd)->repeat_id = (control >> 32);
-	repeat_id = xcmd->repeat_id;
-
-	for (;;)
-	{
-		/*
-		 * The upper 32 bits of the control variable indicate repeat_id of the tasks
-		 * currently running, and the lower 32 bits indicate number of the tasks.
-		 * Therefore, when the lower 32 bits are 1 or greater, a task can only be
-		 * submitted if the repeat_id is the same. If you want to update the repeat_id,
-		 * you must wait for the lower 32 bits to become 0.
-		 */
-		if ((control>>32) == repeat_id)
-		{
-			/* repeat-id is not changed */
-			assert((control & 0xffffffffUL) != 0xffffffffUL);
-			if (pg_atomic_compare_exchange_u64(conn->scan_repeat_sync_control,
-											   &control,
-											   control + 1))
-			{
-				SetLatch(MyLatch);
-				break;
-			}
-		}
-		else if ((control & 0xffffffffUL) == 0)
-		{
-			/* no tasks with previous repeat-id is not running */
-			if (pg_atomic_compare_exchange_u64(conn->scan_repeat_sync_control,
-											   &control,
-											   ((uint64_t)repeat_id << 32) | 1UL))
-			{
-				SetLatch(MyLatch);
-				elog(DEBUG1, "executor: scan repeat-id was switched %u -> %u",
-					 (int32_t)(control>>32), repeat_id);
-				break;
-			}
-		}
-		else
-		{
-			/* any tasks with previous repeat-id is still running */
-			int		ev = WaitLatch(MyLatch,
-								   WL_LATCH_SET |
-								   WL_TIMEOUT |
-								   WL_POSTMASTER_DEATH,
-								   1000L,
-								   PG_WAIT_EXTENSION);
-			ResetLatch(MyLatch);
-			if (ev & WL_POSTMASTER_DEATH)
-				elog(FATAL, "unexpected postmaster dead");
-			CHECK_FOR_INTERRUPTS();
-
-			control = pg_atomic_read_u64(conn->scan_repeat_sync_control);
-		}
-	}
-}
-
-/*
  * xpuClientSendCommand
  */
 static void
@@ -267,8 +175,6 @@ xpuClientSendCommand(XpuConnection *conn, const XpuCommand *xcmd)
 	const char *buf = (const char *)xcmd;
 	size_t		len = xcmd->length;
 	ssize_t		nbytes;
-
-	__syncScanRepeatIdChangingPoint(conn, xcmd);
 
 	pthreadMutexLock(&conn->mutex);
 	conn->num_running_cmds++;
@@ -301,8 +207,6 @@ xpuClientSendCommandIOV(XpuConnection *conn,
 {
 	int			sockfd = conn->sockfd;
 	ssize_t		nbytes;
-
-    __syncScanRepeatIdChangingPoint(conn, xcmd);
 
 	Assert(iovcnt > 0);
 	pthreadMutexLock(&conn->mutex);
@@ -1541,7 +1445,6 @@ pgstromCreateTaskState(CustomScan *cscan,
 	pts->xpu_task_flags = pp_info->xpu_task_flags;
 	pts->pp_info = pp_info;
 	Assert(pp_info->num_rels == num_rels);
-	pts->num_scan_repeats = 1;
 	pts->num_rels = num_rels;
 
 	return (Node *)pts;
@@ -2339,27 +2242,6 @@ pgstromSharedStateShutdownDSM(CustomScanState *node)
 		dst_state = MemoryContextAllocZero(estate->es_query_cxt, sz);
 		memcpy(dst_state, src_state, sz);
 		pts->ps_state = dst_state;
-	}
-	/*
-	 * NOTE: XpuConnection::scan_repeat_sync_control is initialized to point
-	 * a variable on DSM segment to share current status of relation scan.
-	 * When ShutdownDSM callback is invoked, no other worker processes are
-	 * working, thus it is obviously safe to switch the control variable.
-	 *
-	 * Please note that ShutdownDSM can be called before execution end,
-	 * when DECLARE CURSOR + FETCH command is used, for example.
-	 * See, issue #1006
-	 */
-	if (pts->conn)
-	{
-		XpuConnection *conn = pts->conn;
-		uint64_t	control;
-
-		pthreadMutexLock(&conn->mutex);
-		control = pg_atomic_read_u64(conn->scan_repeat_sync_control);
-		pg_atomic_write_u64(&pts->ps_state->scan_repeat_sync_control, control);
-		conn->scan_repeat_sync_control = &pts->ps_state->scan_repeat_sync_control;
-		pthreadMutexUnlock(&conn->mutex);
 	}
 	/*
 	 * SELECT-INTO Direct mode needs to update processed tuples
@@ -3165,7 +3047,6 @@ __xpuClientOpenSession(pgstromTaskState *pts,
 					   const XpuCommand *session,
 					   pgsocket sockfd)
 {
-	pgstromSharedState *ps_state = pts->ps_state;
 	XpuConnection  *conn;
 	XpuCommand	   *resp;
 	int				rv;
@@ -3185,7 +3066,6 @@ __xpuClientOpenSession(pgstromTaskState *pts,
 	conn->num_ready_cmds = 0;
 	dlist_init(&conn->ready_cmds_list);
 	dlist_init(&conn->active_cmds_list);
-	conn->scan_repeat_sync_control = &ps_state->scan_repeat_sync_control;
 	dlist_push_tail(&xpu_connections_list, &conn->chain);
 	pts->conn = conn;
 

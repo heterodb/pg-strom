@@ -579,7 +579,6 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 	uint32_t		kds_src_pathname = 0;
 	uint32_t		kds_src_iovec = 0;
 	uint32_t		kds_nrooms;
-	int32_t			scan_repeat_id = -1;
 
 	kds = __XCMD_GET_KDS_SRC(&pts->xcmd_buf);
 	kds_nrooms = (PGSTROM_CHUNK_SIZE -
@@ -636,16 +635,6 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 				}
 				LWLockRelease(bufLock);
 			}
-
-			/*
-			 * MEMO: When multiple scans are needed (pts->num_scan_repeats > 0),
-			 * kds_src should not mixture the blocks come from different scans,
-			 * because it shall be JOIN'ed on different partitions.
-			 */
-			if (scan_repeat_id < 0)
-				scan_repeat_id = pts->curr_block_num / ps_state->scan_block_nums;
-			else if (scan_repeat_id != pts->curr_block_num / ps_state->scan_block_nums)
-				goto out;
 
 			/*
 			 * MEMO: right now, we allow GPU Direct SQL for the all-visible
@@ -714,29 +703,21 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 		}
 		else if (pts->br_state)
 		{
-			int		__next_repeat_id = pgstromBrinIndexNextChunk(pts);
-
-			if (__next_repeat_id < 0)
+			if (!pgstromBrinIndexNextChunk(pts))
 				pts->scan_done = true;
-			else if (scan_repeat_id < 0)
-				scan_repeat_id = __next_repeat_id;
-			else if (scan_repeat_id != __next_repeat_id)
-				break;
 		}
 		else
 		{
 			/* full table scan */
 			uint32_t	num_blocks = kds_nrooms - kds->nitems;
-			uint64_t	scan_block_limit = (ps_state->scan_block_nums *
-											pts->num_scan_repeats);
 
 			pts->curr_block_num  = pg_atomic_fetch_add_u64(&ps_state->scan_block_count,
 														   num_blocks);
 			pts->curr_block_tail = pts->curr_block_num + num_blocks;
-			if (pts->curr_block_num >= scan_block_limit)
+			if (pts->curr_block_num >= ps_state->scan_block_nums)
 				pts->scan_done = true;
-			if (pts->curr_block_tail > scan_block_limit)
-				pts->curr_block_tail = scan_block_limit;
+			if (pts->curr_block_tail > ps_state->scan_block_nums)
+				pts->curr_block_tail = ps_state->scan_block_nums;
 		}
 	}
 out:
@@ -746,20 +727,6 @@ out:
 	kds->length = kds->block_offset + BLCKSZ * kds->nitems;
 	if (kds->nitems == 0)
 		return NULL;
-	Assert(scan_repeat_id >= 0);
-	/* XXX - debug message */
-	if (scan_repeat_id > 0 && scan_repeat_id != pts->last_repeat_id)
-		elog(NOTICE, "direct scan on '%s' moved into %dth loop for inner-buffer partitions (pid: %u)  scan_block_count=%lu scan_block_nums=%u scan_block_start=%u num_scan_repeats=%u scan_repeat_id=%d curr_block_num=%lu curr_block_tail=%lu",
-			 RelationGetRelationName(pts->css.ss.ss_currentRelation),
-			 scan_repeat_id+1, MyProcPid,
-			 pg_atomic_read_u64(&ps_state->scan_block_count),
-			 ps_state->scan_block_nums,
-			 ps_state->scan_block_start,
-			 pts->num_scan_repeats,
-			 scan_repeat_id,
-			 pts->curr_block_num,
-			 pts->curr_block_tail);
-	pts->last_repeat_id = scan_repeat_id;
 
 	if (strom_nblocks > 0)
 	{
@@ -790,7 +757,6 @@ out:
 	xcmd = (XpuCommand *)pts->xcmd_buf.data;
 	xcmd->u.task.kds_src_pathname = kds_src_pathname;
 	xcmd->u.task.kds_src_iovec = kds_src_iovec;
-	xcmd->repeat_id = scan_repeat_id;
 	xcmd->length = pts->xcmd_buf.len;
 
 	xcmd_iov[0].iov_base = xcmd;
