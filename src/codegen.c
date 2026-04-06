@@ -870,6 +870,7 @@ devtype_jsonb_hash(bool isnull, Datum value)
 	return 0;
 }
 
+#ifdef WITH_POSTGIS
 static uint32_t
 devtype_geometry_hash(bool isnull, Datum value)
 {
@@ -881,6 +882,7 @@ devtype_box2df_hash(bool isnull, Datum value)
 {
 	elog(ERROR, "box2df type has no device hash function");
 }
+#endif
 
 static uint32_t
 devtype_cube_hash(bool isnull, Datum value)

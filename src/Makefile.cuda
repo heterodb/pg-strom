@@ -51,10 +51,14 @@ NVCC_LDFLAGS = $(__NVCC_LDFLAGS) $(NVCC_FLAGS_CUSTOM) $(NVCC_LDFLAGS_CUSTOM)
 # PG-Strom GPU Code
 __CUDA_CORE_FILES = xpu_common cuda_gpuscan cuda_gpujoin cuda_gpupreagg cuda_gpusort \
                     xpu_basetype xpu_numeric xpu_timelib xpu_textlib \
-                    xpu_misclib  xpu_jsonlib xpu_postgis
+                    xpu_misclib  xpu_jsonlib
 __CUDA_CORE_HEADERS = cuda_common.h xpu_common.h xpu_opcodes.h xpu_basetype.h \
                       xpu_numeric.h xpu_textlib.h xpu_timelib.h xpu_misclib.h \
-                      xpu_jsonlib.h xpu_postgis.h
+                      xpu_jsonlib.h
+ifeq ($(WITH_POSTGIS),1)
+__CUDA_CORE_FILES   += xpu_postgis
+__CUDA_CORE_HEADERS += xpu_postgis.h
+endif
 CUDA_OBJS = $(addsuffix .o, $(__CUDA_CORE_FILES) $(CUDA_CUSTOM_FILES))
 CUDA_SRCS = $(addsuffix .cu,$(__CUDA_CORE_FILES) $(CUDA_CUSTOM_FILES))
 CUDA_HEADERS = $(__CUDA_CORE_HEADERS) $(CUDA_CUSTOM_HEADERS)

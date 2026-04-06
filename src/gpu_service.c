@@ -910,6 +910,9 @@ __rebuild_gpu_fatbin_file(const char *fatbin_dir,
 						 " -I. -I%s "
 						 " -DHAVE_FLOAT2 "
 						 " -DCUDA_MAXTHREADS_PER_BLOCK=%u "
+#ifdef WITH_POSTGIS
+						 " -DWITH_POSTGIS=1 "
+#endif
 						 " -arch=native --threads 4"
 						 " --device-c"
 						 " -o %s.o"
@@ -922,7 +925,7 @@ __rebuild_gpu_fatbin_file(const char *fatbin_dir,
 						 PGSHAREDIR, tok, tok);
 	}
 	appendStringInfo(&cmd,
-					 ") && wait;"
+					 " & wait) && "
 					 " /bin/sh -x -c '%s/bin/nvcc"
 					 " -Xnvlink --suppress-stack-size-warning"
 					 " -arch=native --threads 4"

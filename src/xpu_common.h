@@ -1957,7 +1957,9 @@ struct xpu_datum_operators {
 #include "xpu_timelib.h"
 #include "xpu_misclib.h"
 #include "xpu_jsonlib.h"
+#ifdef WITH_POSTGIS
 #include "xpu_postgis.h"
+#endif
 
 /*
  * xpu_array_t - array type support

@@ -39,8 +39,10 @@ TYPE_OPCODE(uuid, NULL, DEVTYPE__HAS_COMPARE)
 TYPE_OPCODE(macaddr, NULL, DEVTYPE__HAS_COMPARE)
 TYPE_OPCODE(inet, NULL, DEVTYPE__HAS_COMPARE)
 TYPE_OPCODE(jsonb, NULL, 0)
+#ifdef WITH_POSTGIS
 TYPE_OPCODE(geometry, "postgis", 0)
 TYPE_OPCODE(box2df, "postgis", 0)
+#endif
 TYPE_OPCODE(cube, "cube", 0)
 
 #ifndef TYPE_ALIAS
@@ -780,6 +782,7 @@ DEVONLY_FUNC_OPCODE(float2, jsonb_array_element_as_float2,  jsonb/text, DEVKIND_
 DEVONLY_FUNC_OPCODE(float4, jsonb_array_element_as_float4,  jsonb/text, DEVKIND__ANY, 10)
 DEVONLY_FUNC_OPCODE(float8, jsonb_array_element_as_float8,  jsonb/text, DEVKIND__ANY, 10)
 
+#ifdef WITH_POSTGIS
 /* PostGIS functions */
 FUNC_OPCODE(st_point,     float8/float8,               DEVKIND__ANY, st_point,      5, "postgis")
 FUNC_OPCODE(st_makepoint, float8/float8,               DEVKIND__ANY, st_makepoint2, 5, "postgis")
@@ -805,6 +808,7 @@ FUNC_OPCODE(contains_2d,     box2df/box2df,   DEVKIND__ANY, box2df_contains,    
 FUNC_OPCODE(is_contained_2d, box2df/geometry, DEVKIND__ANY, box2df_geometry_within,   40, "postgis")
 FUNC_OPCODE(is_contained_2d, geometry/box2df, DEVKIND__ANY, geometry_box2df_within,   40, "postgis")
 FUNC_OPCODE(is_contained_2d, box2df/box2df,   DEVKIND__ANY, box2df_within,            40, "postgis")
+#endif
 
 /* cube/earthdistance */
 __FUNC_OPCODE(cube_eq,        cube/cube,  5, "cube")
