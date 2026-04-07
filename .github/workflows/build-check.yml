@@ -47,7 +47,7 @@ jobs:
             echo "pg_config not found: ${PG_CONFIG}" >&2
             exit 1
           fi
-          make -C src clean
+          PG_CONFIG=${PG_CONFIG} make -C src clean
           PG_CONFIG=${PG_CONFIG} make -C src -j$(nproc) install
 
       - name: Notify owner on failure
