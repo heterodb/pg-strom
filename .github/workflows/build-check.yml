@@ -111,7 +111,7 @@ jobs:
 
       - name: Run pg_strom regression tests
         run: |
-          bash test/automation_setup/cli_ci_tests.sh --pgver ${{ matrix.test_pgver }} --timeout 1200
+          bash test/automation_setup/run_cli_tests.sh --pgver ${{ matrix.test_pgver }} --timeout 1200
 
       - name: Notify owner on regression failure
         if: failure() && (github.event_name == 'pull_request' || github.event_name == 'push') && env.ACT != 'true'
