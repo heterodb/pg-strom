@@ -528,6 +528,7 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 	uint32_t		kds_src_pathname = 0;
 	uint32_t		kds_src_iovec = 0;
 	uint32_t		kds_nrooms;
+	uint32_t		scan_block_start = ps_state->scan_block_start;
 
 	kds = __XCMD_GET_KDS_SRC(&pts->xcmd_buf);
 	kds_nrooms = (PGSTROM_CHUNK_SIZE -
@@ -547,14 +548,25 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 	strom_blknums = alloca(sizeof(BlockNumber) * kds_nrooms);
 	strom_nblocks = 0;
 
+	/*
+	 * PostgreSQL may adjust the scan start position for concurrent sequential
+	 * scans to improve buffer hit rates, and PG-Strom honors this behavior.
+	 * In contrast, when a BRIN index is in use, the scan start position must
+	 * not be shifted, because the BRIN index precisely specifies which blocks
+	 * should be scanned. Otherwise, incorrect results could be produced.
+	 * Hence, scan_block_start is cleared so that the table is scanned exactly
+	 * according to the BRIN index.
+	 */
+	if (pts->br_state)
+		scan_block_start = 0;
+
 	while (!pts->scan_done)
 	{
 		while (pts->curr_block_num < pts->curr_block_tail &&
 			   kds->nitems < kds_nrooms)
 		{
-			BlockNumber		block_num
-				= (pts->curr_block_num +
-				   ps_state->scan_block_start) % ps_state->scan_block_nums;
+			BlockNumber		block_num = (pts->curr_block_num +
+										 scan_block_start) % ps_state->scan_block_nums;
 			/*
 			 * MEMO: right now, we allow GPU Direct SQL for the all-visible
 			 * pages only, due to the restrictions about MVCC checks.
