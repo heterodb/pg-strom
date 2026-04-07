@@ -2605,12 +2605,12 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 	/*
 	 * Inner PreLoad State Machine
 	 */
-	SpinLockAcquire(&ps_state->preload_mutex);
+	pthreadMutexLock(&ps_state->preload_mutex);
 	switch (ps_state->preload_phase)
 	{
 		case INNER_PHASE__SCAN_RELATIONS:
 			ps_state->preload_nr_scanning++;
-			SpinLockRelease(&ps_state->preload_mutex);
+			pthreadMutexUnlock(&ps_state->preload_mutex);
 			/*
 			 * Scan inner relations, often in parallel
 			 */
@@ -2651,7 +2651,7 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 			 * So, 'phase' shall be switched to WAIT_FOR_SCANNING
 			 * to prevent other worker try to start inner scan.
 			 */
-			SpinLockAcquire(&ps_state->preload_mutex);
+			pthreadMutexLock(&ps_state->preload_mutex);
 			if (ps_state->preload_phase == INNER_PHASE__SCAN_RELATIONS)
 				ps_state->preload_phase = INNER_PHASE__SETUP_BUFFERS;
 			else
@@ -2662,7 +2662,7 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 			 * relations.
 			 */
 			if (--ps_state->preload_nr_scanning == 0)
-				ConditionVariableBroadcast(&ps_state->preload_cond);
+				pthreadCondBroadcast(&ps_state->preload_cond);
 			/* Falls through. */
 		case INNER_PHASE__SETUP_BUFFERS:
 			/*
@@ -2670,19 +2670,11 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 			 * the inner relations.
 			 */
 			ps_state->preload_nr_setup++;
-			if (ps_state->preload_phase == INNER_PHASE__SCAN_RELATIONS ||
-				ps_state->preload_nr_scanning > 0)
+			while (ps_state->preload_phase == INNER_PHASE__SCAN_RELATIONS ||
+				   ps_state->preload_nr_scanning > 0)
 			{
-				ConditionVariablePrepareToSleep(&ps_state->preload_cond);
-				while (ps_state->preload_phase == INNER_PHASE__SCAN_RELATIONS ||
-					   ps_state->preload_nr_scanning > 0)
-				{
-					SpinLockRelease(&ps_state->preload_mutex);
-					ConditionVariableSleep(&ps_state->preload_cond,
-										   PG_WAIT_EXTENSION);
-					SpinLockAcquire(&ps_state->preload_mutex);
-				}
-				ConditionVariableCancelSleep();
+				pthreadCondWait(&ps_state->preload_cond,
+								&ps_state->preload_mutex);
 			}
 
 			/*
@@ -2694,11 +2686,11 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 			}
 			PG_CATCH();
 			{
-				SpinLockRelease(&ps_state->preload_mutex);
+				pthreadMutexUnlock(&ps_state->preload_mutex);
 				PG_RE_THROW();
 			}
 			PG_END_TRY();
-			SpinLockRelease(&ps_state->preload_mutex);
+			pthreadMutexUnlock(&ps_state->preload_mutex);
 
 			/*
 			 * Setup the host inner buffer
@@ -2726,12 +2718,12 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 					continue;
 
 				Assert(kds != NULL);
-				SpinLockAcquire(&ps_state->preload_mutex);
+				pthreadMutexLock(&ps_state->preload_mutex);
 				base_nitems  = kds->nitems;
 				kds->nitems += preload_buf->nitems;
 				base_usage   = kds->usage;
 				kds->usage  += preload_buf->usage;
-				SpinLockRelease(&ps_state->preload_mutex);
+				pthreadMutexUnlock(&ps_state->preload_mutex);
 
 				/* sanity checks */
 				if (base_nitems + preload_buf->nitems >= UINT_MAX)
@@ -2760,27 +2752,23 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 			 * Wait for completion of the host buffer setup
 			 * by other concurrent workers
 			 */
-			SpinLockAcquire(&ps_state->preload_mutex);
+			pthreadMutexLock(&ps_state->preload_mutex);
 			ps_state->preload_nr_setup--;
 			if (ps_state->preload_nr_scanning == 0 &&
 				ps_state->preload_nr_setup == 0)
 			{
 				Assert(ps_state->preload_phase == INNER_PHASE__SETUP_BUFFERS);
 				ps_state->preload_phase = INNER_PHASE__GPUJOIN_EXEC;
-				ConditionVariableBroadcast(&ps_state->preload_cond);
+				pthreadCondBroadcast(&ps_state->preload_cond);
             }
             else
             {
-                ConditionVariablePrepareToSleep(&ps_state->preload_cond);
 				while (ps_state->preload_nr_scanning > 0 ||
 					   ps_state->preload_nr_setup > 0)
 				{
-                    SpinLockRelease(&ps_state->preload_mutex);
-                    ConditionVariableSleep(&ps_state->preload_cond,
-                                           PG_WAIT_EXTENSION);
-                    SpinLockAcquire(&ps_state->preload_mutex);
-                }
-                ConditionVariableCancelSleep();
+					pthreadCondWait(&ps_state->preload_cond,
+									&ps_state->preload_mutex);
+				}
             }
             /* Falls through. */
         case INNER_PHASE__GPUJOIN_EXEC:
@@ -2798,11 +2786,11 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 			break;
 
 		default:
-			SpinLockRelease(&ps_state->preload_mutex);
+			pthreadMutexUnlock(&ps_state->preload_mutex);
 			elog(ERROR, "GpuJoin: unexpected inner buffer phase");
 			break;
 	}
-	SpinLockRelease(&ps_state->preload_mutex);
+	pthreadMutexUnlock(&ps_state->preload_mutex);
 	/* release working memory */
 	MemoryContextDelete(memcxt);
 	Assert(pts->h_kmrels != NULL);

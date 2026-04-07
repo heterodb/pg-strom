@@ -2170,8 +2170,8 @@ pgstromSharedStateInitDSM(CustomScanState *node,
 	ps_state->pgsql_curr_xid = GetCurrentTransactionIdIfAny();
 	ps_state->pgsql_curr_cid = GetCurrentCommandId(true);
 	ps_state->num_rels = num_rels;
-	ConditionVariableInit(&ps_state->preload_cond);
-	SpinLockInit(&ps_state->preload_mutex);
+	pthreadCondInitShared(&ps_state->preload_cond);
+	pthreadMutexInitShared(&ps_state->preload_mutex);
 	if (num_rels > 0)
 		ps_state->preload_shmem_handle = __shmemCreate();
 	pts->ps_state = ps_state;

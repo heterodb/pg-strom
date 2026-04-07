@@ -419,8 +419,8 @@ typedef struct
 	pg_atomic_uint32	brin_index_fetched;
 	pg_atomic_uint32	brin_index_skipped;
 	/* for join-inner-preload */
-	ConditionVariable	preload_cond;		/* sync object */
-	slock_t				preload_mutex;		/* mutex for inner-preloading */
+	pthread_cond_t		preload_cond;		/* sync object */
+	pthread_mutex_t		preload_mutex;		/* mutex for inner-preloading */
 	int					preload_phase;		/* one of INNER_PHASE__* in gpu_join.c */
 	int					preload_nr_scanning;/* # of scanning process */
 	int					preload_nr_setup;	/* # of setup process */
