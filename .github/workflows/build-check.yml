@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   build:
-    name: Build with ${{ matrix.pgdir }}
+    name: Build with PostgreSQL ${{ matrix.pgver }}
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'push' || github.event_name == 'pull_request'
     # Temporary debug condition (disabled):
     # if: true
@@ -24,13 +24,13 @@ jobs:
     strategy:
       # List of PostgreSQL binary directory names under the configured root.
       # To add more PostgreSQL versions, append entries here, e.g.:
-      #   - psql170
-      #   - psql160
+      #   - 19.0
+      #   - 17.10
       matrix:
-        pgdir:
-          - postgresql-16.13  
-          - postgresql-17.9
-          - postgresql-18.3
+        pgver:
+          - 16.13
+          - 17.9
+          - 18.3
       fail-fast: false
 
     steps:
@@ -42,9 +42,13 @@ jobs:
           PSQLBIN_ROOT: ${{ env.PSQLBIN_ROOT }}
         run: |
           PSQLBIN_ROOT=${PSQLBIN_ROOT:-/actions-runner/psqlbin}
-          cd src
-          make clean
-          PG_CONFIG=${PSQLBIN_ROOT}/${{ matrix.pgdir }}/bin/pg_config make -j$(nproc) install
+          PG_CONFIG=${PSQLBIN_ROOT}/pgbin-${{ matrix.pgver }}/bin/pg_config
+          if [ ! -x "${PG_CONFIG}" ]; then
+            echo "pg_config not found: ${PG_CONFIG}" >&2
+            exit 1
+          fi
+          make -C src clean
+          PG_CONFIG=${PG_CONFIG} make -C src -j$(nproc) install
 
       - name: Notify owner on failure
         if: failure() && (github.event_name == 'pull_request' || github.event_name == 'push') && env.ACT != 'true'
@@ -58,7 +62,7 @@ jobs:
               const prAuthor = context.payload.pull_request.user.login;
               const prNumber = context.payload.pull_request.number;
               const body = [
-                `@${prAuthor} the build check failed for \`${{ matrix.pgdir }}\` on PR #${prNumber}.`,
+                `@${prAuthor} the build check failed for PostgreSQL ${{ matrix.pgver }} on PR #${prNumber}.`,
                 '',
                 `Run: ${runUrl}`,
               ].join('\n');
@@ -75,7 +79,7 @@ jobs:
             if (eventName === 'push') {
               const pusher = context.actor;
               const body = [
-                `@${pusher} the build check failed for \`${{ matrix.pgdir }}\` on push to \`${context.ref}\`.`,
+                `@${pusher} the build check failed for PostgreSQL ${{ matrix.pgver }} on push to \`${context.ref}\`.`,
                 '',
                 `Run: ${runUrl}`,
               ].join('\n');
