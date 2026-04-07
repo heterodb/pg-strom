@@ -4,7 +4,6 @@
 \t on
 SET pg_strom.regression_test_mode = on;
 SET client_min_messages = error;
-RESET client_min_messages;
 
 SET search_path = regtest_dtype_range_temp,public;
 
@@ -132,3 +131,5 @@ WHERE row_number <= 4;
 DROP TABLE gpusort_answer1;
 DROP TABLE gpusort_answer2;
 DROP TABLE gpusort_answer3;
+
+RESET client_min_messages;

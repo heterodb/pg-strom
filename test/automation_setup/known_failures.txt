@@ -1,0 +1,4 @@
+# Known failing regression tests (one test name per line)
+# Example:
+# gpusort_desc
+pgstrom_init
