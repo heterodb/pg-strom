@@ -90,7 +90,8 @@ for cmd in "${PG_CONFIG}" "${INITDB}" "${PG_CTL}" "${PSQL}" "${PG_ISREADY}" time
 done
 
 RUN_TAG="${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}-${PGVER}-$$"
-PGDATA="${PGDATA_BASE}/github_actions_pgdata-${PGVER}"
+RUN_USER="$(id -un)"
+PGDATA="${PGDATA_BASE}/github_actions_pgdata-${PGVER}-${RUN_USER}"
 SOCKET_DIR="${LOG_BASE}/pgstrom-sock-${RUN_TAG}"
 PG_LOG="${LOG_BASE}/pgstrom-postgres-${RUN_TAG}.log"
 TEST_LOG="${LOG_BASE}/pgstrom-tests-${RUN_TAG}.log"
@@ -157,6 +158,7 @@ fi
 
 export PGHOST="${SOCKET_DIR}"
 export PGPORT="${PGPORT:-5432}"
+export PGUSER="${PGUSER:-${RUN_USER}}"
 
 START_OPTS="-c listen_addresses='' -c unix_socket_directories='${SOCKET_DIR}'"
 
