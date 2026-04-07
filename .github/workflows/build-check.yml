@@ -28,7 +28,7 @@ jobs:
       #   - 17.10
       matrix:
         pgver:
-          # - 16.13  # temporarily disabled due to source compatibility issue
+          - 16.13
           - 17.9
           - 18.3
       fail-fast: false
