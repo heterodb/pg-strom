@@ -3,7 +3,7 @@ name: Build Check
 # Run a build verification after a pull request is approved.
 on:
   pull_request:
-    types: [opened]
+    types: [opened, synchronize]
   push:
     branches: [master]
   workflow_dispatch:
