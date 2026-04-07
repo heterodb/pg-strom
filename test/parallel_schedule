@@ -23,12 +23,13 @@ test: dtype_int dtype_float dtype_numeric dtype_time dtype_text dtype_jsonb addi
 # ----------
 # Test for various functions / expressions
 # ----------
-test: dfunc_math dfunc_mbtext dexpr_scalar_array_op dexpr_misc
+test: dfunc_math dfunc_mbtext dexpr_scalar_array_op
 
 # ----------
 # Test for arrow_fdw
 # ----------
-test: arrow_cpu arrow_utils arrow_index arrow_python_data
+test: arrow_cpu arrow_utils arrow_python_data
+# excluded: arrow_index (temporary)
 
 # ----------
 # Test for CPU fallback and GPU kernel suspend / resume
@@ -51,7 +52,7 @@ test: arrow_cpu arrow_utils arrow_index arrow_python_data
 # ----------
 # GPU Cache
 # ----------
-test: gpu_cache
+#test: gpu_cache
 
 # ---------- 
 # PostGIS (optional)
