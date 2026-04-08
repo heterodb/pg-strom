@@ -102,6 +102,8 @@ jobs:
     strategy:
       matrix:
         test_pgver:
+          - 16.13
+          - 17.9
           - 18.3
       fail-fast: false
 

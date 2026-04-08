@@ -99,26 +99,15 @@ FAILED_LIST="${LOG_BASE}/pgstrom-failed-tests-${RUN_TAG}.txt"
 
 ensure_dir_owned_by_me() {
   local dir="$1"
-  if mkdir -p "${dir}" 2>/dev/null; then
+  if mkdir -p "${dir}" 2>/dev/null && [[ -w "${dir}" ]]; then
     return 0
   fi
-  if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
-    sudo -n mkdir -p "${dir}"
-    sudo -n chown "$(id -u):$(id -g)" "${dir}"
-    return 0
-  fi
-  echo "Permission denied for ${dir}, and sudo -n is unavailable" >&2
+  echo "Permission denied for ${dir}" >&2
   return 1
 }
 
 ensure_dir_owned_by_me "${SOCKET_DIR}"
 ensure_dir_owned_by_me "${PGDATA}"
-
-if [[ ! -w "${PGDATA}" ]]; then
-  if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
-    sudo -n chown -R "$(id -u):$(id -g)" "${PGDATA}"
-  fi
-fi
 
 if [[ ! -w "${PGDATA}" ]]; then
   echo "PGDATA is not writable: ${PGDATA}" >&2
