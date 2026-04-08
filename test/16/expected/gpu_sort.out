@@ -4,12 +4,10 @@
 \t on
 SET pg_strom.regression_test_mode = on;
 SET client_min_messages = error;
-RESET client_min_messages;
 SET search_path = regtest_dtype_range_temp,public;
 -- Generate answer data
 SET pg_strom.enabled = off;
 DROP TABLE IF EXISTS gpusort_answer1;
-NOTICE:  table "gpusort_answer1" does not exist, skipping
 SELECT * INTO gpusort_answer1 FROM (
     SELECT c_region, c_nation, c_city, SUM(lo_revenue) lo_rev,
             RANK() OVER(PARTITION BY c_region, c_nation
@@ -21,7 +19,6 @@ SELECT * INTO gpusort_answer1 FROM (
 ) subqry
 WHERE rank < 4;
 DROP TABLE IF EXISTS gpusort_answer2;
-NOTICE:  table "gpusort_answer2" does not exist, skipping
 SELECT * INTO gpusort_answer2 FROM (
     SELECT c_region, c_nation, c_city, AVG(lo_revenue) lo_rev,
             DENSE_RANK() OVER(PARTITION BY c_region, c_nation
@@ -33,7 +30,6 @@ SELECT * INTO gpusort_answer2 FROM (
 ) subqry
 WHERE dense_rank <= 4;
 DROP TABLE IF EXISTS gpusort_answer3;
-NOTICE:  table "gpusort_answer3" does not exist, skipping
 SELECT * INTO gpusort_answer3 FROM (
     SELECT c_region, c_nation, c_city, MAX(lo_revenue) lo_rev,
             ROW_NUMBER() OVER(PARTITION BY c_region, c_nation
@@ -185,3 +181,4 @@ WHERE row_number <= 4;
 DROP TABLE gpusort_answer1;
 DROP TABLE gpusort_answer2;
 DROP TABLE gpusort_answer3;
+RESET client_min_messages;

@@ -161,6 +161,10 @@ if ! "${PG_ISREADY}" -h "${PGHOST}" -p "${PGPORT}" >/dev/null 2>&1; then
   exit 1
 fi
 
+echo "Reinitializing pg_strom extension"
+"${PSQL}" -v ON_ERROR_STOP=1 -d postgres -c "create extension if not exists pg_strom;" >/dev/null
+"${PSQL}" -v ON_ERROR_STOP=1 -d postgres -c "drop extension pg_strom cascade; create extension pg_strom;" >/dev/null
+
 if [[ -n "${TEST_COMMAND}" ]]; then
   RUN_TEST_CMD=(bash -lc "${TEST_COMMAND}")
 else
