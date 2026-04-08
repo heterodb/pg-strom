@@ -2,21 +2,20 @@ name: Build Check
 
 # Run a build verification after a pull request is approved.
 on:
-  pull_request_review:
-    types: [submitted]
-  # Temporary debug trigger (disabled):
-  # pull_request:
-  #   types: [opened, synchronize, reopened]
+  pull_request:
+    types: [opened, synchronize]
+  push:
+    branches: [master]
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   issues: write
 
 jobs:
   build:
-    name: Build with ${{ matrix.pgdir }}
-    if: github.event_name == 'workflow_dispatch' || github.event.review.state == 'approved'
+    name: Build with PostgreSQL ${{ matrix.pgver }}
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'push' || github.event_name == 'pull_request'
     # Temporary debug condition (disabled):
     # if: true
     runs-on: self-hosted
@@ -25,11 +24,13 @@ jobs:
     strategy:
       # List of PostgreSQL binary directory names under the configured root.
       # To add more PostgreSQL versions, append entries here, e.g.:
-      #   - psql170
-      #   - psql160
+      #   - 19.0
+      #   - 17.10
       matrix:
-        pgdir:
-          - psql183
+        pgver:
+          - 16.13
+          - 17.9
+          - 18.3
       fail-fast: false
 
     steps:
@@ -41,27 +42,52 @@ jobs:
           PSQLBIN_ROOT: ${{ env.PSQLBIN_ROOT }}
         run: |
           PSQLBIN_ROOT=${PSQLBIN_ROOT:-/actions-runner/psqlbin}
-          cd src
-          make clean
-          PG_CONFIG=${PSQLBIN_ROOT}/${{ matrix.pgdir }}/bin/pg_config make -j$(nproc) install
+          PG_CONFIG=${PSQLBIN_ROOT}/pgbin-${{ matrix.pgver }}/bin/pg_config
+          if [ ! -x "${PG_CONFIG}" ]; then
+            echo "pg_config not found: ${PG_CONFIG}" >&2
+            exit 1
+          fi
+          PG_CONFIG=${PG_CONFIG} make -C src clean
+          PG_CONFIG=${PG_CONFIG} make -C src -j$(nproc) install
 
-      - name: Notify approver on failure
-        if: failure() && github.event_name == 'pull_request_review' && env.ACT != 'true'
+      - name: Notify owner on failure
+        if: failure() && (github.event_name == 'pull_request' || github.event_name == 'push') && env.ACT != 'true'
         uses: actions/github-script@v7
         with:
           script: |
-            const approver = context.payload.review.user.login;
-            const prNumber = context.payload.pull_request.number;
+            const eventName = context.eventName;
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-            const body = [
-              `@${approver} the post-approval build check failed for \`${{ matrix.pgdir }}\`.`,
-              '',
-              `Run: ${runUrl}`,
-            ].join('\n');
 
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: prNumber,
-              body,
-            });
+            if (eventName === 'pull_request') {
+              const prAuthor = context.payload.pull_request.user.login;
+              const prNumber = context.payload.pull_request.number;
+              const body = [
+                `@${prAuthor} the build check failed for PostgreSQL ${{ matrix.pgver }} on PR #${prNumber}.`,
+                '',
+                `Run: ${runUrl}`,
+              ].join('\n');
+
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                body,
+              });
+              return;
+            }
+
+            if (eventName === 'push') {
+              const pusher = context.actor;
+              const body = [
+                `@${pusher} the build check failed for PostgreSQL ${{ matrix.pgver }} on push to \`${context.ref}\`.`,
+                '',
+                `Run: ${runUrl}`,
+              ].join('\n');
+
+              await github.rest.repos.createCommitComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                commit_sha: context.sha,
+                body,
+              });
+            }
