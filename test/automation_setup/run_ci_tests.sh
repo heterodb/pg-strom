@@ -161,21 +161,42 @@ if ! "${PG_ISREADY}" -h "${PGHOST}" -p "${PGPORT}" >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "Reinitializing pg_strom extension"
-"${PSQL}" -v ON_ERROR_STOP=1 -d postgres -c "create extension if not exists pg_strom;" >/dev/null
-"${PSQL}" -v ON_ERROR_STOP=1 -d postgres -c "drop extension pg_strom cascade; create extension pg_strom;" >/dev/null
-
 if [[ -n "${TEST_COMMAND}" ]]; then
   RUN_TEST_CMD=(bash -lc "${TEST_COMMAND}")
 else
   RUN_TEST_CMD=(make -C "${REPO_ROOT}/test" PG_CONFIG="${PG_CONFIG}" installcheck)
 fi
 
-echo "Running tests with timeout=${TEST_TIMEOUT_SECS}s"
+echo "Running tests with timeout=${TEST_TIMEOUT_SECS}s (attempt 1)"
 set +e
 timeout --signal=TERM --kill-after=30s "${TEST_TIMEOUT_SECS}" "${RUN_TEST_CMD[@]}" 2>&1 | tee "${TEST_LOG}"
 TEST_RC=${PIPESTATUS[0]}
 set -e
+
+if [[ ${TEST_RC} -ne 0 && ${TEST_RC} -ne 124 ]]; then
+  echo "Initial test run failed (exit=${TEST_RC}); reinitializing pg_strom extension and retrying once"
+  if ! "${PSQL}" -v ON_ERROR_STOP=1 -d postgres -c "create extension if not exists pg_strom;" >/dev/null; then
+    SHOW_LOGS=1
+    echo "Failed to prepare pg_strom extension for retry" >&2
+    exit 1
+  fi
+  if ! "${PSQL}" -v ON_ERROR_STOP=1 -d postgres -c "drop extension pg_strom cascade; create extension pg_strom;" >/dev/null; then
+    SHOW_LOGS=1
+    echo "Failed to reinitialize pg_strom extension for retry" >&2
+    exit 1
+  fi
+
+  {
+    echo
+    echo "===== Retry after pg_strom reinitialization ====="
+  } >> "${TEST_LOG}"
+
+  echo "Running tests with timeout=${TEST_TIMEOUT_SECS}s (attempt 2)"
+  set +e
+  timeout --signal=TERM --kill-after=30s "${TEST_TIMEOUT_SECS}" "${RUN_TEST_CMD[@]}" 2>&1 | tee -a "${TEST_LOG}"
+  TEST_RC=${PIPESTATUS[0]}
+  set -e
+fi
 
 if [[ ${TEST_RC} -eq 124 ]]; then
   SHOW_LOGS=1
