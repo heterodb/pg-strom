@@ -50,7 +50,16 @@ typedef struct {
 	/* Statistics */
 	pg_atomic_uint64	num_active_blocks;
 	pg_atomic_uint64	num_cached_chunks;
-	pg_atomic_uint64	total_actual_usage;
+	pg_atomic_uint64	current_actual_usage;
+	/* Statistics (only increment) */
+	pg_atomic_uint64	total_alloc_nblocks;
+	pg_atomic_uint64	__total_alloc_nblocks_last;
+	pg_atomic_uint64	total_evict_nblocks;
+	pg_atomic_uint64	__total_evict_nblocks_last;
+	pg_atomic_uint64	total_lookup_caches;
+	pg_atomic_uint64	__total_lookup_caches_last;
+	pg_atomic_uint64	total_hit_caches;
+	pg_atomic_uint64	__total_hit_caches_last;
 } parquetCacheHead;
 
 /*
@@ -86,14 +95,6 @@ __timespec_to_uts(const struct timespec *t_spec)
 {
 	return ((uint64_t)t_spec->tv_sec  * 1000000UL +
 			(uint64_t)t_spec->tv_nsec / 1000UL);
-}
-
-/* __timespec_to_utime */
-static inline uint64_t
-__timeval_to_uts(const struct timeval *t_val)
-{
-	return ((uint64_t)t_val->tv_sec * 1000000UL +
-			(uint64_t)t_val->tv_usec);
 }
 
 /*
@@ -177,6 +178,11 @@ parquetCacheLookup(const struct stat *pq_fstat,
 		}
 	}
 	pthreadMutexUnlock(&parquet_cache_head->hash_locks[slot_id]);
+	/* update stats */
+	pg_atomic_fetch_add_u64(&parquet_cache_head->total_lookup_caches, 1);
+	if (result)
+		pg_atomic_fetch_add_u64(&parquet_cache_head->total_hit_caches, 1);
+
 	return result;
 }
 
@@ -388,15 +394,19 @@ skip:
 	/* back to the free list, if any */
 	if (!dlist_is_empty(&pending))
 	{
+		uint64_t	nr_blocks = 0;
+		uint64_t	nr_chunks = 0;
+		uint64_t	actual_usage = 0;
+
 		pthreadMutexLock(&parquet_cache_head->free_lock);
 		while (!dlist_is_empty(&pending))
 		{
 			parquetCacheEntry *entry
 				= dlist_container(parquetCacheEntry, chain,
 								  dlist_pop_head_node(&pending));
-			size_t	usage = parquetCacheLength(entry);
-			int		nr_blocks = 1;
-
+			actual_usage += parquetCacheLength(entry);
+			nr_blocks++;
+			nr_chunks++;
 			while (!dlist_is_empty(&entry->siblings))
 			{
 				parquetCacheEntry *__entry
@@ -408,12 +418,13 @@ skip:
 			}
 			dlist_delete(&entry->chain);
 			dlist_push_head(&parquet_cache_head->free_list, &entry->chain);
-			/* update statistics */
-			pg_atomic_fetch_sub_u64(&parquet_cache_head->num_active_blocks, nr_blocks);
-			pg_atomic_fetch_sub_u64(&parquet_cache_head->num_cached_chunks, 1);
-			pg_atomic_fetch_sub_u64(&parquet_cache_head->total_actual_usage, usage);
 		}
 		pthreadMutexUnlock(&parquet_cache_head->free_lock);
+		/* update statistics */
+		pg_atomic_fetch_sub_u64(&parquet_cache_head->num_active_blocks, nr_blocks);
+		pg_atomic_fetch_sub_u64(&parquet_cache_head->num_cached_chunks, nr_chunks);
+		pg_atomic_fetch_sub_u64(&parquet_cache_head->current_actual_usage, actual_usage);
+		pg_atomic_fetch_add_u64(&parquet_cache_head->total_evict_nblocks, nr_blocks);
 	}
 	if (reclaimed > 0)
 		__Info("parquet-cache evicted %d blocks, latest access at %s",
@@ -501,7 +512,7 @@ __parquetCacheAsyncWriteOne(parquetCacheWriteAsyncData *data, char *block_buf)
 	bool		retry_done = false;
 	uint32_t	slot_id;
 	dlist_iter	iter;
-	struct timeval tv;
+	struct timespec tv;
 
 	assert((uintptr_t)block_buf == PAGE_ALIGN((uintptr_t)block_buf));
 	if (nr_blocks == 0)
@@ -574,10 +585,10 @@ again:
 		}
 	}
 	/* ok, I am responsible to write out this cache entry */
-	gettimeofday(&tv, NULL);
 	pthreadMutexLock(&parquet_cache_head->lru_lock);
 	dlist_push_tail(&parquet_cache_head->lru_list, &entry->lru_chain);
-	entry->lru_timestamp = __timeval_to_uts(&tv);
+	clock_gettime(CLOCK_REALTIME, &tv);
+	entry->lru_timestamp = __timespec_to_uts(&tv);
 	pthreadMutexUnlock(&parquet_cache_head->lru_lock);
 	dlist_push_tail(&parquet_cache_head->hash_slots[slot_id], &entry->chain);
 	pthreadMutexUnlock(&parquet_cache_head->hash_locks[slot_id]);
@@ -627,7 +638,8 @@ again:
 	pthreadMutexUnlock(&parquet_cache_head->hash_locks[slot_id]);
 	/* 6. update statistics and debug message */
 	pg_atomic_fetch_add_u64(&parquet_cache_head->num_cached_chunks, 1);
-	pg_atomic_fetch_add_u64(&parquet_cache_head->total_actual_usage, required);
+	pg_atomic_fetch_add_u64(&parquet_cache_head->current_actual_usage, required);
+	pg_atomic_fetch_add_u64(&parquet_cache_head->total_alloc_nblocks, block_cnt);
 	__Debug("parquet cache written: st_dev=%ld, st_ino=%ld, st_mtime=%s, row-group=%u, field-id=%u, nr-blocks=%u, length=%s",
 			data->pq_fstat.st_dev,
 			data->pq_fstat.st_ino,
@@ -785,19 +797,34 @@ PUBLIC_FUNCTION(Datum)
 pgstrom_parquet_cache_info(PG_FUNCTION_ARGS)
 {
 	StringInfoData	buf;
-	uint64_t	num_active_blocks;
-	uint64_t	num_cached_chunks;
-	uint64_t	total_actual_usage;
 	size_t		cache_size = (size_t)pgstrom_parquet_cache_size_mb << 20;
 	size_t		block_size = (size_t)pgstrom_parquet_cache_unitsz_mb << 20;
+	uint64_t	num_active_blocks;
+	uint64_t	num_cached_chunks;
+	uint64_t	current_actual_usage;
+	uint64_t	total_alloc_nblocks, __total_alloc_nblocks_last;
+	uint64_t	total_evict_nblocks, __total_evict_nblocks_last;
+	uint64_t	total_lookup_caches, __total_lookup_caches_last;
+	uint64_t	total_hit_caches, __total_hit_caches_last;
 
 	if (!pgstrom_parquet_cache_path)
 		PG_RETURN_POINTER(cstring_to_text("{ \"cache_path\" : null }"));
 	assert(parquet_cache_head != NULL);
 	num_active_blocks = pg_atomic_read_u64(&parquet_cache_head->num_active_blocks);
 	num_cached_chunks = pg_atomic_read_u64(&parquet_cache_head->num_cached_chunks);
-	total_actual_usage = pg_atomic_read_u64(&parquet_cache_head->total_actual_usage);
-
+	current_actual_usage = pg_atomic_read_u64(&parquet_cache_head->current_actual_usage);
+	total_alloc_nblocks = pg_atomic_read_u64(&parquet_cache_head->total_alloc_nblocks);
+	__total_alloc_nblocks_last = pg_atomic_exchange_u64(&parquet_cache_head->__total_alloc_nblocks_last,
+														total_alloc_nblocks);
+	total_evict_nblocks = pg_atomic_read_u64(&parquet_cache_head->total_evict_nblocks);
+	__total_evict_nblocks_last = pg_atomic_exchange_u64(&parquet_cache_head->__total_evict_nblocks_last,
+														total_evict_nblocks);
+	total_lookup_caches = pg_atomic_read_u64(&parquet_cache_head->total_lookup_caches);
+	__total_lookup_caches_last = pg_atomic_exchange_u64(&parquet_cache_head->__total_lookup_caches_last,
+														total_lookup_caches);
+	total_hit_caches = pg_atomic_read_u64(&parquet_cache_head->total_hit_caches);
+	__total_hit_caches_last = pg_atomic_exchange_u64(&parquet_cache_head->__total_hit_caches_last,
+													 total_hit_caches);
 	initStringInfo(&buf);
 	appendStringInfoSpaces(&buf, VARHDRSZ);
 	appendStringInfo(&buf,
@@ -809,7 +836,7 @@ pgstrom_parquet_cache_info(PG_FUNCTION_ARGS)
 					 ", \"free_blocks\" : %ld"
 					 ", \"active_ratio\" : \"%.2f%%\""
 					 ", \"num_cached_chunks\" : %ld"
-					 ", \"total_actual_usage\" : \"%s\"",
+					 ", \"current_actual_usage\" : \"%s\"",
 					 pgstrom_parquet_cache_path,
 					 format_bytesz(cache_size),
 					 format_bytesz(block_size),
@@ -818,10 +845,10 @@ pgstrom_parquet_cache_info(PG_FUNCTION_ARGS)
 					 parquet_cache_head->num_blocks - num_active_blocks,
 					 100.0 * (double)num_active_blocks / (double)parquet_cache_head->num_blocks,
 					 num_cached_chunks,
-					 format_bytesz(total_actual_usage));
+					 format_bytesz(current_actual_usage));
 	if (num_active_blocks > 0)
 	{
-		double	ratio = 100.0 * (double)total_actual_usage /
+		double	ratio = 100.0 * (double)current_actual_usage /
 								(double)(num_active_blocks * block_size);
 		appendStringInfo(&buf,", \"cache_usage_ratio\" : %.2f%%", ratio);
 	}
@@ -829,6 +856,27 @@ pgstrom_parquet_cache_info(PG_FUNCTION_ARGS)
 	{
 		appendStringInfo(&buf,", \"cache_usage_ratio\" : null");
 	}
+	appendStringInfo(&buf,
+					 ", \"total_alloc_nblocks\" : %lu"
+					 ", \"delta_alloc_nblocks\" : %lu"
+					 ", \"total_evict_nblocks\" : %lu"
+					 ", \"delta_evict_nblocks\" : %lu"
+					 ", \"total_lookup_caches\" : %lu"
+					 ", \"delta_lookup_caches\" : %lu"
+					 ", \"total_hit_caches\" : %lu"
+					 ", \"delta_hit_caches\" : %lu",
+					 total_alloc_nblocks,
+					 (total_alloc_nblocks > __total_alloc_nblocks_last
+					  ? (total_alloc_nblocks - __total_alloc_nblocks_last) : 0),
+					 total_evict_nblocks,
+					 (total_evict_nblocks > __total_evict_nblocks_last
+					  ? (total_evict_nblocks - __total_evict_nblocks_last) : 0),
+					 total_lookup_caches,
+					 (total_lookup_caches > __total_lookup_caches_last
+					  ? (total_lookup_caches - __total_lookup_caches_last) : 0),
+					 total_hit_caches,
+					 (total_hit_caches > __total_hit_caches_last
+					  ? (total_hit_caches - __total_hit_caches_last) : 0));
 	appendStringInfo(&buf, " }");
 
 	SET_VARSIZE(buf.data, buf.len);
@@ -905,7 +953,15 @@ pgstrom_startup_parquet_cache(void)
 	dlist_init(&parquet_cache_head->lru_list);
 	pg_atomic_init_u64(&parquet_cache_head->num_active_blocks, 0);
 	pg_atomic_init_u64(&parquet_cache_head->num_cached_chunks, 0);
-	pg_atomic_init_u64(&parquet_cache_head->total_actual_usage, 0);
+	pg_atomic_init_u64(&parquet_cache_head->current_actual_usage, 0);
+	pg_atomic_init_u64(&parquet_cache_head->total_alloc_nblocks,0);
+	pg_atomic_init_u64(&parquet_cache_head->__total_alloc_nblocks_last,0);
+	pg_atomic_init_u64(&parquet_cache_head->total_evict_nblocks,0);
+	pg_atomic_init_u64(&parquet_cache_head->__total_evict_nblocks_last,0);
+	pg_atomic_init_u64(&parquet_cache_head->total_lookup_caches,0);
+	pg_atomic_init_u64(&parquet_cache_head->__total_lookup_caches_last,0);
+	pg_atomic_init_u64(&parquet_cache_head->total_hit_caches,0);
+	pg_atomic_init_u64(&parquet_cache_head->__total_hit_caches_last,0);
 
 	for (uint32_t i=0; i < pgstrom_parquet_cache_nblocks; i++)
 	{

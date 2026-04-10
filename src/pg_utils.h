@@ -257,15 +257,37 @@ static inline char *
 __format_bytesz(char *buffer, size_t bufsz, size_t nbytes)
 {
 	if (nbytes > (1UL<<43))
-		snprintf(buffer, bufsz, "%.2fTB", (double)nbytes / (double)(1UL<<40));
+	{
+		if ((nbytes & ((1UL<<40)-1)) == 0)
+			snprintf(buffer, bufsz, "%luTB", (nbytes>>40));
+		else
+			snprintf(buffer, bufsz, "%.2fTB", (double)nbytes / (double)(1UL<<40));
+	}
 	else if (nbytes > (1UL<<33))
-		snprintf(buffer, bufsz, "%.2fGB", (double)nbytes / (double)(1UL<<30));
+	{
+		if ((nbytes & ((1UL<<30)-1)) == 0)
+			snprintf(buffer, bufsz, "%luGB", (nbytes>>30));
+		else
+			snprintf(buffer, bufsz, "%.2fGB", (double)nbytes / (double)(1UL<<30));
+	}
 	else if (nbytes > (1UL<<23))
-		snprintf(buffer, bufsz, "%.2fMB", (double)nbytes / (double)(1UL<<20));
+	{
+		if ((nbytes & ((1UL<<20)-1)) == 0)
+			snprintf(buffer, bufsz, "%luMB", (nbytes>>20));
+		else
+			snprintf(buffer, bufsz, "%.2fMB", (double)nbytes / (double)(1UL<<20));
+	}
 	else if (nbytes > (1UL<<13))
-		snprintf(buffer, bufsz, "%.2fKB", (double)nbytes / (double)(1UL<<10));
+	{
+		if ((nbytes & ((1UL<<10)-1)) == 0)
+			snprintf(buffer, bufsz, "%luKB", (nbytes>>10));
+		else
+			snprintf(buffer, bufsz, "%.2fKB", (double)nbytes / (double)(1UL<<10));
+	}
 	else
+	{
 		snprintf(buffer, bufsz, "%uB", (unsigned int)nbytes);
+	}
 	return buffer;
 }
 #define format_bytesz(nbytes)	\
