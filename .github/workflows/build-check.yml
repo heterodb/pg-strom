@@ -3,7 +3,7 @@ name: Build Check
 # Run build verification on PR creation (temporary) and after approval.
 on:
   pull_request:
-    types: [opened, reopened]
+    types: [opened, reopened, synchronize]
   pull_request_review:
     types: [submitted]
   push:
