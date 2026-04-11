@@ -1737,6 +1737,13 @@ codegen_const_expression(codegen_context *context,
 	return 0;
 }
 
+/*
+ * codegen_pseudo_const_expression
+ *
+ * If a sub-portion of expression is completely computable at CPU side, and
+ * immutable through the Scan, we calculate it at session-info construction.
+ */
+static bool		try_replace_expr_by_pseudo_const = true;
 static int
 codegen_pseudo_const_expression(codegen_context *context,
 								StringInfo buf, int curr_depth,
@@ -2514,6 +2521,7 @@ codegen_casewhen_expression(codegen_context *context,
 	uint32_t	stack_usage_max = stack_usage_saved;
 	int			pos = -1;
 	int			saved_casetest_key_slot_id = codegen_casetest_key_slot_id;
+	bool		saved_replace_expr_by_pseudo_const = try_replace_expr_by_pseudo_const;
 
 	/* check result type */
 	dtype = pgstrom_devtype_lookup(caseexpr->casetype);
@@ -2556,6 +2564,7 @@ codegen_casewhen_expression(codegen_context *context,
 
 	PG_TRY();
 	{
+		try_replace_expr_by_pseudo_const = false;
 		/* WHEN ... THEN ... */
 		foreach (lc, caseexpr->args)
 		{
@@ -2594,10 +2603,12 @@ codegen_casewhen_expression(codegen_context *context,
 	PG_CATCH();
 	{
 		codegen_casetest_key_slot_id = saved_casetest_key_slot_id;
+		try_replace_expr_by_pseudo_const = saved_replace_expr_by_pseudo_const;
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
 	codegen_casetest_key_slot_id = saved_casetest_key_slot_id;
+	try_replace_expr_by_pseudo_const = saved_replace_expr_by_pseudo_const;
 
 	if (buf)
 	{
@@ -2769,7 +2780,8 @@ codegen_expression_walker(codegen_context *context,
 	 *
 	 * A simple constant itself, however, is represented as a ConstExpr.
 	 */
-	if (!IsA(expr, Const) && is_pseudo_constant_clause((Node *)expr))
+	if (try_replace_expr_by_pseudo_const &&
+		!IsA(expr, Const) && is_pseudo_constant_clause((Node *)expr))
 		return codegen_pseudo_const_expression(context, buf, curr_depth, expr);
 
 	context->stack_usage += XPUCODE_STACK_USAGE_NORMAL;

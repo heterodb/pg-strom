@@ -25,6 +25,7 @@ typedef struct {
 	/* state control */
 	int32_t			refcnt;		/* -1: not ready (WIP), > 0: someone in use */
 	uint32_t		nr_pages;	/* usage of this block, by # of pages */
+	int32_t			lru_bonus;	/* increased by 1, per cache hit */
 	/* arrow buffer definitions */
 	uint64_t		nullmap_length;
 	uint64_t		values_length;
@@ -49,7 +50,16 @@ typedef struct {
 	/* Statistics */
 	pg_atomic_uint64	num_active_blocks;
 	pg_atomic_uint64	num_cached_chunks;
-	pg_atomic_uint64	total_actual_usage;
+	pg_atomic_uint64	current_actual_usage;
+	/* Statistics (only increment) */
+	pg_atomic_uint64	total_alloc_nblocks;
+	pg_atomic_uint64	__total_alloc_nblocks_last;
+	pg_atomic_uint64	total_evict_nblocks;
+	pg_atomic_uint64	__total_evict_nblocks_last;
+	pg_atomic_uint64	total_lookup_caches;
+	pg_atomic_uint64	__total_lookup_caches_last;
+	pg_atomic_uint64	total_hit_caches;
+	pg_atomic_uint64	__total_hit_caches_last;
 } parquetCacheHead;
 
 /*
@@ -60,7 +70,9 @@ static shmem_startup_hook_type shmem_startup_next = NULL;
 static char	   *pgstrom_parquet_cache_path;				/* GUC */
 static int		pgstrom_parquet_cache_size_mb;			/* GUC */
 static int		pgstrom_parquet_cache_unitsz_mb;		/* GUC */
-static int		pgstrom_parquet_cache_eviction_seconds;	/* GUC */
+static double	pgstrom_parquet_cache_eviction_min_seconds; /* GUC */
+static double	pgstrom_parquet_cache_eviction_max_seconds; /* GUC */
+static double	pgstrom_parquet_cache_eviction_bonus;	/* GUC */
 static double	pgstrom_parquet_cache_target_usage;		/* GUC */
 static int		pgstrom_parquet_cache_max_async_write;	/* GUC */
 static uint64_t	pgstrom_parquet_cache_nblocks;		/* immutable */
@@ -81,16 +93,8 @@ __parquetCacheFileOffset(const parquetCacheEntry *entry)
 static inline uint64_t
 __timespec_to_uts(const struct timespec *t_spec)
 {
-	return ((uint64_t)t_spec->tv_sec * 1000000UL +
+	return ((uint64_t)t_spec->tv_sec  * 1000000UL +
 			(uint64_t)t_spec->tv_nsec / 1000UL);
-}
-
-/* __timespec_to_utime */
-static inline uint64_t
-__timeval_to_uts(const struct timeval *t_val)
-{
-	return ((uint64_t)t_val->tv_sec * 1000000UL +
-			(uint64_t)t_val->tv_usec);
 }
 
 /*
@@ -167,12 +171,18 @@ parquetCacheLookup(const struct stat *pq_fstat,
 				// Note that negative refcnt means someone is still writing out
 				// the Arrow buffers, but works in progress, and not ready.
 				entry->refcnt++;
+				entry->lru_bonus++;
 				result = entry;
 			}
 			break;
 		}
 	}
 	pthreadMutexUnlock(&parquet_cache_head->hash_locks[slot_id]);
+	/* update stats */
+	pg_atomic_fetch_add_u64(&parquet_cache_head->total_lookup_caches, 1);
+	if (result)
+		pg_atomic_fetch_add_u64(&parquet_cache_head->total_hit_caches, 1);
+
 	return result;
 }
 
@@ -184,13 +194,13 @@ parquetCacheRelease(void *__entry)
 {
 	parquetCacheEntry *entry = (parquetCacheEntry *)__entry;
 	uint32_t	slot_id = entry->hash % parquet_cache_head->hash_nslots;
-	struct timeval tv;
+	struct timespec tv;
 
 	pthreadMutexLock(&parquet_cache_head->hash_locks[slot_id]);
 	assert(entry->refcnt > 0);
-	gettimeofday(&tv, NULL);
 	pthreadMutexLock(&parquet_cache_head->lru_lock);
-	entry->lru_timestamp = __timeval_to_uts(&tv);
+	if (clock_gettime(CLOCK_REALTIME, &tv) == 0)
+		entry->lru_timestamp = __timespec_to_uts(&tv);
 	dlist_move_tail(&parquet_cache_head->lru_list, &entry->lru_chain);
 	pthreadMutexUnlock(&parquet_cache_head->lru_lock);
 	entry->refcnt--;
@@ -314,66 +324,108 @@ __parquetCacheReclaimBlocks(int target)
 	uint64_t	lru_threshold;
 	uint64_t	lru_latest = 0;
 	dlist_head	pending;
-	struct timeval tval;
+	struct timespec tv;
 	dlist_mutable_iter iter;
 
-	gettimeofday(&tval, NULL);
-	lru_threshold = __timeval_to_uts(&tval)
-		- (uint64_t)pgstrom_parquet_cache_eviction_seconds * 1000000L;
+	if (clock_gettime(CLOCK_REALTIME, &tv) != 0)
+	{
+		__Notice("failed on clock_gettime(CLOCK_REALTIME): %m");
+		return;		/* should not happen */
+	}
+	lru_threshold = __timespec_to_uts(&tv)
+		- (pgstrom_parquet_cache_eviction_min_seconds
+		   + (pgstrom_parquet_cache_eviction_max_seconds -
+			  pgstrom_parquet_cache_eviction_min_seconds) * drand48()) * 1000000.0;
 	dlist_init(&pending);
 	pthreadMutexLock(&parquet_cache_head->lru_lock);
+	/*
+	 * When a worker thread is idle, it performs maintenance work to release
+	 * active cache blocks so that the cache usage converges to the value
+	 * specified by pg_strom.parquet_cache_target_usage.
+	 *
+	 * At that time, the actual number of blocks to be released has to be
+	 * calculated while holding lru_lock. Otherwise, if many worker threads
+	 * become idle at once and start reclamation simultaneously, it is not
+	 * possible to determine the correct number of blocks to reclaim in advance
+	 * outside the lock.
+	 */
+	if (target < 0)
+	{
+		uint64_t	nactives = pg_atomic_read_u64(&parquet_cache_head->num_active_blocks);
+		uint64_t	nblocks = ((double)pgstrom_parquet_cache_nblocks * 
+							   (double)pgstrom_parquet_cache_target_usage / 100.0);
+		if (nactives > nblocks)
+			target = Min(nactives - nblocks, 50);
+	}
+	if (target <= 0)
+		goto skip;
 	dlist_foreach_modify (iter, &parquet_cache_head->lru_list)
 	{
 		parquetCacheEntry *entry = dlist_container(parquetCacheEntry,
 												   lru_chain, iter.cur);
 		uint32_t	slot_id = entry->hash % parquet_cache_head->hash_nslots;
-		/* no recently accessed entry should exist */
-		if (entry->lru_timestamp >= lru_threshold)
-			break;
+
 		if (pthreadMutexTryLock(&parquet_cache_head->hash_locks[slot_id]))
 		{
 			if (entry->refcnt == 0)
 			{
-				dlist_delete(&entry->lru_chain);
-				dlist_delete(&entry->chain);
-				dlist_push_tail(&pending, &entry->chain);
-				reclaimed += 1 + __dlist_length(&entry->siblings);
-				if (lru_latest < entry->lru_timestamp)
-					lru_latest = entry->lru_timestamp;
+				double	bonus = 0.0;
+
+				if (entry->lru_bonus > 0)
+					bonus = (double)(entry->lru_bonus--) * pgstrom_parquet_cache_eviction_bonus;
+
+				if (entry->lru_timestamp >= lru_threshold)
+					target = 0;		/* no entry should be found, any more */
+				else if (entry->lru_timestamp + (uint64_t)(bonus * 1000000.0) < lru_threshold)
+				{
+					dlist_delete(&entry->lru_chain);
+					dlist_delete(&entry->chain);
+					dlist_push_tail(&pending, &entry->chain);
+					reclaimed += 1 + __dlist_length(&entry->siblings);
+				}
 			}
 			pthreadMutexUnlock(&parquet_cache_head->hash_locks[slot_id]);
 			if (reclaimed >= target)
 				break;
 		}
 	}
+skip:
 	pthreadMutexUnlock(&parquet_cache_head->lru_lock);
-	/* back to the free list */
-	pthreadMutexLock(&parquet_cache_head->free_lock);
-	while (!dlist_is_empty(&pending))
+	/* back to the free list, if any */
+	if (!dlist_is_empty(&pending))
 	{
-		parquetCacheEntry *entry
-			= dlist_container(parquetCacheEntry, chain,
-							  dlist_pop_head_node(&pending));
-		size_t	usage = parquetCacheLength(entry);
-		int		nr_blocks = 1;
-		
-		while (!dlist_is_empty(&entry->siblings))
+		uint64_t	nr_blocks = 0;
+		uint64_t	nr_chunks = 0;
+		uint64_t	actual_usage = 0;
+
+		pthreadMutexLock(&parquet_cache_head->free_lock);
+		while (!dlist_is_empty(&pending))
 		{
-			parquetCacheEntry *__entry
+			parquetCacheEntry *entry
 				= dlist_container(parquetCacheEntry, chain,
-								  dlist_pop_head_node(&entry->siblings));
-			dlist_delete(&__entry->chain);
-			dlist_push_head(&parquet_cache_head->free_list, &__entry->chain);
+								  dlist_pop_head_node(&pending));
+			actual_usage += parquetCacheLength(entry);
 			nr_blocks++;
+			nr_chunks++;
+			while (!dlist_is_empty(&entry->siblings))
+			{
+				parquetCacheEntry *__entry
+					= dlist_container(parquetCacheEntry, chain,
+									  dlist_pop_head_node(&entry->siblings));
+				dlist_delete(&__entry->chain);
+				dlist_push_head(&parquet_cache_head->free_list, &__entry->chain);
+				nr_blocks++;
+			}
+			dlist_delete(&entry->chain);
+			dlist_push_head(&parquet_cache_head->free_list, &entry->chain);
 		}
-		dlist_delete(&entry->chain);
-		dlist_push_head(&parquet_cache_head->free_list, &entry->chain);
+		pthreadMutexUnlock(&parquet_cache_head->free_lock);
 		/* update statistics */
 		pg_atomic_fetch_sub_u64(&parquet_cache_head->num_active_blocks, nr_blocks);
-		pg_atomic_fetch_sub_u64(&parquet_cache_head->num_cached_chunks, 1);
-		pg_atomic_fetch_sub_u64(&parquet_cache_head->total_actual_usage, usage);
+		pg_atomic_fetch_sub_u64(&parquet_cache_head->num_cached_chunks, nr_chunks);
+		pg_atomic_fetch_sub_u64(&parquet_cache_head->current_actual_usage, actual_usage);
+		pg_atomic_fetch_add_u64(&parquet_cache_head->total_evict_nblocks, nr_blocks);
 	}
-	pthreadMutexUnlock(&parquet_cache_head->free_lock);
 	if (reclaimed > 0)
 		__Info("parquet-cache evicted %d blocks, latest access at %s",
 			   reclaimed,
@@ -460,6 +512,7 @@ __parquetCacheAsyncWriteOne(parquetCacheWriteAsyncData *data, char *block_buf)
 	bool		retry_done = false;
 	uint32_t	slot_id;
 	dlist_iter	iter;
+	struct timespec tv;
 
 	assert((uintptr_t)block_buf == PAGE_ALIGN((uintptr_t)block_buf));
 	if (nr_blocks == 0)
@@ -534,6 +587,8 @@ again:
 	/* ok, I am responsible to write out this cache entry */
 	pthreadMutexLock(&parquet_cache_head->lru_lock);
 	dlist_push_tail(&parquet_cache_head->lru_list, &entry->lru_chain);
+	clock_gettime(CLOCK_REALTIME, &tv);
+	entry->lru_timestamp = __timespec_to_uts(&tv);
 	pthreadMutexUnlock(&parquet_cache_head->lru_lock);
 	dlist_push_tail(&parquet_cache_head->hash_slots[slot_id], &entry->chain);
 	pthreadMutexUnlock(&parquet_cache_head->hash_locks[slot_id]);
@@ -583,7 +638,8 @@ again:
 	pthreadMutexUnlock(&parquet_cache_head->hash_locks[slot_id]);
 	/* 6. update statistics and debug message */
 	pg_atomic_fetch_add_u64(&parquet_cache_head->num_cached_chunks, 1);
-	pg_atomic_fetch_add_u64(&parquet_cache_head->total_actual_usage, required);
+	pg_atomic_fetch_add_u64(&parquet_cache_head->current_actual_usage, required);
+	pg_atomic_fetch_add_u64(&parquet_cache_head->total_alloc_nblocks, block_cnt);
 	__Debug("parquet cache written: st_dev=%ld, st_ino=%ld, st_mtime=%s, row-group=%u, field-id=%u, nr-blocks=%u, length=%s",
 			data->pq_fstat.st_dev,
 			data->pq_fstat.st_ino,
@@ -668,7 +724,7 @@ __parquetCacheAsyncWriteWorker(void *__priv)
 			pg_atomic_fetch_add_u32(&parquet_cache_async_write_num_available_workers, 1);
 			if (pthreadCondWaitTimeout(&parquet_cache_async_write_cond,
 									   &parquet_cache_async_write_mutex,
-									   10000L))
+									   10000L))		/* 10sec */
 			{
 				/* someone wake up this worker */
 				pg_atomic_fetch_sub_u32(&parquet_cache_async_write_num_available_workers, 1);
@@ -679,19 +735,7 @@ __parquetCacheAsyncWriteWorker(void *__priv)
 				pg_atomic_fetch_sub_u32(&parquet_cache_async_write_num_available_workers, 1);
 				/* maintenance work */
 				if (noop_counter++ < 30)
-				{
-					uint64_t	nactives, nblocks;
-					double		free_ratio = (100.0 - pgstrom_parquet_cache_target_usage);
-
-					nactives = pg_atomic_read_u64(&parquet_cache_head->num_active_blocks);
-					nblocks = (free_ratio / 100.0) * (double)pgstrom_parquet_cache_nblocks;
-					if (nactives > nblocks)
-					{
-						int		target = Min(nactives - nblocks, 100);
-
-						__parquetCacheReclaimBlocks(target);
-					}
-				}
+					__parquetCacheReclaimBlocks(-1);
 				else
 				{
 					/* after 5min of no-operations, exit worker-thread */
@@ -753,19 +797,34 @@ PUBLIC_FUNCTION(Datum)
 pgstrom_parquet_cache_info(PG_FUNCTION_ARGS)
 {
 	StringInfoData	buf;
-	uint64_t	num_active_blocks;
-	uint64_t	num_cached_chunks;
-	uint64_t	total_actual_usage;
 	size_t		cache_size = (size_t)pgstrom_parquet_cache_size_mb << 20;
 	size_t		block_size = (size_t)pgstrom_parquet_cache_unitsz_mb << 20;
+	uint64_t	num_active_blocks;
+	uint64_t	num_cached_chunks;
+	uint64_t	current_actual_usage;
+	uint64_t	total_alloc_nblocks, __total_alloc_nblocks_last;
+	uint64_t	total_evict_nblocks, __total_evict_nblocks_last;
+	uint64_t	total_lookup_caches, __total_lookup_caches_last;
+	uint64_t	total_hit_caches, __total_hit_caches_last;
 
 	if (!pgstrom_parquet_cache_path)
 		PG_RETURN_POINTER(cstring_to_text("{ \"cache_path\" : null }"));
 	assert(parquet_cache_head != NULL);
 	num_active_blocks = pg_atomic_read_u64(&parquet_cache_head->num_active_blocks);
 	num_cached_chunks = pg_atomic_read_u64(&parquet_cache_head->num_cached_chunks);
-	total_actual_usage = pg_atomic_read_u64(&parquet_cache_head->total_actual_usage);
-
+	current_actual_usage = pg_atomic_read_u64(&parquet_cache_head->current_actual_usage);
+	total_alloc_nblocks = pg_atomic_read_u64(&parquet_cache_head->total_alloc_nblocks);
+	__total_alloc_nblocks_last = pg_atomic_exchange_u64(&parquet_cache_head->__total_alloc_nblocks_last,
+														total_alloc_nblocks);
+	total_evict_nblocks = pg_atomic_read_u64(&parquet_cache_head->total_evict_nblocks);
+	__total_evict_nblocks_last = pg_atomic_exchange_u64(&parquet_cache_head->__total_evict_nblocks_last,
+														total_evict_nblocks);
+	total_lookup_caches = pg_atomic_read_u64(&parquet_cache_head->total_lookup_caches);
+	__total_lookup_caches_last = pg_atomic_exchange_u64(&parquet_cache_head->__total_lookup_caches_last,
+														total_lookup_caches);
+	total_hit_caches = pg_atomic_read_u64(&parquet_cache_head->total_hit_caches);
+	__total_hit_caches_last = pg_atomic_exchange_u64(&parquet_cache_head->__total_hit_caches_last,
+													 total_hit_caches);
 	initStringInfo(&buf);
 	appendStringInfoSpaces(&buf, VARHDRSZ);
 	appendStringInfo(&buf,
@@ -777,7 +836,7 @@ pgstrom_parquet_cache_info(PG_FUNCTION_ARGS)
 					 ", \"free_blocks\" : %ld"
 					 ", \"active_ratio\" : \"%.2f%%\""
 					 ", \"num_cached_chunks\" : %ld"
-					 ", \"total_actual_usage\" : \"%s\"",
+					 ", \"current_actual_usage\" : \"%s\"",
 					 pgstrom_parquet_cache_path,
 					 format_bytesz(cache_size),
 					 format_bytesz(block_size),
@@ -786,10 +845,10 @@ pgstrom_parquet_cache_info(PG_FUNCTION_ARGS)
 					 parquet_cache_head->num_blocks - num_active_blocks,
 					 100.0 * (double)num_active_blocks / (double)parquet_cache_head->num_blocks,
 					 num_cached_chunks,
-					 format_bytesz(total_actual_usage));
+					 format_bytesz(current_actual_usage));
 	if (num_active_blocks > 0)
 	{
-		double	ratio = 100.0 * (double)total_actual_usage /
+		double	ratio = 100.0 * (double)current_actual_usage /
 								(double)(num_active_blocks * block_size);
 		appendStringInfo(&buf,", \"cache_usage_ratio\" : %.2f%%", ratio);
 	}
@@ -797,6 +856,27 @@ pgstrom_parquet_cache_info(PG_FUNCTION_ARGS)
 	{
 		appendStringInfo(&buf,", \"cache_usage_ratio\" : null");
 	}
+	appendStringInfo(&buf,
+					 ", \"total_alloc_nblocks\" : %lu"
+					 ", \"delta_alloc_nblocks\" : %lu"
+					 ", \"total_evict_nblocks\" : %lu"
+					 ", \"delta_evict_nblocks\" : %lu"
+					 ", \"total_lookup_caches\" : %lu"
+					 ", \"delta_lookup_caches\" : %lu"
+					 ", \"total_hit_caches\" : %lu"
+					 ", \"delta_hit_caches\" : %lu",
+					 total_alloc_nblocks,
+					 (total_alloc_nblocks > __total_alloc_nblocks_last
+					  ? (total_alloc_nblocks - __total_alloc_nblocks_last) : 0),
+					 total_evict_nblocks,
+					 (total_evict_nblocks > __total_evict_nblocks_last
+					  ? (total_evict_nblocks - __total_evict_nblocks_last) : 0),
+					 total_lookup_caches,
+					 (total_lookup_caches > __total_lookup_caches_last
+					  ? (total_lookup_caches - __total_lookup_caches_last) : 0),
+					 total_hit_caches,
+					 (total_hit_caches > __total_hit_caches_last
+					  ? (total_hit_caches - __total_hit_caches_last) : 0));
 	appendStringInfo(&buf, " }");
 
 	SET_VARSIZE(buf.data, buf.len);
@@ -873,7 +953,15 @@ pgstrom_startup_parquet_cache(void)
 	dlist_init(&parquet_cache_head->lru_list);
 	pg_atomic_init_u64(&parquet_cache_head->num_active_blocks, 0);
 	pg_atomic_init_u64(&parquet_cache_head->num_cached_chunks, 0);
-	pg_atomic_init_u64(&parquet_cache_head->total_actual_usage, 0);
+	pg_atomic_init_u64(&parquet_cache_head->current_actual_usage, 0);
+	pg_atomic_init_u64(&parquet_cache_head->total_alloc_nblocks,0);
+	pg_atomic_init_u64(&parquet_cache_head->__total_alloc_nblocks_last,0);
+	pg_atomic_init_u64(&parquet_cache_head->total_evict_nblocks,0);
+	pg_atomic_init_u64(&parquet_cache_head->__total_evict_nblocks_last,0);
+	pg_atomic_init_u64(&parquet_cache_head->total_lookup_caches,0);
+	pg_atomic_init_u64(&parquet_cache_head->__total_lookup_caches_last,0);
+	pg_atomic_init_u64(&parquet_cache_head->total_hit_caches,0);
+	pg_atomic_init_u64(&parquet_cache_head->__total_hit_caches_last,0);
 
 	for (uint32_t i=0; i < pgstrom_parquet_cache_nblocks; i++)
 	{
@@ -933,16 +1021,36 @@ pgstrom_init_parquet_cache(void)
 							PGC_POSTMASTER | GUC_NO_SHOW_ALL,
 							GUC_NOT_IN_SAMPLE | GUC_UNIT_MB,
 							NULL, NULL, NULL);
-	DefineCustomIntVariable("pg_strom.parquet_cache_eviction_seconds",
-							"minimum seconds before Parquet cache eviction",
-							NULL,
-							&pgstrom_parquet_cache_eviction_seconds,
-							600,	/* 10min */
-							0,
-							INT_MAX,
-							PGC_POSTMASTER,
-							GUC_NOT_IN_SAMPLE | GUC_NO_SHOW_ALL,
-							NULL, NULL, NULL);
+	DefineCustomRealVariable("pg_strom.parquet_cache_eviction_min_seconds",
+							 "[experimental] minimum seconds before Parquet cache eviction",
+							 NULL,
+							 &pgstrom_parquet_cache_eviction_min_seconds,
+							 600.0,	/* 10min */
+							 0.0,
+							 FLT_MAX,
+							 PGC_POSTMASTER,
+							 GUC_NOT_IN_SAMPLE | GUC_NO_SHOW_ALL,
+							 NULL, NULL, NULL);
+	DefineCustomRealVariable("pg_strom.parquet_cache_eviction_max_seconds",
+							 "[experimental] maxmum seconds before Parquet cache eviction",
+							 NULL,
+							 &pgstrom_parquet_cache_eviction_max_seconds,
+							 7200.0,	/* 2 hour */
+							 pgstrom_parquet_cache_eviction_min_seconds,
+							 FLT_MAX,
+							 PGC_POSTMASTER,
+							 GUC_NOT_IN_SAMPLE | GUC_NO_SHOW_ALL,
+							 NULL, NULL, NULL);
+	DefineCustomRealVariable("pg_strom.parquet_cache_eviction_bonus",
+							 "[experimental] bonus seconds per access for Parquet cache eviction",
+							 NULL,
+							 &pgstrom_parquet_cache_eviction_bonus,
+							 2.0,		/* 2.0sec per access */
+							 0.0,
+							 FLT_MAX,
+							 PGC_POSTMASTER,
+							 GUC_NOT_IN_SAMPLE | GUC_NO_SHOW_ALL,
+							 NULL, NULL, NULL);
 	DefineCustomRealVariable("pg_strom.parquet_cache_target_usage",
 							 "kick Parquet cache eviction when active block ratio exceed this value",
 							 NULL,
