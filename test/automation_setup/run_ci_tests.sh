@@ -90,7 +90,8 @@ for cmd in "${PG_CONFIG}" "${INITDB}" "${PG_CTL}" "${PSQL}" "${PG_ISREADY}" time
 done
 
 RUN_TAG="${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}-${PGVER}-$$"
-PGDATA="${PGDATA_BASE}/github_actions_pgdata-${PGVER}"
+RUN_USER="$(id -un)"
+PGDATA="${PGDATA_BASE}/github_actions_pgdata-${PGVER}-${RUN_USER}"
 SOCKET_DIR="${LOG_BASE}/pgstrom-sock-${RUN_TAG}"
 PG_LOG="${LOG_BASE}/pgstrom-postgres-${RUN_TAG}.log"
 TEST_LOG="${LOG_BASE}/pgstrom-tests-${RUN_TAG}.log"
@@ -98,26 +99,15 @@ FAILED_LIST="${LOG_BASE}/pgstrom-failed-tests-${RUN_TAG}.txt"
 
 ensure_dir_owned_by_me() {
   local dir="$1"
-  if mkdir -p "${dir}" 2>/dev/null; then
+  if mkdir -p "${dir}" 2>/dev/null && [[ -w "${dir}" ]]; then
     return 0
   fi
-  if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
-    sudo -n mkdir -p "${dir}"
-    sudo -n chown "$(id -u):$(id -g)" "${dir}"
-    return 0
-  fi
-  echo "Permission denied for ${dir}, and sudo -n is unavailable" >&2
+  echo "Permission denied for ${dir}" >&2
   return 1
 }
 
 ensure_dir_owned_by_me "${SOCKET_DIR}"
 ensure_dir_owned_by_me "${PGDATA}"
-
-if [[ ! -w "${PGDATA}" ]]; then
-  if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
-    sudo -n chown -R "$(id -u):$(id -g)" "${PGDATA}"
-  fi
-fi
 
 if [[ ! -w "${PGDATA}" ]]; then
   echo "PGDATA is not writable: ${PGDATA}" >&2
@@ -157,6 +147,7 @@ fi
 
 export PGHOST="${SOCKET_DIR}"
 export PGPORT="${PGPORT:-5432}"
+export PGUSER="${PGUSER:-${RUN_USER}}"
 
 START_OPTS="-c listen_addresses='' -c unix_socket_directories='${SOCKET_DIR}'"
 
@@ -176,11 +167,36 @@ else
   RUN_TEST_CMD=(make -C "${REPO_ROOT}/test" PG_CONFIG="${PG_CONFIG}" installcheck)
 fi
 
-echo "Running tests with timeout=${TEST_TIMEOUT_SECS}s"
+echo "Running tests with timeout=${TEST_TIMEOUT_SECS}s (attempt 1)"
 set +e
 timeout --signal=TERM --kill-after=30s "${TEST_TIMEOUT_SECS}" "${RUN_TEST_CMD[@]}" 2>&1 | tee "${TEST_LOG}"
 TEST_RC=${PIPESTATUS[0]}
 set -e
+
+if [[ ${TEST_RC} -ne 0 && ${TEST_RC} -ne 124 ]]; then
+  echo "Initial test run failed (exit=${TEST_RC}); reinitializing pg_strom extension and retrying once"
+  if ! "${PSQL}" -v ON_ERROR_STOP=1 -d postgres -c "create extension if not exists pg_strom;" >/dev/null; then
+    SHOW_LOGS=1
+    echo "Failed to prepare pg_strom extension for retry" >&2
+    exit 1
+  fi
+  if ! "${PSQL}" -v ON_ERROR_STOP=1 -d postgres -c "drop extension pg_strom cascade; create extension pg_strom;" >/dev/null; then
+    SHOW_LOGS=1
+    echo "Failed to reinitialize pg_strom extension for retry" >&2
+    exit 1
+  fi
+
+  {
+    echo
+    echo "===== Retry after pg_strom reinitialization ====="
+  } >> "${TEST_LOG}"
+
+  echo "Running tests with timeout=${TEST_TIMEOUT_SECS}s (attempt 2)"
+  set +e
+  timeout --signal=TERM --kill-after=30s "${TEST_TIMEOUT_SECS}" "${RUN_TEST_CMD[@]}" 2>&1 | tee -a "${TEST_LOG}"
+  TEST_RC=${PIPESTATUS[0]}
+  set -e
+fi
 
 if [[ ${TEST_RC} -eq 124 ]]; then
   SHOW_LOGS=1

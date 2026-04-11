@@ -1,9 +1,11 @@
 name: Build Check
 
-# Run a build verification after a pull request is approved.
+# Run build verification on PR creation (temporary) and after approval.
 on:
   pull_request:
-    types: [opened, synchronize]
+    types: [opened, reopened, synchronize]
+  pull_request_review:
+    types: [submitted]
   push:
     branches: [master]
   workflow_dispatch:
@@ -14,8 +16,15 @@ permissions:
 
 jobs:
   build:
-    name: Build with PostgreSQL ${{ matrix.pgver }}
-    if: github.event_name == 'workflow_dispatch' || github.event_name == 'push' || github.event_name == 'pull_request'
+    name: Build with PostgreSQL ${{ matrix.build_pgver }}
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.actor == 'kaigai') ||
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'pull_request_review' &&
+       github.event.review.state == 'approved' &&
+       (github.event.review.author_association == 'OWNER' ||
+        github.event.review.author_association == 'MEMBER'))
     # Temporary debug condition (disabled):
     # if: true
     runs-on: self-hosted
@@ -27,7 +36,7 @@ jobs:
       #   - 19.0
       #   - 17.10
       matrix:
-        pgver:
+        build_pgver:
           - 16.13
           - 17.9
           - 18.3
@@ -42,7 +51,7 @@ jobs:
           PSQLBIN_ROOT: ${{ env.PSQLBIN_ROOT }}
         run: |
           PSQLBIN_ROOT=${PSQLBIN_ROOT:-/actions-runner/psqlbin}
-          PG_CONFIG=${PSQLBIN_ROOT}/pgbin-${{ matrix.pgver }}/bin/pg_config
+          PG_CONFIG=${PSQLBIN_ROOT}/pgbin-${{ matrix.build_pgver }}/bin/pg_config
           if [ ! -x "${PG_CONFIG}" ]; then
             echo "pg_config not found: ${PG_CONFIG}" >&2
             exit 1
@@ -51,18 +60,18 @@ jobs:
           PG_CONFIG=${PG_CONFIG} make -C src -j$(nproc) install
 
       - name: Notify owner on failure
-        if: failure() && (github.event_name == 'pull_request' || github.event_name == 'push') && env.ACT != 'true'
+        if: failure() && (github.event_name == 'pull_request_review' || github.event_name == 'push') && env.ACT != 'true'
         uses: actions/github-script@v7
         with:
           script: |
             const eventName = context.eventName;
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
 
-            if (eventName === 'pull_request') {
+            if (eventName === 'pull_request_review') {
               const prAuthor = context.payload.pull_request.user.login;
               const prNumber = context.payload.pull_request.number;
               const body = [
-                `@${prAuthor} the build check failed for PostgreSQL ${{ matrix.pgver }} on PR #${prNumber}.`,
+                `@${prAuthor} the build check failed for PostgreSQL ${{ matrix.build_pgver }} on PR #${prNumber}.`,
                 '',
                 `Run: ${runUrl}`,
               ].join('\n');
@@ -79,7 +88,79 @@ jobs:
             if (eventName === 'push') {
               const pusher = context.actor;
               const body = [
-                `@${pusher} the build check failed for PostgreSQL ${{ matrix.pgver }} on push to \`${context.ref}\`.`,
+                `@${pusher} the build check failed for PostgreSQL ${{ matrix.build_pgver }} on push to \`${context.ref}\`.`,
+                '',
+                `Run: ${runUrl}`,
+              ].join('\n');
+
+              await github.rest.repos.createCommitComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                commit_sha: context.sha,
+                body,
+              });
+            }
+
+  regression:
+    name: Regression with PostgreSQL ${{ matrix.test_pgver }}
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.actor == 'kaigai') ||
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'pull_request_review' &&
+       github.event.review.state == 'approved' &&
+       (github.event.review.author_association == 'OWNER' ||
+        github.event.review.author_association == 'MEMBER'))
+    runs-on: self-hosted
+    timeout-minutes: 40
+    needs: build
+
+    strategy:
+      matrix:
+        test_pgver:
+          - 16.13
+          - 17.9
+          - 18.3
+      fail-fast: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run pg_strom regression tests
+        run: |
+          bash test/automation_setup/run_ci_tests.sh --pgver ${{ matrix.test_pgver }} --timeout 1200
+
+      - name: Notify owner on regression failure
+        if: failure() && (github.event_name == 'pull_request_review' || github.event_name == 'push') && env.ACT != 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const eventName = context.eventName;
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+
+            if (eventName === 'pull_request_review') {
+              const prAuthor = context.payload.pull_request.user.login;
+              const prNumber = context.payload.pull_request.number;
+              const body = [
+                `@${prAuthor} the regression check failed for PostgreSQL ${{ matrix.test_pgver }} on PR #${prNumber}.`,
+                '',
+                `Run: ${runUrl}`,
+              ].join('\n');
+
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                body,
+              });
+              return;
+            }
+
+            if (eventName === 'push') {
+              const pusher = context.actor;
+              const body = [
+                `@${pusher} the regression check failed for PostgreSQL ${{ matrix.test_pgver }} on push to \`${context.ref}\`.`,
                 '',
                 `Run: ${runUrl}`,
               ].join('\n');
