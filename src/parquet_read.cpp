@@ -735,7 +735,8 @@ simple_buffer:
 			cmeta->extra_length = 0;
 		}
 		/* write back to the parquet disk cache asynchronously */
-		parquetCacheWriteAsync(data);
+		if (data)
+			parquetCacheWriteAsync(data);
 	}
 	catch (const std::exception &e) {
 		if (data)
