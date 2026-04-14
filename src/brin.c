@@ -131,10 +131,10 @@ simple_match_clause_to_index(IndexOptInfo *index,
  */
 static int64_t
 estimateBrinIndexScanNBlocks(PlannerInfo *root,
-                                RelOptInfo *baserel,
-                                IndexOptInfo *index,
-                                IndexClauseSet *clauseset,
-                                List **p_indexQuals)
+							 RelOptInfo *baserel,
+							 IndexOptInfo *index,
+							 IndexClauseSet *clauseset,
+							 List **p_indexQuals)
 {
 	Relation		indexRel;
 	BrinStatsData	statsData;

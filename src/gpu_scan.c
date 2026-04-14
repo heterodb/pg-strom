@@ -69,7 +69,7 @@ pgstrom_is_gpuscan_state(const PlanState *ps)
 /*
  * sort_device_qualifiers
  */
-void
+static void
 sort_device_qualifiers(List *dev_quals_list, List *dev_costs_list)
 {
 	int			nitems = list_length(dev_quals_list);
@@ -115,48 +115,32 @@ sort_device_qualifiers(List *dev_quals_list, List *dev_costs_list)
 }
 
 /*
- * buildSimpleScanPlanInfo
+ * __gpuScanBuildPlanInfo
  */
 static pgstromPlanInfo *
-__buildSimpleScanPlanInfo(PlannerInfo *root,
-						  RelOptInfo *baserel,
-						  uint32_t xpu_task_flags,
-						  bool parallel_path,
-						  List *dev_quals,
-						  List *host_quals,
-						  Cardinality scan_nrows)
+__gpuScanBuildPlanInfo(PlannerInfo *root,
+					   RelOptInfo *baserel,
+					   List *scan_rels,
+					   List *dev_quals,
+					   List *host_quals,
+					   int parallel_nworkers)
 {
+	double		parallel_divisor = 1.0;
+	List	   *scan_child_relids = NIL;
+	Cost		startup_cost = pgstrom_gpu_setup_cost;
+	Cost		run_cost = 0.0;
+	Cost		final_cost = 0.0;
+	double		total_ntuples = 0.0;
+	double		total_npages = 0.0;
+	double		curr_ntuples;
+	ListCell   *lc;
+	Bitmapset  *outer_refs;
 	pgstromPlanInfo *pp_info;
-	Bitmapset	   *outer_refs = NULL;
-	IndexOptInfo   *indexOpt = NULL;
-	List		   *indexConds = NIL;
-	List		   *indexQuals = NIL;
-	int64_t			indexNBlocks = 0;
-	int				parallel_nworkers = 0;
-	double			parallel_divisor = 1.0;
-	double			spc_seq_page_cost;
-	double			spc_rand_page_cost;
-	Cost			startup_cost = 0.0;
-	Cost			disk_cost = 0.0;
-	Cost			run_cost = 0.0;
-	Cost			final_cost = 0.0;
-	double			avg_seq_page_cost;
-	QualCost		qcost;
-	double			ntuples = baserel->tuples;
-	double			selectivity;
 
-	/*
-	 * CPU Parallel parameters
-	 */
-	if (parallel_path)
+	if (parallel_nworkers > 0)
 	{
 		double	leader_contribution;
 
-		parallel_nworkers = compute_parallel_worker(baserel,
-													baserel->pages, -1,
-													max_parallel_workers_per_gather);
-		if (parallel_nworkers <= 0)
-			return NULL;
 		parallel_divisor = (double)parallel_nworkers;
 		if (parallel_leader_participation)
 		{
@@ -164,170 +148,286 @@ __buildSimpleScanPlanInfo(PlannerInfo *root,
 			if (leader_contribution > 0.0)
 				parallel_divisor += leader_contribution;
 		}
-		/* discount # of rows to be produced per backend */
-		ntuples    /= parallel_divisor;
-		scan_nrows /= parallel_divisor;
 	}
 
 	/*
-	 * Check device special disk-scan mode
+	 * count up for each relation's scan cost
 	 */
-	get_tablespace_page_costs(baserel->reltablespace,
-							  &spc_rand_page_cost,
-							  &spc_seq_page_cost);
-	startup_cost += pgstrom_gpu_setup_cost;
-	if (baseRelHasGpuCache(root, baserel) >= 0)
+	foreach (lc, scan_rels)
 	{
-		/* assume GPU-Cache is available */
-		avg_seq_page_cost = 0;
-	}
-	else if (GetOptimalGpuForBaseRel(root, baserel) != 0UL)
-	{
-		/* assume GPU-Direct SQL is available */
-		avg_seq_page_cost = spc_seq_page_cost * (1.0 - baserel->allvisfrac) +
-			pgstrom_gpu_direct_seq_page_cost * baserel->allvisfrac;
-	}
-	else
-	{
-		/* elsewhere, use PostgreSQL's storage layer */
-		avg_seq_page_cost = spc_seq_page_cost;
-	}
+		RelOptInfo *__rel = lfirst(lc);
+		double		__ntuples = __rel->tuples;
+		double		__npages = __rel->pages;
+		double		spc_rand_page_cost;
+		double		spc_seq_page_cost;
+		double		avg_page_cost;
+		double		disk_cost;
+		IndexOptInfo *indexOpt;
+		List	   *indexConds;
+		List	   *indexQuals;
+		int64_t		indexNBlocks;
 
-	/*
-	 * NOTE: ArrowGetForeignRelSize() already discount baserel->pages according
-	 * to the referenced columns, to adjust total amount of disk i/o.
-	 * So, we have nothing special to do here.
-	 */
-	disk_cost = avg_seq_page_cost * baserel->pages;
-	if (parallel_path)
-		disk_cost /= parallel_divisor;
-
-	/*
-	 * Is BRIN-index available?
-	 */
-	indexOpt = pgstromTryFindBrinIndex(root, baserel,
-									   &indexConds,
-									   &indexQuals,
-									   &indexNBlocks);
-	if (indexOpt)
-	{
-		Cost	index_disk_cost = (cost_brin_bitmap_build(root,
-														  baserel,
-														  indexOpt,
-														  indexQuals) +
-								   avg_seq_page_cost * indexNBlocks);
-		if (disk_cost > index_disk_cost)
+		get_tablespace_page_costs(__rel->reltablespace,
+								  &spc_rand_page_cost,
+								  &spc_seq_page_cost);
+		if (baseRelIsArrowFdw(__rel))
 		{
-			disk_cost = index_disk_cost;
-			if (baserel->pages > 0)
-				ntuples *= (double)indexNBlocks / (double)baserel->pages;
+			/*
+			 * NOTE: ArrowGetForeignRelSize() already discount baserel->pages
+			 * according to the referenced columns, to adjust total amount of
+			 * disk i/o.
+			 * So, we have nothing special to do here.
+			 */
+			avg_page_cost = spc_seq_page_cost * (1.0 - __rel->allvisfrac) +
+				pgstrom_gpu_direct_seq_page_cost * __rel->allvisfrac;
+		}
+		else if (baseRelHasGpuCache(root, __rel))
+		{
+			/* assume GPU-Cache is available */
+			avg_page_cost = 0.0;
+		}
+		else if (GetOptimalGpuForBaseRel(root, __rel))
+		{
+			/* assume GPU-Direct SQL is available */
+			avg_page_cost = spc_seq_page_cost * (1.0 - __rel->allvisfrac) +
+				pgstrom_gpu_direct_seq_page_cost * __rel->allvisfrac;
 		}
 		else
-			indexOpt = NULL;	/* disables BRIN-index if no benefit */
+		{
+			/* elsewhere, use PostgreSQL's storage layer */
+			avg_page_cost = spc_seq_page_cost;
+		}
+		disk_cost = avg_page_cost * (double)__rel->pages;
+
+		/*
+		 * Is BRIN-index available?
+		 */
+		indexOpt = pgstromTryFindBrinIndex(root, __rel,
+										   &indexConds,
+										   &indexQuals,
+										   &indexNBlocks);
+		if (indexOpt)
+		{
+			Cost	brin_ratio = ((double)indexNBlocks / (double)__rel->pages);
+			Cost	brin_disk_cost = brin_ratio * disk_cost;
+
+			brin_disk_cost += cost_brin_bitmap_build(root,
+													 __rel,
+													 indexOpt,
+													 indexQuals);
+			if (disk_cost > brin_disk_cost)
+			{
+				disk_cost = brin_disk_cost;
+				__ntuples *= brin_ratio;
+				__npages = indexNBlocks;
+			}
+			else
+			{
+				/* disable BRIN-index if no benefit */
+				indexOpt = NULL;
+			}
+		}
+		total_ntuples += __ntuples;
+		total_npages += __npages;
+		/* discount disk cost if parallel scan */
+		if (parallel_nworkers > 0)
+			disk_cost /= parallel_divisor;
+		run_cost += disk_cost;
+		/* RTI to be scanned */
+		scan_child_relids = lappend_int(scan_child_relids, __rel->relid);
 	}
-	run_cost += disk_cost;
+	curr_ntuples = total_ntuples;
 
 	/*
-	 * Cost for xPU qualifiers
+	 * Cost for GPU qualifiers
 	 */
 	if (dev_quals != NIL)
 	{
+		QualCost	qcost;
+		double		selectivity;
+
 		cost_qual_eval_node(&qcost, (Node *)dev_quals, root);
 		startup_cost += qcost.startup;
 		run_cost += (qcost.per_tuple *
 					 pgstrom_gpu_operator_ratio() *
-					 ntuples) / parallel_divisor;
+					 curr_ntuples) / parallel_divisor;
 
-		selectivity = clauselist_selectivity(root,
-											 dev_quals,
-											 baserel->relid,
-											 JOIN_INNER,
-											 NULL);
-		ntuples *= selectivity;		/* rows after dev_quals */
+		if (host_quals == NIL)
+			curr_ntuples = baserel->rows;
+		else
+		{
+			selectivity = clauselist_selectivity(root,
+												 dev_quals,
+												 baserel->relid,
+												 JOIN_INNER,
+												 NULL);
+			curr_ntuples *= selectivity;
+		}
+		/* cost for DMA transfer (GPU->Host) */
+		final_cost += pgstrom_gpu_tuple_cost * curr_ntuples;
 	}
-
-	/*
-	 * Cost for DMA receive (GPU-->Host)
-	 */
-	final_cost += pgstrom_gpu_tuple_cost * ntuples;
 
 	/*
 	 * Cost for host qualifiers
 	 */
 	if (host_quals != NIL)
 	{
+		QualCost	qcost;
+
 		cost_qual_eval_node(&qcost, (Node *)host_quals, root);
 		startup_cost += qcost.startup;
-		final_cost += qcost.per_tuple * ntuples / parallel_divisor;
-
-		selectivity = clauselist_selectivity(root,
-											 host_quals,
-											 baserel->relid,
-											 JOIN_INNER,
-											 NULL);
-		ntuples *= selectivity;		/* rows after host_quals */
+		final_cost += qcost.per_tuple * curr_ntuples / parallel_divisor;
 	}
+
 	/*
 	 * Cost for host projection
 	 */
 	final_cost += (baserel->reltarget->cost.startup +
-				   baserel->reltarget->cost.per_tuple * scan_nrows);
-
-	/* Setup the result */
+				   baserel->reltarget->cost.per_tuple * baserel->rows);
+	/*
+	 * Setup the result PlanInfo
+	 */
 	pp_info = palloc0(sizeof(pgstromPlanInfo));
-	pp_info->xpu_task_flags = xpu_task_flags;
-	pp_info->scan_relid = baserel->relid;
+	pp_info->xpu_task_flags = DEVKIND__NVIDIA_GPU;
 	pp_info->host_quals = extract_actual_clauses(host_quals, false);
+	pp_info->scan_relid = baserel->relid;
+	pp_info->scan_child_relids = scan_child_relids;
 	pp_info->scan_quals = extract_actual_clauses(dev_quals, false);
-	pp_info->scan_tuples = baserel->tuples;
-	pp_info->scan_nrows = clamp_row_est(scan_nrows);
+	pp_info->scan_npages = total_npages;
+	pp_info->scan_tuples = total_ntuples;
+	pp_info->scan_nrows = baserel->rows;
 	pp_info->parallel_nworkers = parallel_nworkers;
-	pp_info->parallel_divisor = parallel_divisor;
+    pp_info->parallel_divisor = parallel_divisor;
 	pp_info->startup_cost = startup_cost;
 	pp_info->run_cost = run_cost;
 	pp_info->final_cost = final_cost;
 	pp_info->final_nrows = baserel->rows;
+#if 0
 	if (indexOpt)
 	{
-		pp_info->brin_index_oid = indexOpt->indexoid;
-		pp_info->brin_index_conds = indexConds;
-		pp_info->brin_index_quals = indexQuals;
+		//FIXME: IndexOpt of BRIN must be multi-relations
+
 	}
+#endif
 	outer_refs = pickup_outer_referenced(root, baserel, outer_refs);
 	pull_varattnos((Node *)pp_info->host_quals,
 				   baserel->relid, &outer_refs);
 	pull_varattnos((Node *)pp_info->scan_quals,
 				   baserel->relid, &outer_refs);
 	pp_info->outer_refs = outer_refs;
-	pp_info->sibling_param_id = -1;
+	pp_info->sibling_param_id = -1;		//to be deprecated
 	return pp_info;
 }
 
-
-static pgstromOuterPathLeafInfo *
-buildSimpleScanPlanInfo(PlannerInfo *root,
-						RelOptInfo *baserel,
-						uint32_t xpu_task_flags,
-						bool parallel_path)
+/*
+ * __gpuScanAddCustomPathOne
+ */
+static void
+__gpuScanAddCustomPathOne(PlannerInfo *root,
+						  RelOptInfo *baserel,
+						  ParamPathInfo *param_info,
+						  List *scan_rels,
+						  List *dev_quals,
+						  List *host_quals,
+						  int *p_parallel_nworkers)
 {
-	pgstromOuterPathLeafInfo *op_leaf;
+	int		parallel_nworkers = *p_parallel_nworkers;
 	pgstromPlanInfo *pp_info;
+	pgstromOuterPathLeafInfo *op_leaf;
+
+	pp_info = __gpuScanBuildPlanInfo(root,
+									 baserel,
+									 scan_rels,
+									 dev_quals,
+									 host_quals,
+									 parallel_nworkers);
+	assert(pp_info->parallel_nworkers == parallel_nworkers);
+
+	/*
+	 * build a CustomPath(GpuScan) if it has device executable quals
+	 */
+	if (pp_info->scan_quals != NIL)
+	{
+		CustomPath *cpath = makeNode(CustomPath);
+
+		cpath->path.pathtype    = T_CustomScan;
+		cpath->path.parent      = baserel;
+		cpath->path.pathtarget  = baserel->reltarget;
+		cpath->path.param_info  = param_info;
+		cpath->path.parallel_aware = (parallel_nworkers > 0);
+		cpath->path.parallel_safe = baserel->consider_parallel;
+		cpath->path.parallel_workers = parallel_nworkers;
+		cpath->path.rows        = pp_info->final_nrows;
+		Assert(pp_info->inner_cost == 0.0);
+		cpath->path.startup_cost = pp_info->startup_cost;
+		cpath->path.total_cost  = (pp_info->startup_cost +
+								   pp_info->run_cost +
+								   pp_info->final_cost);
+		cpath->path.pathkeys    = NIL;  /* unsorted results */
+		cpath->flags            = CUSTOMPATH_SUPPORT_PROJECTION;
+		cpath->custom_paths     = NIL;
+		cpath->custom_private   = list_make1(pp_info);
+		cpath->methods          = &gpuscan_path_methods;
+		/* try attach GPU-Sorted version */
+		try_add_sorted_gpujoin_path(root, baserel, cpath, (parallel_nworkers > 0));
+		if (parallel_nworkers == 0)
+			add_path(baserel, &cpath->path);
+		else
+			add_partial_path(baserel, &cpath->path);
+	}
+
+	/*
+	 * unable pullup the scan path with host-quals
+	 */
+	if (pp_info->host_quals == NIL)
+	{
+		op_leaf = palloc0(sizeof(pgstromOuterPathLeafInfo));
+		op_leaf->pp_info = pp_info;
+		op_leaf->leaf_rel = baserel;
+		op_leaf->leaf_param = param_info;
+		op_leaf->leaf_nrows = pp_info->scan_nrows;
+		op_leaf->leaf_cost = (pp_info->startup_cost +
+							  pp_info->run_cost +
+							  pp_info->final_cost);
+		op_leaf->inner_paths_list = NIL;
+		pgstrom_remember_op_normal(root,
+								   baserel,
+								   op_leaf,
+								   parallel_nworkers > 0);
+	}
+	/* suggest parallel_nworkers next time */
+	parallel_nworkers = compute_parallel_worker(baserel,
+												pp_info->scan_npages,
+												-1.0,
+												max_parallel_workers_per_gather);
+	*p_parallel_nworkers = parallel_nworkers;
+}
+
+/*
+ * __gpuScanAddCustomPath - main portion of GpuScanPath
+ */
+static void
+__gpuScanAddCustomPath(PlannerInfo *root,
+					   RelOptInfo *baserel,
+					   Index rtindex,
+					   RangeTblEntry *rte,
+					   List *scan_rels)
+{
 	ParamPathInfo *param_info;
 	List	   *dev_quals = NIL;
 	List	   *dev_costs = NIL;
 	List	   *host_quals = NIL;
 	ListCell   *lc;
-	Cardinality	scan_nrows = baserel->rows;
+	int			parallel_nworkers = 0;
 
-	Assert((xpu_task_flags & DEVKIND__ANY) == DEVKIND__NVIDIA_GPU);
-	/* fetch device/host qualifiers */
+	/* Fetch device/host qualifiers */
 	foreach (lc, baserel->baserestrictinfo)
 	{
 		RestrictInfo *rinfo = lfirst(lc);
 		int		devcost;
 
 		if (pgstrom_xpu_expression(rinfo->clause,
-								   xpu_task_flags,
+								   DEVKIND__NVIDIA_GPU,
 								   baserel->relid,
 								   NIL,
 								   &devcost))
@@ -340,7 +440,7 @@ buildSimpleScanPlanInfo(PlannerInfo *root,
 			host_quals = lappend(host_quals, rinfo);
 		}
 	}
-	/* also checks parametalized qualifiers */
+	/* Also checks parametalized qualifiers */
 	param_info = get_baserel_parampathinfo(root, baserel,
 										   baserel->lateral_relids);
 	if (param_info)
@@ -351,7 +451,7 @@ buildSimpleScanPlanInfo(PlannerInfo *root,
 			int		devcost;
 
 			if (pgstrom_xpu_expression(rinfo->clause,
-									   xpu_task_flags,
+									   DEVKIND__NVIDIA_GPU,
 									   baserel->relid,
 									   NIL,
 									   &devcost))
@@ -364,183 +464,82 @@ buildSimpleScanPlanInfo(PlannerInfo *root,
 				host_quals = lappend(host_quals, rinfo);
 			}
 		}
-		scan_nrows = param_info->ppi_rows;
 	}
 	sort_device_qualifiers(dev_quals, dev_costs);
-
-	pp_info = __buildSimpleScanPlanInfo(root,
-										baserel,
-										xpu_task_flags,
-										parallel_path,
-										dev_quals,
-										host_quals,
-										scan_nrows);
-	if (!pp_info)
-		return NULL;
-	/* setup pgstromOuterPathLeafInfo */
-	op_leaf = palloc0(sizeof(pgstromOuterPathLeafInfo));
-	op_leaf->pp_info = pp_info;
-	op_leaf->leaf_rel = baserel;
-	op_leaf->leaf_param = param_info;
-	op_leaf->leaf_nrows = pp_info->scan_nrows;
-	op_leaf->leaf_cost = (pp_info->startup_cost +
-						  pp_info->run_cost +
-						  pp_info->final_cost);
-	op_leaf->inner_paths_list = NIL;
-
-	return op_leaf;
-}
-
-/*
- * try_add_simple_scan_path
- */
-static void
-try_add_simple_scan_path(PlannerInfo *root,
-						 RelOptInfo *baserel,
-						 RangeTblEntry *rte,
-						 uint32_t xpu_task_flags,
-						 bool be_parallel,
-						 bool allow_host_quals,
-						 bool allow_no_device_quals,
-						 const CustomPathMethods *xpuscan_path_methods)
-{
-	pgstromOuterPathLeafInfo *op_leaf = NULL;
-
-	if (rte->relkind == RELKIND_RELATION ||
-		rte->relkind == RELKIND_MATVIEW)
+	/*
+	 * Single GpuScanPath
+	 */
+	__gpuScanAddCustomPathOne(root,
+							  baserel,
+							  param_info,
+							  scan_rels,
+							  dev_quals,
+							  host_quals,
+							  &parallel_nworkers);
+	/*
+	 * Parallel GpuScanPath
+	 */
+	if (baserel->consider_parallel && parallel_nworkers > 0)
 	{
-		if (rte->rtekind == RTE_RELATION &&
-			get_relation_am(rte->relid, true) == HEAP_TABLE_AM_OID)
-		{
-			op_leaf = buildSimpleScanPlanInfo(root,
-											  baserel,
-											  xpu_task_flags,
-											  be_parallel);
-		}
-	}
-	else if (rte->relkind == RELKIND_FOREIGN_TABLE)
-	{
-		if (baseRelIsArrowFdw(baserel))
-		{
-			op_leaf = buildSimpleScanPlanInfo(root,
-											  baserel,
-											  xpu_task_flags,
-											  be_parallel);
-		}
-	}
-
-	if (op_leaf)
-	{
-		pgstromPlanInfo *pp_info = op_leaf->pp_info;
-
-		if (pp_info->scan_quals != NIL)
-		{
-			CustomPath *cpath = makeNode(CustomPath);
-
-			cpath->path.pathtype    = T_CustomScan;
-			cpath->path.parent      = baserel;
-			cpath->path.pathtarget  = baserel->reltarget;
-			cpath->path.param_info  = op_leaf->leaf_param;
-			cpath->path.parallel_aware = (pp_info->parallel_nworkers > 0);
-			cpath->path.parallel_safe = baserel->consider_parallel;
-			cpath->path.parallel_workers = pp_info->parallel_nworkers;
-			cpath->path.rows        = pp_info->scan_nrows;
-			Assert(pp_info->inner_cost == 0.0);
-			cpath->path.startup_cost = pp_info->startup_cost;
-			cpath->path.total_cost  = (pp_info->startup_cost +
-									   pp_info->run_cost +
-									   pp_info->final_cost);
-			cpath->path.pathkeys    = NIL;	/* unsorted results */
-			cpath->flags            = CUSTOMPATH_SUPPORT_PROJECTION;
-			cpath->custom_paths     = NIL;
-			cpath->custom_private   = list_make1(pp_info);
-			cpath->methods			= xpuscan_path_methods;
-			/* try attach GPU-Sorted version */
-			try_add_sorted_gpujoin_path(root, baserel, cpath, be_parallel);
-			if (be_parallel == 0)
-				add_path(baserel, &cpath->path);
-			else
-				add_partial_path(baserel, &cpath->path);
-		}
-		/*
-		 * unable pullup the scan path with host-quals
-		 */
-		if (pp_info->host_quals == NIL)
-		{
-			pgstrom_remember_op_normal(root,
-									   baserel,
-									   op_leaf,
-									   be_parallel);
-		}
+		__gpuScanAddCustomPathOne(root,
+								  baserel,
+								  param_info,
+								  scan_rels,
+								  dev_quals,
+								  host_quals,
+								  &parallel_nworkers);
 	}
 }
 
 /*
- * try_add_partitioned_scan_path
+ * extract_partitioned_scan_rels
  */
-static List *
-__try_add_partitioned_scan_path(PlannerInfo *root,
-								RelOptInfo *baserel,
-								uint32_t xpu_task_flags,
-								bool be_parallel)
+static bool
+extract_partitioned_scan_rels(PlannerInfo *root,
+							  RelOptInfo *baserel,
+							  List **p_results)
 {
-	List   *results = NIL;
-
 	for (int k=0; k < baserel->nparts; k++)
 	{
 		if (bms_is_member(k, baserel->live_parts))
 		{
-			RelOptInfo *leaf_rel = baserel->part_rels[k];
-			RangeTblEntry *rte = root->simple_rte_array[leaf_rel->relid];
+			RelOptInfo	   *leaf_rel = baserel->part_rels[k];
+			RangeTblEntry  *rte = root->simple_rte_array[leaf_rel->relid];
 
-			if (!rte->inh)
+			switch (rte->relkind)
 			{
-				pgstromOuterPathLeafInfo *op_leaf;
-
-				op_leaf = buildSimpleScanPlanInfo(root,
-												  leaf_rel,
-												  xpu_task_flags,
-												  be_parallel);
-				if (!op_leaf)
-					return NIL;
-				/* unable to register scan path with host quals */
-				if (op_leaf->pp_info->host_quals != NIL)
-					return NIL;
-				results = lappend(results, op_leaf);
-			}
-			else if (rte->relkind == RELKIND_PARTITIONED_TABLE)
-			{
-				List   *temp;
-
-				temp = __try_add_partitioned_scan_path(root,
-													   leaf_rel,
-													   xpu_task_flags,
-													   be_parallel);
-				if (temp == NIL)
-					return NIL;
-				results = list_concat(results, temp);
+				case RELKIND_RELATION:
+				case RELKIND_MATVIEW:
+					if (!rte->inh &&
+						rte->rtekind == RTE_RELATION &&
+						get_relation_am(rte->relid, true) == HEAP_TABLE_AM_OID)
+					{
+						*p_results = lappend(*p_results, leaf_rel);
+						break;
+					}
+					return false;
+				case RELKIND_FOREIGN_TABLE:
+					if (!rte->inh &&
+						baseRelIsArrowFdw(leaf_rel))
+					{
+						*p_results = lappend(*p_results, leaf_rel);
+						break;
+					}
+					return false;
+				case RELKIND_PARTITIONED_TABLE:
+					if (extract_partitioned_scan_rels(root, leaf_rel, p_results))
+						break;
+					return false;
+				default:
+					return false;
 			}
 		}
 	}
-	return results;
+	return true;
 }
 
 static void
-try_add_partitioned_scan_path(PlannerInfo *root,
-							  RelOptInfo *baserel,
-							  uint32_t xpu_task_flags,
-							  bool be_parallel)
-{
-	List   *results = __try_add_partitioned_scan_path(root,
-													  baserel,
-													  xpu_task_flags,
-													  be_parallel);
-	if (results != NIL)
-		pgstrom_remember_op_leafs(root, baserel, results, be_parallel);
-}
-
-static void
-XpuScanAddScanPath(PlannerInfo *root,
+GpuScanAddScanPath(PlannerInfo *root,
 				   RelOptInfo *baserel,
 				   Index rtindex,
 				   RangeTblEntry *rte)
@@ -551,34 +550,45 @@ XpuScanAddScanPath(PlannerInfo *root,
 
 	if (pgstrom_enabled() &&
 		gpuserv_ready_accept() &&
-		enable_gpuscan)
+		enable_gpuscan &&
+		!is_dummy_rel(baserel))
 	{
-		/* We already proved the relation empty, so nothing more to do */
-		if (is_dummy_rel(baserel))
-			return;
-		/* Creation of GpuScan path */
-		for (int try_parallel=0; try_parallel < 2; try_parallel++)
+		List   *scan_rels = NIL;
+
+		switch (rte->relkind)
 		{
-			if (!rte->inh)
-			{
-				try_add_simple_scan_path(root,
-										 baserel,
-										 rte,
-										 TASK_KIND__GPUSCAN,
-										 (try_parallel > 0),
-										 true,	/* allow host quals */
-										 false,	/* disallow no device quals*/
-										 &gpuscan_path_methods);
-			}
-			else if (rte->relkind == RELKIND_PARTITIONED_TABLE)
-			{
-				try_add_partitioned_scan_path(root,
-											  baserel,
-											  TASK_KIND__GPUSCAN,
-											  (try_parallel > 0));
-			}
-			if (!baserel->consider_parallel)
+			case RELKIND_RELATION:
+			case RELKIND_MATVIEW:
+				if (!rte->inh &&
+					rte->rtekind == RTE_RELATION &&
+					get_relation_am(rte->relid, true) == HEAP_TABLE_AM_OID)
+					scan_rels = list_make1(baserel);
 				break;
+			case RELKIND_FOREIGN_TABLE:
+				if (!rte->inh &&
+					baseRelIsArrowFdw(baserel))
+					scan_rels = list_make1(baserel);
+				break;
+			case RELKIND_PARTITIONED_TABLE:
+				if (!extract_partitioned_scan_rels(root,
+												   baserel,
+												   &scan_rels))
+					return;
+				break;
+			default:
+				/* not supported */
+				break;
+		}
+		/*
+		 * Creation of GpuScan paths
+		 */
+		if (scan_rels != NIL)
+		{
+			__gpuScanAddCustomPath(root,
+								   baserel,
+								   rtindex,
+								   rte,
+								   scan_rels);
 		}
 	}
 }
@@ -941,5 +951,5 @@ pgstrom_init_gpu_scan(void)
     gpuscan_exec_methods.ExplainCustomScan	= pgstromExplainTaskState;
 	/* hook registration */
 	set_rel_pathlist_next = set_rel_pathlist_hook;
-	set_rel_pathlist_hook = XpuScanAddScanPath;
+	set_rel_pathlist_hook = GpuScanAddScanPath;
 }

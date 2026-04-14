@@ -97,6 +97,56 @@ pickup_outer_referenced(PlannerInfo *root,
 	return referenced;
 }
 
+Cost
+disk_cost_postgresql_heap(PlannerInfo *root,
+						  RelOptInfo *baserel,
+						  double *p_setup_cost)
+{
+	double		num_pages = (double)baserel->pages;
+	double		spc_seq_page_cost;
+	double		spc_rand_page_cost;
+	double		avg_seq_page_cost;
+	IndexOptInfo *brin_opt;
+	List	   *brin_conds = NIL;
+	List	   *brin_quals = NIL;
+	int64_t		brin_npages = 0;
+
+	get_tablespace_page_costs(baserel->reltablespace,
+							  &spc_rand_page_cost,
+							  &spc_seq_page_cost);
+	if (baseRelHasGpuCache(root, baserel) >= 0)
+	{
+		/* assume GPU-Cache is available */
+		avg_seq_page_cost = 0;
+	}
+	else if (GetOptimalGpuForBaseRel(root, baserel) != 0UL)
+	{
+		/* assume GPU-Direct SQL is available */
+		avg_seq_page_cost = spc_seq_page_cost * (1.0 - baserel->allvisfrac) +
+			pgstrom_gpu_direct_seq_page_cost * baserel->allvisfrac;
+	}
+	else
+	{
+		/* elsewhere, use PostgreSQL's storage layer */
+		avg_seq_page_cost = spc_seq_page_cost;
+	}
+	/* discount number of pages if BRIN-index available */
+	brin_opt = pgstromTryFindBrinIndex(root,
+									   baserel,
+									   &brin_conds,
+									   &brin_quals,
+									   &brin_npages);
+	if (brin_opt)
+	{
+		num_pages = Min(num_pages, brin_npages);
+		*p_setup_cost += cost_brin_bitmap_build(root,
+												baserel,
+												brin_opt,
+												brin_quals);
+	}
+	return avg_seq_page_cost * num_pages;
+}
+
 /* ----------------------------------------------------------------
  *
  * Routines to setup kern_data_store

@@ -4165,6 +4165,36 @@ parquetFillupRowGroup(Relation relation,
 }
 
 /*
+ * disk_cost_arrow_fdw
+ */
+Cost
+disk_cost_arrow_fdw(PlannerInfo *root,
+					RelOptInfo *baserel,
+					double *p_setup_cost)
+{
+	/*
+	 * Arrow- and Parquet-style columnar formats reduce disk I/O by loading only
+	 * the columns actually referenced by a query. Nevertheless, when generating
+	 * query execution plans, there is currently no case in which one candidate
+	 * plan would load a referenced column X while another candidate plan would
+	 * avoid loading that same column. Therefore, adjusting disk_cost based
+	 * on the set or number of referenced columns is not meaningful in the current
+	 * implementation.
+	 * For this reason, arrow_fdw does not make disk_cost depend on the number of
+	 * referenced columns.
+	 * This may change in a future revision of the design.
+	 */
+	double	spc_seq_page_cost;
+
+	get_tablespace_page_costs(baserel->reltablespace,
+							  NULL,
+							  &spc_seq_page_cost);
+	return (double)baserel->pages *
+		(spc_seq_page_cost * (1.0 - baserel->allvisfrac) +
+		 pgstrom_gpu_direct_seq_page_cost * baserel->allvisfrac);
+}
+
+/*
  * ArrowGetForeignRelSize
  */
 static void
@@ -4180,7 +4210,8 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 	List		   *results = NIL;
 	Bitmapset	   *referenced = NULL;
 	ListCell	   *lc1, *lc2;
-	size_t			totalLen = 0;
+	size_t			vfs_length = 0;
+	size_t			gds_length = 0;
 	double			ntuples = 0.0;
 	int				parallel_nworkers;
 	int				parquet_cache;
@@ -4222,13 +4253,15 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 		foreach (cell, af_state->rb_list)
 		{
 			RecordBatchState *rb_state = lfirst(cell);
+			gpumask_t		__optimal_gpus;
+			size_t			__length = 0;
 
 			//XXX - fix to support column-field mapping
 
 			/* whole-row reference? */
 			if (bms_is_member(-FirstLowInvalidHeapAttributeNumber, referenced))
 			{
-				totalLen += rb_state->rb_length;
+				__length += rb_state->rb_length;
 			}
 			else
 			{
@@ -4243,10 +4276,16 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 						continue;
 					i = af_state->attrs[j-1].field_index;
 					if (i >= 0 && i < rb_state->nfields)
-						totalLen += rb_state->fields[i].disk_length;
+						__length += rb_state->fields[i].disk_length;
 				}
 			}
 			ntuples += rb_state->rb_nitems;
+			/* Is GPU-Direct SQL supported? */
+			__optimal_gpus = GetOptimalGpuForFile(af_state->filename);
+			if (__optimal_gpus == 0 || __optimal_gpus == INVALID_GPUMASK)
+				vfs_length += __length;
+			else
+				gds_length += __length;
 		}
 		results = lappend(results, af_state);
 	}
@@ -4255,8 +4294,9 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 	/* setup baserel */
 	baserel->rel_parallel_workers = parallel_nworkers;
 	baserel->fdw_private = list_make2(results, referenced);
-	baserel->pages = totalLen / BLCKSZ;
+	baserel->pages = (vfs_length + gds_length + BLCKSZ - 1) / BLCKSZ;
 	baserel->tuples = ntuples;
+	baserel->allvisfrac = (double)(gds_length) / (double)(vfs_length + gds_length);
 	baserel->rows = ntuples *
 		clauselist_selectivity(root,
 							   baserel->baserestrictinfo,

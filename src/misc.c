@@ -115,7 +115,9 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 	exprs = lappend(exprs, pp_info->used_params);
 	privs = lappend(privs, pp_info->host_quals);
 	privs = lappend(privs, makeInteger(pp_info->scan_relid));
+	privs = lappend(privs, pp_info->scan_child_relids);
 	exprs = lappend(exprs, pp_info->scan_quals);
+	privs = lappend(privs, __makeFloat(pp_info->scan_npages));
 	privs = lappend(privs, __makeFloat(pp_info->scan_tuples));
 	privs = lappend(privs, __makeFloat(pp_info->scan_nrows));
 	privs = lappend(privs, makeInteger(pp_info->parallel_nworkers));
@@ -232,7 +234,9 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	pp_data.used_params  = list_nth(exprs, eindex++);
 	pp_data.host_quals   = list_nth(privs, pindex++);
 	pp_data.scan_relid   = intVal(list_nth(privs, pindex++));
+	pp_data.scan_child_relids = list_nth(privs, pindex++);
 	pp_data.scan_quals   = list_nth(exprs, eindex++);
+	pp_data.scan_npages  = floatVal(list_nth(privs, pindex++));
 	pp_data.scan_tuples  = floatVal(list_nth(privs, pindex++));
 	pp_data.scan_nrows   = floatVal(list_nth(privs, pindex++));
 	pp_data.parallel_nworkers = intVal(list_nth(privs, pindex++));

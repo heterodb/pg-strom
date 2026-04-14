@@ -283,8 +283,11 @@ typedef struct
 	List	   *used_params;		/* param list in use */
 	List	   *host_quals;			/* host qualifiers to scan the outer */
 	Index		scan_relid;			/* relid of the outer relation to scan */
+	List	   *scan_child_relids;	/* relid of the outer relations to scan,
+									 * if scan_relid is partition-table */
 	List	   *scan_quals;			/* device qualifiers to scan the outer */
-	double		scan_tuples;		/* copy of baserel->tuples */
+	double		scan_npages;		/* amount of i/o to be loaded from disk */
+	double		scan_tuples;		/* # of tuples to be fetched from disk */
 	double		scan_nrows;			/* copy of baserel->rows */
 	int			parallel_nworkers;	/* # of parallel workers */
 	double		parallel_divisor;	/* parallel divisor */
@@ -674,6 +677,9 @@ extern Path	   *pgstromTryFindGistIndex(PlannerInfo *root,
 extern Bitmapset *pickup_outer_referenced(PlannerInfo *root,
 										  RelOptInfo *base_rel,
 										  Bitmapset *referenced);
+extern Cost		disk_cost_postgresql_heap(PlannerInfo *root,
+										  RelOptInfo *base_rel,
+										  double *p_setup_cost);
 extern int		count_num_of_subfields(Oid type_oid);
 extern size_t	estimate_kern_data_store(TupleDesc tupdesc);
 extern size_t	setup_kern_data_store(kern_data_store *kds,
@@ -887,8 +893,6 @@ extern void		gpuCachePutDeviceBuffer(void *gc_lmap);
 extern bool		pgstrom_is_gpuscan_path(const Path *path);
 extern bool		pgstrom_is_gpuscan_plan(const Plan *plan);
 extern bool		pgstrom_is_gpuscan_state(const PlanState *ps);
-extern void		sort_device_qualifiers(List *dev_quals_list,
-									   List *dev_costs_list);
 extern pgstromPlanInfo *try_fetch_xpuscan_planinfo(const Path *path);
 extern List	   *assign_custom_cscan_tlist(List *tlist_dev,
 										  pgstromPlanInfo *pp_info);
@@ -973,6 +977,9 @@ extern bool		baseRelIsArrowFdw(RelOptInfo *baserel);
 extern bool 	RelationIsArrowFdw(Relation frel);
 extern gpumask_t GetOptimalGpusForArrowFdw(PlannerInfo *root,
 										   RelOptInfo *baserel);
+extern Cost		disk_cost_arrow_fdw(PlannerInfo *root,
+									RelOptInfo *base_rel,
+									double *p_setup_cost);
 extern bool		pgstromArrowFdwExecInit(pgstromTaskState *pts,
 										List *outer_quals,
 										const Bitmapset *outer_refs);
