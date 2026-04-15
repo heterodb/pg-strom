@@ -19,76 +19,74 @@
  */
 Bitmapset *
 pickup_outer_referenced(PlannerInfo *root,
-						RelOptInfo *base_rel,
-						Bitmapset *referenced)
+						RelOptInfo *base_rel)
 {
+	Bitmapset  *referenced = NULL;
 	ListCell   *lc;
 	int			j, k;
 
 	if (base_rel->reloptkind == RELOPT_BASEREL)
 	{
-		for (j=base_rel->min_attr; j <= base_rel->max_attr; j++)
+		for (j=Max(base_rel->min_attr,0); j <= base_rel->max_attr; j++)
 		{
-			if (j <= 0 || !base_rel->attr_needed[j - base_rel->min_attr])
-				continue;
-			k = j - FirstLowInvalidHeapAttributeNumber;
-			referenced = bms_add_member(referenced, k);
+			Bitmapset  *needed = base_rel->attr_needed[j - base_rel->min_attr];
+
+			if (!bms_is_empty(needed))
+			{
+				k = j - FirstLowInvalidHeapAttributeNumber;
+				referenced = bms_add_member(referenced, k);
+			}
 		}
 	}
 	else if (base_rel->reloptkind == RELOPT_OTHER_MEMBER_REL)
 	{
-		foreach (lc, root->append_rel_list)
+		AppendRelInfo *apinfo = root->append_rel_array[base_rel->relid];
+		RelOptInfo *parent_rel = root->simple_rel_array[apinfo->parent_relid];
+		Bitmapset  *parent_refs = pickup_outer_referenced(root, parent_rel);
+
+		for (k = bms_next_member(parent_refs, -1);
+			 k >= 0;
+			 k = bms_next_member(parent_refs, k))
 		{
-			AppendRelInfo  *apinfo = lfirst(lc);
-			RelOptInfo	   *parent_rel;
-			Bitmapset	   *parent_refs;
-
-			if (apinfo->child_relid != base_rel->relid)
-				continue;
-			Assert(apinfo->parent_relid < root->simple_rel_array_size);
-			parent_rel = root->simple_rel_array[apinfo->parent_relid];
-			parent_refs = pickup_outer_referenced(root, parent_rel, NULL);
-
-			for (k = bms_next_member(parent_refs, -1);
-				 k >= 0;
-				 k = bms_next_member(parent_refs, k))
+			j = k + FirstLowInvalidHeapAttributeNumber;
+			if (j <= 0)
+				referenced = bms_add_member(referenced, k);
+			else if (j > list_length(apinfo->translated_vars))
+			   elog(ERROR, "Bug? column reference out of range");
+			else
 			{
-				j = k + FirstLowInvalidHeapAttributeNumber;
-				if (j <= 0)
-					bms_add_member(referenced, k);
-				else if (j > list_length(apinfo->translated_vars))
-					elog(ERROR, "Bug? column reference out of range");
+				Expr   *expr = list_nth(apinfo->translated_vars, j-1);
+
+				if (IsA(expr, Var))
+				{
+					Var	   *var = (Var *)expr;
+
+					j = var->varattno - FirstLowInvalidHeapAttributeNumber;
+					referenced = bms_add_member(referenced, j);
+				}
 				else
 				{
-					Expr   *expr = list_nth(apinfo->translated_vars, j-1);
+					/*
+					 * translated_vars is not always a simple Var-to-Var mapping.
+					 * In particular, appendrel children coming from pulled-up
+					 * subqueries (e.g., UNION ALL) may have arbitrary
+					 * expressions here.
+					 *
+					 * Since we need a direct child attribute reference, treat
+					 * non-Var entries as incompatible and skip them.
+					 */
+					List   *varsList = pull_vars_of_level((Node *)expr, 0);
 
-					if (IsA(expr, Var))
+					foreach (lc, varsList)
 					{
-						Var	   *var = (Var *)expr;
+						Var	   *var = lfirst(lc);
 
 						j = var->varattno - FirstLowInvalidHeapAttributeNumber;
 						referenced = bms_add_member(referenced, j);
 					}
-					else
-					{
-						List   *varsList = pull_vars_of_level((Node *)expr, 0);
-						ListCell *cell;
-
-						foreach (cell, varsList)
-						{
-							Var	   *var = lfirst(cell);
-
-							j = var->varattno - FirstLowInvalidHeapAttributeNumber;
-							referenced = bms_add_member(referenced, j);
-						}
-					}
 				}
 			}
-			break;
 		}
-		if (!lc)
-			elog(ERROR, "Bug? AppendRelInfo not found (relid=%u)",
-				 base_rel->relid);
 	}
 	else
 	{

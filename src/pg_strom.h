@@ -680,8 +680,7 @@ extern Path	   *pgstromTryFindGistIndex(PlannerInfo *root,
 #define PGSTROM_CHUNK_SIZE		((size_t)(65534UL << 10))
 
 extern Bitmapset *pickup_outer_referenced(PlannerInfo *root,
-										  RelOptInfo *base_rel,
-										  Bitmapset *referenced);
+										  RelOptInfo *baserel);
 extern Cost		disk_cost_postgresql_heap(PlannerInfo *root,
 										  RelOptInfo *base_rel,
 										  double *p_setup_cost);

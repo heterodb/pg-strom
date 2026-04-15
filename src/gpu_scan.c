@@ -123,6 +123,7 @@ __gpuScanBuildPlanInfo(PlannerInfo *root,
 					   List *scan_rels,
 					   List *dev_quals,
 					   List *host_quals,
+					   Bitmapset *outer_refs,
 					   int parallel_nworkers)
 {
 	double		parallel_divisor = 1.0;
@@ -134,7 +135,6 @@ __gpuScanBuildPlanInfo(PlannerInfo *root,
 	double		total_npages = 0.0;
 	double		curr_ntuples;
 	ListCell   *lc;
-	Bitmapset  *outer_refs;
 	pgstromPlanInfo *pp_info;
 
 	if (parallel_nworkers > 0)
@@ -309,11 +309,6 @@ __gpuScanBuildPlanInfo(PlannerInfo *root,
 
 	}
 #endif
-	outer_refs = pickup_outer_referenced(root, baserel, outer_refs);
-	pull_varattnos((Node *)pp_info->host_quals,
-				   baserel->relid, &outer_refs);
-	pull_varattnos((Node *)pp_info->scan_quals,
-				   baserel->relid, &outer_refs);
 	pp_info->outer_refs = outer_refs;
 	pp_info->sibling_param_id = -1;		//to be deprecated
 	return pp_info;
@@ -329,6 +324,7 @@ __gpuScanAddCustomPathOne(PlannerInfo *root,
 						  List *scan_rels,
 						  List *dev_quals,
 						  List *host_quals,
+						  Bitmapset *outer_refs,
 						  int *p_parallel_nworkers)
 {
 	int		parallel_nworkers = *p_parallel_nworkers;
@@ -340,6 +336,7 @@ __gpuScanAddCustomPathOne(PlannerInfo *root,
 									 scan_rels,
 									 dev_quals,
 									 host_quals,
+									 outer_refs,
 									 parallel_nworkers);
 	assert(pp_info->parallel_nworkers == parallel_nworkers);
 
@@ -418,6 +415,7 @@ __gpuScanAddCustomPath(PlannerInfo *root,
 	List	   *dev_costs = NIL;
 	List	   *host_quals = NIL;
 	ListCell   *lc;
+	Bitmapset  *outer_refs = NULL;
 	int			parallel_nworkers = 0;
 
 	/* Fetch device/host qualifiers */
@@ -466,6 +464,11 @@ __gpuScanAddCustomPath(PlannerInfo *root,
 		}
 	}
 	sort_device_qualifiers(dev_quals, dev_costs);
+	/* pickup referenced columns */
+	outer_refs = pickup_outer_referenced(root, baserel);
+	pull_varattnos((Node *)dev_quals, baserel->relid, &outer_refs);
+	pull_varattnos((Node *)host_quals, baserel->relid, &outer_refs);
+
 	/*
 	 * Single GpuScanPath
 	 */
@@ -475,6 +478,7 @@ __gpuScanAddCustomPath(PlannerInfo *root,
 							  scan_rels,
 							  dev_quals,
 							  host_quals,
+							  outer_refs,
 							  &parallel_nworkers);
 	/*
 	 * Parallel GpuScanPath
@@ -487,6 +491,7 @@ __gpuScanAddCustomPath(PlannerInfo *root,
 								  scan_rels,
 								  dev_quals,
 								  host_quals,
+								  outer_refs,
 								  &parallel_nworkers);
 	}
 }

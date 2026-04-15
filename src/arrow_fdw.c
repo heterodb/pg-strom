@@ -4208,7 +4208,7 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 	List		   *sourceFields;
 	List		   *virtualColumnsList;
 	List		   *results = NIL;
-	Bitmapset	   *referenced = NULL;
+	Bitmapset	   *referenced;
 	ListCell	   *lc1, *lc2;
 	size_t			vfs_length = 0;
 	size_t			gds_length = 0;
@@ -4217,13 +4217,13 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 	int				parquet_cache;
 
 	/* columns to be referenced */
+	referenced = pickup_outer_referenced(root, baserel);
 	foreach (lc1, baserel->baserestrictinfo)
 	{
 		RestrictInfo   *rinfo = lfirst(lc1);
 
 		pull_varattnos((Node *)rinfo->clause, baserel->relid, &referenced);
 	}
-	referenced = pickup_outer_referenced(root, baserel, referenced);
 
 	/* read arrow-file metadta */
 	filesList = arrowFdwExtractFilesList(ft->options,
