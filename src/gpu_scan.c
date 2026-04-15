@@ -126,7 +126,7 @@ __gpuScanBuildPlanInfo(PlannerInfo *root,
 					   int parallel_nworkers)
 {
 	double		parallel_divisor = 1.0;
-	List	   *scan_child_relids = NIL;
+	List	   *scan_relids = NIL;
 	Cost		startup_cost = pgstrom_gpu_setup_cost;
 	Cost		run_cost = 0.0;
 	Cost		final_cost = 0.0;
@@ -234,7 +234,7 @@ __gpuScanBuildPlanInfo(PlannerInfo *root,
 			disk_cost /= parallel_divisor;
 		run_cost += disk_cost;
 		/* RTI to be scanned */
-		scan_child_relids = lappend_int(scan_child_relids, __rel->relid);
+		scan_relids = lappend_int(scan_relids, __rel->relid);
 	}
 	curr_ntuples = total_ntuples;
 
@@ -290,8 +290,8 @@ __gpuScanBuildPlanInfo(PlannerInfo *root,
 	pp_info = palloc0(sizeof(pgstromPlanInfo));
 	pp_info->xpu_task_flags = DEVKIND__NVIDIA_GPU;
 	pp_info->host_quals = extract_actual_clauses(host_quals, false);
-	pp_info->scan_relid = baserel->relid;
-	pp_info->scan_child_relids = scan_child_relids;
+	pp_info->base_relid = baserel->relid;
+	pp_info->scan_relids = scan_relids;
 	pp_info->scan_quals = extract_actual_clauses(dev_quals, false);
 	pp_info->scan_npages = total_npages;
 	pp_info->scan_tuples = total_ntuples;
@@ -492,6 +492,44 @@ __gpuScanAddCustomPath(PlannerInfo *root,
 }
 
 /*
+ * check_compatible_relations
+ */
+static bool
+check_compatible_relations(PlannerInfo *root,
+						   RelOptInfo *parent_rel,
+						   RelOptInfo *child_rel)
+{
+	AppendRelInfo *appinfo = root->append_rel_array[child_rel->relid];
+	ListCell   *lc;
+	AttrNumber	attnum = 1;
+
+	if (!appinfo ||
+		appinfo->parent_relid != parent_rel->relid ||
+		appinfo->child_relid  != child_rel->relid)
+	{
+		return false;
+	}
+	foreach (lc, appinfo->translated_vars)
+	{
+		Var	   *var = lfirst(lc);
+
+		if (var->varattno != attnum)
+		{
+			RangeTblEntry *p_rte = planner_rt_fetch(parent_rel->relid, root);
+			RangeTblEntry *c_rte = planner_rt_fetch(child_rel->relid, root);
+
+			elog(DEBUG2, "relation %s does not have compatible table layout at attnum=%d to the partition parent %s, so not supported right now",
+				 c_rte->eref->aliasname,
+				 attnum,
+				 p_rte->eref->aliasname);
+			return false;
+		}
+		attnum++;
+	}
+	return true;
+}
+
+/*
  * extract_partitioned_scan_rels
  */
 static bool
@@ -512,7 +550,8 @@ extract_partitioned_scan_rels(PlannerInfo *root,
 				case RELKIND_MATVIEW:
 					if (!rte->inh &&
 						rte->rtekind == RTE_RELATION &&
-						get_relation_am(rte->relid, true) == HEAP_TABLE_AM_OID)
+						get_relation_am(rte->relid, true) == HEAP_TABLE_AM_OID &&
+						check_compatible_relations(root, baserel, leaf_rel))
 					{
 						*p_results = lappend(*p_results, leaf_rel);
 						break;
@@ -520,14 +559,16 @@ extract_partitioned_scan_rels(PlannerInfo *root,
 					return false;
 				case RELKIND_FOREIGN_TABLE:
 					if (!rte->inh &&
-						baseRelIsArrowFdw(leaf_rel))
+						baseRelIsArrowFdw(leaf_rel) &&
+						check_compatible_relations(root, baserel, leaf_rel))
 					{
 						*p_results = lappend(*p_results, leaf_rel);
 						break;
 					}
 					return false;
 				case RELKIND_PARTITIONED_TABLE:
-					if (extract_partitioned_scan_rels(root, leaf_rel, p_results))
+					if (check_compatible_relations(root, baserel, leaf_rel) &&
+						extract_partitioned_scan_rels(root, leaf_rel, p_results))
 						break;
 					return false;
 				default:

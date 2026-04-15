@@ -421,7 +421,7 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 		 */
 		if (!pgstrom_xpu_expression(rinfo->clause,
 									pp_prev->xpu_task_flags,
-									pp_prev->scan_relid,
+									pp_prev->base_relid,
 									inner_target_list,
 									NULL))
 		{
@@ -525,7 +525,7 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 									  orig_inner_path,
 									  restrict_clauses,
 									  pp_prev->xpu_task_flags,
-									  pp_prev->scan_relid,
+									  pp_prev->base_relid,
 									  inner_target_list,
 									  pp_inner);
 		if (gist_inner_path)
@@ -926,7 +926,7 @@ try_add_sorted_gpujoin_path(PlannerInfo *root,
 			/* check whether the em_expr is fully executable on device */
 			if (!pgstrom_xpu_expression(em_expr,
 										pp_info->xpu_task_flags,
-										pp_info->scan_relid,
+										pp_info->base_relid,
 										inner_target_list, NULL))
 			{
 				elog(DEBUG1, "gpusort: expression '%s' is not device executable",
@@ -1537,7 +1537,7 @@ static List *
 __pgstrom_build_tlist_dev_expr(List *tlist_dev,
 							   Node *node,
 							   uint32_t xpu_task_flags,
-							   Index scan_relid,
+							   Index base_relid,
 							   List *inner_target_list)
 {
 	int			depth;
@@ -1552,7 +1552,7 @@ __pgstrom_build_tlist_dev_expr(List *tlist_dev,
 	{
 		Var	   *var = (Var *)node;
 
-		if (var->varno == scan_relid)
+		if (var->varno == base_relid)
 		{
 			depth = 0;
 			resno = var->varattno;
@@ -1584,7 +1584,7 @@ found:
 	if (IsA(node, Var) ||
 		pgstrom_xpu_expression((Expr *)node,
 							   xpu_task_flags,
-							   scan_relid,
+							   base_relid,
 							   inner_target_list,
 							   NULL))
 	{
@@ -1606,7 +1606,7 @@ found:
 			tlist_dev = __pgstrom_build_tlist_dev_expr(tlist_dev,
 													   lfirst(lc1),
 													   xpu_task_flags,
-													   scan_relid,
+													   base_relid,
 													   inner_target_list);
 		}
 	}
@@ -1641,7 +1641,7 @@ pgstrom_build_join_tlist_dev(codegen_context *context,
 				tlist_dev = __pgstrom_build_tlist_dev_expr(tlist_dev,
 														   (Node *)tle->expr,
 														   context->xpu_task_flags,
-														   context->scan_relid,
+														   context->base_relid,
 														   inner_target_list);
 		}
 	}
@@ -1667,7 +1667,7 @@ pgstrom_build_join_tlist_dev(codegen_context *context,
 				tlist_dev = __pgstrom_build_tlist_dev_expr(tlist_dev,
 														   node,
 														   context->xpu_task_flags,
-														   context->scan_relid,
+														   context->base_relid,
 														   inner_target_list);
 		}
 	}
@@ -1795,13 +1795,13 @@ build_explain_tlist_junks(codegen_context *context,
 			{
 				Var	   *var = (Var *)tle->expr;
 
-				if (var->varno == pp_info->scan_relid &&
+				if (var->varno == pp_info->base_relid &&
 					var->varattno == anum)
 					break;
 			}
 		}
 		if (lc == NULL)
-			elog(INFO, "scan_relid=%u anum=%d tlist_dev=%s", pp_info->scan_relid, anum, nodeToString(context->tlist_dev));
+			elog(INFO, "base_relid=%u anum=%d tlist_dev=%s", pp_info->base_relid, anum, nodeToString(context->tlist_dev));
 		Assert(lc != NULL);
 	}
 #endif
@@ -1834,7 +1834,7 @@ PlanGpuJoinPathCommon(PlannerInfo *root,
 		pp_info->kexp_scan_quals
 			= codegen_build_scan_quals(context, pp_info->scan_quals);
 		pull_varattnos((Node *)pp_info->scan_quals,
-					   pp_info->scan_relid,
+					   pp_info->base_relid,
 					   &outer_refs);
 	}
 
@@ -1852,7 +1852,7 @@ PlanGpuJoinPathCommon(PlannerInfo *root,
 			hash_keys_stacked = lappend(hash_keys_stacked,
 										pp_inner->hash_outer_keys);
 			pull_varattnos((Node *)pp_inner->hash_outer_keys,
-						   pp_info->scan_relid,
+						   pp_info->base_relid,
 						   &outer_refs);
 		}
 		else
@@ -1866,18 +1866,18 @@ PlanGpuJoinPathCommon(PlannerInfo *root,
 		join_quals_stacked = lappend(join_quals_stacked,
 									 pp_inner->join_quals);
 		pull_varattnos((Node *)pp_inner->join_quals,
-					   pp_info->scan_relid,
+					   pp_info->base_relid,
 					   &outer_refs);
 		other_quals_stacked = lappend(other_quals_stacked,
 									  pp_inner->other_quals);
 		pull_varattnos((Node *)pp_inner->other_quals,
-					   pp_info->scan_relid,
+					   pp_info->base_relid,
 					   &outer_refs);
 
 		/* xpu code to evaluate gist qualifiers */
 		gist_quals_stacked = lappend(gist_quals_stacked, pp_inner->gist_clause);
 		pull_varattnos((Node *)pp_inner->gist_clause,
-					   pp_info->scan_relid,
+					   pp_info->base_relid,
 					   &outer_refs);
 	}
 
@@ -1903,7 +1903,7 @@ PlanGpuJoinPathCommon(PlannerInfo *root,
 															proj_hash);
 	}
 	pull_varattnos((Node *)context->tlist_dev,
-				   pp_info->scan_relid,
+				   pp_info->base_relid,
 				   &outer_refs);
 	build_explain_tlist_junks(context, pp_info, outer_refs);
 	/* attach GPU-Sort key definitions, if any */
@@ -1936,7 +1936,7 @@ PlanGpuJoinPathCommon(PlannerInfo *root,
 	 */
 	cscan = makeNode(CustomScan);
 	cscan->scan.plan.targetlist = tlist;
-	cscan->scan.scanrelid = pp_info->scan_relid;
+	cscan->scan.scanrelid = pp_info->base_relid;
 	cscan->flags = cpath->flags;
 	cscan->methods = __gpujoin_plan_methods;
 	cscan->custom_plans = custom_plans;

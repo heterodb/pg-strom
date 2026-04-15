@@ -1461,7 +1461,7 @@ lookup_input_varnode_defitem(codegen_context *context,
 	if (!IsA(var, Var))
 		return NULL;
 
-	if (var->varno == context->scan_relid)
+	if (var->varno == context->base_relid)
 	{
 		depth = 0;
 		resno = var->varattno;
@@ -1652,7 +1652,7 @@ create_codegen_context(PlannerInfo *root,
 	context->xpu_task_flags = pp_info->xpu_task_flags;
 	context->kvecs_ndims = pp_info->num_rels + 1;
 	context->kvecs_usage = 0;
-	context->scan_relid = pp_info->scan_relid;
+	context->base_relid = pp_info->base_relid;
 	context->num_rels = pp_info->num_rels;
 	Assert(pp_info->num_rels == list_length(cpath->custom_paths));
 	foreach (lc, cpath->custom_paths)
@@ -4249,7 +4249,7 @@ pgstrom_xpu_expression(Expr *expr,
 	context->elevel = DEBUG2;
 	context->top_expr = expr;
 	context->xpu_task_flags = xpu_task_flags;
-	context->scan_relid = scan_relid;
+	context->base_relid = scan_relid;
 	context->num_rels = num_rels;
 	depth = 1;
 	foreach (lc, inner_target_list)

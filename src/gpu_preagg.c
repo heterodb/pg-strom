@@ -1637,7 +1637,7 @@ make_alternative_aggref(xpugroupby_build_path_context *con,
 			expr = make_expr_typecast(expr, dest_oid);
 		if (!pgstrom_xpu_expression(expr,
 									pp_info->xpu_task_flags,
-									pp_info->scan_relid,
+									pp_info->base_relid,
 									con->inner_target_list,
 									NULL))
 		{
@@ -1655,7 +1655,7 @@ make_alternative_aggref(xpugroupby_build_path_context *con,
 	{
 		if (!pgstrom_xpu_expression(aggref->aggfilter,
 									pp_info->xpu_task_flags,
-									pp_info->scan_relid,
+									pp_info->base_relid,
 									con->inner_target_list,
 									NULL))
 		{
@@ -1962,7 +1962,7 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 			/* grouping-key must be device executable. */
 			if (!pgstrom_xpu_expression(expr,
 										pp_info->xpu_task_flags,
-										pp_info->scan_relid,
+										pp_info->base_relid,
 										con->inner_target_list,
 										NULL))
 			{
@@ -1980,7 +1980,7 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 			if (!IsA(expr, Var) &&
 				!pgstrom_xpu_expression(expr,
 										pp_info->xpu_task_flags,
-										pp_info->scan_relid,
+										pp_info->base_relid,
 										con->inner_target_list,
 										NULL))
 			{
@@ -2364,7 +2364,7 @@ consider_sorted_groupby_path(PlannerInfo *root,
 
 						if (!pgstrom_xpu_expression((Expr *)f_expr,
 													pp_info->xpu_task_flags,
-													pp_info->scan_relid,
+													pp_info->base_relid,
 													inner_target_list,
 													NULL))
 						{

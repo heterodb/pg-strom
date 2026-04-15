@@ -95,6 +95,7 @@
 #include "optimizer/tlist.h"
 #include "parser/parse_coerce.h"
 #include "parser/parse_func.h"
+#include "parser/parsetree.h"
 #include "postmaster/bgworker.h"
 #include "postmaster/postmaster.h"
 #include "storage/bufmgr.h"
@@ -282,9 +283,13 @@ typedef struct
 	const Bitmapset *outer_refs;	/* referenced columns */
 	List	   *used_params;		/* param list in use */
 	List	   *host_quals;			/* host qualifiers to scan the outer */
-	Index		scan_relid;			/* relid of the outer relation to scan */
-	List	   *scan_child_relids;	/* relid of the outer relations to scan,
-									 * if scan_relid is partition-table */
+	Index		base_relid;			/* relid of this relation.
+									 * - for non-non-partitioned relation, it should
+									 *   equal to the first item of scan_relids.
+									 * - for partitioned table, it should be the
+									 *   parent relation of the scan_relids.
+									 */
+	List	   *scan_relids;		/* relid of the outer relations to scan */
 	List	   *scan_quals;			/* device qualifiers to scan the outer */
 	double		scan_npages;		/* amount of i/o to be loaded from disk */
 	double		scan_tuples;		/* # of tuples to be fetched from disk */
@@ -568,7 +573,7 @@ typedef struct
 	List	   *tlist_dev;
 	int			kvecs_ndims;
 	uint32_t	kvecs_usage;
-	Index		scan_relid;		/* depth==0 */
+	Index		base_relid;		/* depth==0 */
 	int			num_rels;
 	struct {
 		PathTarget *inner_target;
