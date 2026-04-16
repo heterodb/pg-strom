@@ -2704,7 +2704,7 @@ typedef struct kern_session_info
 	uint32_t	kcxt_kvars_nslots;	/* number of kvars slot */
 	uint32_t	kcxt_kvars_defs;	/* offset of kvars_slot_desc[] array */
 	uint32_t	kcxt_kvecs_bufsz;	/* length of kvecs buffer */
-	uint32_t	kcxt_kvecs_ndims;	/* =(num_rels + 2) */
+	uint32_t	kcxt_kvecs_ndims;	/* =(num_inner_rels + 2) */
 	uint32_t	kcxt_extra_bufsz;	/* length of vlbuf[] */
 	uint32_t	cuda_stack_size;	/* estimated stack size */
 	uint32_t	xpu_task_flags;		/* mask of device flags */
@@ -3412,7 +3412,7 @@ struct kern_multirels
 	size_t		length;				/* total length of kern_multirels */
 	size_t		ojmap_sz;			/* length of outer-join map */
 	uint64_t	kbuf_part_offset;	/* offset to kern_buffer_partitions, if any */
-	uint32_t	num_rels;
+	uint32_t	num_inner_rels;
 	struct
 	{
 		kern_data_store *kds_in;	/* pointer to KDS-inner (if non-partitioned) */
@@ -3437,7 +3437,7 @@ KERN_MULTIRELS_INNER_KDS(kern_multirels *kmrels, int depth)
 #ifdef __CUDACC__
 	kern_data_store *kds_in;
 
-	assert(depth > 0 && depth <= kmrels->num_rels);
+	assert(depth > 0 && depth <= kmrels->num_inner_rels);
 	kds_in = kmrels->chunks[depth-1].kds_in;
 	if (!kds_in)
 	{
@@ -3455,7 +3455,7 @@ KERN_MULTIRELS_INNER_KDS(kern_multirels *kmrels, int depth)
 #else
 	uint64_t	pos;
 
-	assert(depth > 0 && depth <= kmrels->num_rels);
+	assert(depth > 0 && depth <= kmrels->num_inner_rels);
 	pos = kmrels->chunks[depth-1].kds_offset;
 	return (kern_data_store *)(pos == 0 ? NULL : ((char *)kmrels + pos));
 #endif
@@ -3466,7 +3466,7 @@ KERN_MULTIRELS_OUTER_JOIN_MAP(kern_multirels *kmrels, int depth)
 {
 	uint64_t	offset;
 
-	assert(depth > 0 && depth <= kmrels->num_rels);
+	assert(depth > 0 && depth <= kmrels->num_inner_rels);
 	offset = kmrels->chunks[depth-1].ojmap_offset;
 	return (bool *)(offset == 0 ? NULL : ((char *)kmrels + offset));
 }
@@ -3477,7 +3477,7 @@ KERN_MULTIRELS_GPU_OUTER_JOIN_MAP(kern_multirels *kmrels, int depth,
 {
 	uint64_t	offset;
 
-	assert(depth > 0 && depth <= kmrels->num_rels);
+	assert(depth > 0 && depth <= kmrels->num_inner_rels);
 	offset = kmrels->chunks[depth-1].ojmap_offset;
 	if (offset == 0)
 		return NULL;
@@ -3490,7 +3490,7 @@ KERN_MULTIRELS_GIST_INDEX(kern_multirels *kmrels, int depth)
 {
 	uint64_t	offset;
 
-	assert(depth > 0 && depth <= kmrels->num_rels);
+	assert(depth > 0 && depth <= kmrels->num_inner_rels);
 	offset = kmrels->chunks[depth-1].gist_offset;
 	return (kern_data_store *)(offset == 0 ? NULL : ((char *)kmrels + offset));
 }
@@ -3500,7 +3500,7 @@ KERN_MULTIRELS_PARTITION_DESC(kern_multirels *kmrels, int depth)
 {
 	uint64_t	offset = kmrels->kbuf_part_offset;
 
-	assert(depth < 0 || (depth > 0 && depth <= kmrels->num_rels));
+	assert(depth < 0 || (depth > 0 && depth <= kmrels->num_inner_rels));
 	if (offset > 0)
 	{
 		kern_buffer_partitions *kbuf_parts

@@ -859,7 +859,8 @@ __updateStatsXpuCommand(pgstromTaskState *pts, const XpuCommand *xcmd)
 	if (xcmd->tag == XpuCommandTag__Success)
 	{
 		pgstromSharedState *ps_state = pts->ps_state;
-		int		n_rels = Min(pts->num_rels, xcmd->u.results.num_rels);
+		int		num_inner_rels = Min(pts->num_inner_rels,
+									 xcmd->u.results.num_rels);
 
 		pg_atomic_fetch_add_u64(&ps_state->npages_direct_read,
 								xcmd->u.results.npages_direct_read);
@@ -869,13 +870,14 @@ __updateStatsXpuCommand(pgstromTaskState *pts, const XpuCommand *xcmd)
 								xcmd->u.results.nitems_raw);
 		pg_atomic_fetch_add_u64(&ps_state->source_ntuples_in,
 								xcmd->u.results.nitems_in);
-		for (int i=0; i < n_rels; i++)
+		for (int i=0; i < num_inner_rels; i++)
 		{
-			pg_atomic_fetch_add_u64(&ps_state->inners[i].stats_roj,
+			pgstromSharedInnerState *ps_istate = &ps_state->rels[i].inner;
+			pg_atomic_fetch_add_u64(&ps_istate->stats_roj,
                                     xcmd->u.results.stats[i].nitems_roj);
-			pg_atomic_fetch_add_u64(&ps_state->inners[i].stats_gist,
+			pg_atomic_fetch_add_u64(&ps_istate->stats_gist,
 									xcmd->u.results.stats[i].nitems_gist);
-			pg_atomic_fetch_add_u64(&ps_state->inners[i].stats_join,
+			pg_atomic_fetch_add_u64(&ps_istate->stats_join,
 									xcmd->u.results.stats[i].nitems_out);
 		}
 		pg_atomic_fetch_add_u64(&ps_state->result_ntuples,
@@ -1340,14 +1342,14 @@ __execInitTaskStateCpuFallback(pgstromTaskState *pts)
 		ExprState  *state = NULL;
 
 		if (tle->resorigtbl >= 0 &&
-			tle->resorigtbl <= pts->num_rels)
+			tle->resorigtbl <= pts->num_inner_rels)
 		{
 			kern_fallback_desc *fb_desc = &__fb_desc_array[nitems++];
 
 			fb_desc->fb_src_depth = tle->resorigtbl;
 			fb_desc->fb_src_resno = tle->resorigcol;
 			fb_desc->fb_dst_resno = tle->resno;
-			fb_desc->fb_max_depth = pts->num_rels + 1;
+			fb_desc->fb_max_depth = pts->num_inner_rels + 1;
 			fb_desc->fb_slot_id   = -1;
 			fb_desc->fb_kvec_offset = -1;
 
@@ -1407,7 +1409,7 @@ __execInitTaskStateCpuFallback(pgstromTaskState *pts)
 				pts->fallback_load_dst = dst_list;
 			}
 			else if (last_depth > 0 &&
-					 last_depth <= pts->num_rels)
+					 last_depth <= pts->num_inner_rels)
 			{
 				pts->inners[last_depth-1].inner_load_src = src_list;
 				pts->inners[last_depth-1].inner_load_dst = dst_list;
@@ -1433,9 +1435,11 @@ pgstromCreateTaskState(CustomScan *cscan,
 {
 	pgstromPlanInfo *pp_info = deform_pgstrom_plan_info(cscan);
 	pgstromTaskState *pts;
-	int		num_rels = list_length(cscan->custom_plans);
+	int		num_inner_rels = list_length(cscan->custom_plans);
+	int		num_scan_rels = 0;
 
-	pts = palloc0(offsetof(pgstromTaskState, inners[num_rels]));
+	pts = palloc0(offsetof(pgstromTaskState, inners[num_inner_rels +
+													num_scan_rels]));
 	NodeSetTag(pts, T_CustomScanState);
 	pts->css.flags = cscan->flags;
 	pts->css.methods = methods;
@@ -1444,8 +1448,8 @@ pgstromCreateTaskState(CustomScan *cscan,
 #endif
 	pts->xpu_task_flags = pp_info->xpu_task_flags;
 	pts->pp_info = pp_info;
-	Assert(pp_info->num_rels == num_rels);
-	pts->num_rels = num_rels;
+	Assert(pp_info->num_inner_rels == num_inner_rels);
+	pts->num_inner_rels = num_inner_rels;
 
 	return (Node *)pts;
 }
@@ -1468,8 +1472,8 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 	Assert(rel != NULL &&
 		   outerPlanState(node) == NULL &&
 		   innerPlanState(node) == NULL &&
-		   pp_info->num_rels == list_length(cscan->custom_plans) &&
-		   pts->num_rels == list_length(cscan->custom_plans));
+		   pp_info->num_inner_rels == list_length(cscan->custom_plans) &&
+		   pts->num_inner_rels == list_length(cscan->custom_plans));
 	/*
 	 * PG-Strom supports:
 	 * - regular relation with 'heap' access method
@@ -1624,7 +1628,7 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 		pts->css.custom_ps = lappend(pts->css.custom_ps, istate->ps);
 		depth_index++;
 	}
-	Assert(depth_index == pts->num_rels);
+	Assert(depth_index == pts->num_inner_rels);
 
 	/*
 	 * Setup request buffer
@@ -1796,7 +1800,7 @@ __pgstromExecTaskOpenConnection(pgstromTaskState *pts)
 	if (!pts->ps_state)
 		pgstromSharedStateInitDSM(&pts->css, NULL, NULL);
 	/* preload inner buffer, if any */
-	if (pts->num_rels > 0)
+	if (pts->num_inner_rels > 0)
 	{
 		inner_handle = GpuJoinInnerPreload(pts);
 		if (inner_handle == 0)
@@ -1982,7 +1986,7 @@ pgstromExecEndTaskState(CustomScanState *node)
 		ExecDropSingleTupleTableSlot(pts->base_slot);
 	if (scan)
 		table_endscan(scan);
-	for (int i=0; i < pts->num_rels; i++)
+	for (int i=0; i < pts->num_inner_rels; i++)
 	{
 		pgstromTaskInnerState *istate = &pts->inners[i];
 
@@ -2053,13 +2057,13 @@ pgstromExecResetTaskState(CustomScanState *node)
 	{
 		pg_atomic_write_u64(&ps_state->scan_block_count, 0);
 		pg_atomic_write_u32(&ps_state->parallel_task_control, 0);
-		for (int i=0; i < ps_state->num_rels; i++)
+		for (int i=0; i < ps_state->num_inner_rels; i++)
 		{
-			pgstromSharedInnerState *istate = &ps_state->inners[i];
+			pgstromSharedInnerState *ps_istate = &ps_state->rels[i].inner;
 
-			pg_atomic_write_u64(&istate->inner_nitems, 0);
-			pg_atomic_write_u64(&istate->inner_usage, 0);
-			pg_atomic_write_u64(&istate->inner_total, 0);
+			pg_atomic_write_u64(&ps_istate->inner_nitems, 0);
+			pg_atomic_write_u64(&ps_istate->inner_usage, 0);
+			pg_atomic_write_u64(&ps_istate->inner_total, 0);
 		}
 		ps_state->preload_phase = 0;
 		ps_state->preload_nr_scanning = 0;
@@ -2087,13 +2091,14 @@ pgstromSharedStateEstimateDSM(CustomScanState *node,
 	Relation	relation = node->ss.ss_currentRelation;
 	EState	   *estate   = node->ss.ps.state;
 	Snapshot	snapshot = estate->es_snapshot;
-	int			num_rels = list_length(node->custom_ps);
+	int			num_inner_rels = list_length(node->custom_ps);
+	int			num_scan_rels = 0;
 	Size		len = 0;
 
 	if (pts->br_state)
 		len += pgstromBrinIndexEstimateDSM(pts);
-	len += MAXALIGN(offsetof(pgstromSharedState, inners[num_rels]));
-
+	len += MAXALIGN(offsetof(pgstromSharedState, rels[num_inner_rels +
+													  num_scan_rels]));
 	if (!pts->arrow_state)
 		len += table_parallelscan_estimate(relation, snapshot);
 
@@ -2112,8 +2117,10 @@ pgstromSharedStateInitDSM(CustomScanState *node,
 	Relation	relation = node->ss.ss_currentRelation;
 	EState	   *estate   = node->ss.ps.state;
 	Snapshot	snapshot = estate->es_snapshot;
-	int			num_rels = list_length(node->custom_ps);
-	size_t		dsm_length = offsetof(pgstromSharedState, inners[num_rels]);
+	int			num_inner_rels = list_length(node->custom_ps);
+	int			num_scan_rels = 0;
+	size_t		dsm_length = offsetof(pgstromSharedState, rels[num_inner_rels +
+															   num_scan_rels]);
 	char	   *dsm_addr = coordinate;
 	pgstromSharedState *ps_state;
 	TableScanDesc scan = NULL;
@@ -2169,10 +2176,10 @@ pgstromSharedStateInitDSM(CustomScanState *node,
 		(uint64_t)pts->css.ss.ps.plan->plan_node_id;
 	ps_state->pgsql_curr_xid = GetCurrentTransactionIdIfAny();
 	ps_state->pgsql_curr_cid = GetCurrentCommandId(true);
-	ps_state->num_rels = num_rels;
+	ps_state->num_inner_rels = num_inner_rels;
 	pthreadCondInitShared(&ps_state->preload_cond);
 	pthreadMutexInitShared(&ps_state->preload_mutex);
-	if (num_rels > 0)
+	if (num_inner_rels > 0)
 		ps_state->preload_shmem_handle = __shmemCreate();
 	pts->ps_state = ps_state;
 	pts->css.ss.ss_currentScanDesc = scan;
@@ -2189,13 +2196,15 @@ pgstromSharedStateAttachDSM(CustomScanState *node,
 	pgstromTaskState *pts = (pgstromTaskState *)node;
 	pgstromSharedState *ps_state;
 	char	   *dsm_addr = coordinate;
-	int			num_rels = list_length(pts->css.custom_ps);
+	int			num_inner_rels = list_length(pts->css.custom_ps);
+	int			num_scan_rels = 0;
 
 	if (pts->br_state)
 		dsm_addr += pgstromBrinIndexAttachDSM(pts, dsm_addr);
 	pts->ps_state = ps_state = (pgstromSharedState *)dsm_addr;
-	Assert(ps_state->num_rels == num_rels);
-	dsm_addr += MAXALIGN(offsetof(pgstromSharedState, inners[num_rels]));
+	Assert(ps_state->num_inner_rels == num_inner_rels);
+	dsm_addr += MAXALIGN(offsetof(pgstromSharedState, rels[num_inner_rels +
+														   num_scan_rels]));
 
 	if (pts->gcache_desc)
 		pgstromGpuCacheAttachDSM(pts, pts->ps_state);
@@ -2230,7 +2239,8 @@ pgstromSharedStateShutdownDSM(CustomScanState *node)
 	if (src_state)
 	{
 		size_t	sz = offsetof(pgstromSharedState,
-							  inners[src_state->num_rels]);
+							  rels[src_state->num_inner_rels +
+								   src_state->num_scan_rels]);
 		dst_state = MemoryContextAllocZero(estate->es_query_cxt, sz);
 		memcpy(dst_state, src_state, sz);
 		pts->ps_state = dst_state;
@@ -2625,7 +2635,7 @@ pgstromExplainTaskState(CustomScanState *node,
 	}
 	/* GPU JOIN */
 	ntuples = pp_info->scan_nrows;
-	for (int i=0; i < pp_info->num_rels; i++)
+	for (int i=0; i < pp_info->num_inner_rels; i++)
 	{
 		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[i];
 
@@ -2667,10 +2677,9 @@ pgstromExplainTaskState(CustomScanState *node,
 				}
 				if (ps_state && es->analyze)
 				{
-					uint64_t	next_ntuples
-						= pg_atomic_read_u64(&ps_state->inners[i].stats_join);
-					uint64_t	roj_ntuples
-						= pg_atomic_read_u64(&ps_state->inners[i].stats_roj);
+					pgstromSharedInnerState *ps_istate = &ps_state->rels[i].inner;
+					uint64_t	next_ntuples = pg_atomic_read_u64(&ps_istate->stats_join);
+					uint64_t	roj_ntuples  = pg_atomic_read_u64(&ps_istate->stats_roj);
 					if (roj_ntuples == 0)
 					{
 						appendStringInfo(&buf, "%sexec: %lu -> %lu",
@@ -2753,7 +2762,7 @@ pgstromExplainTaskState(CustomScanState *node,
 			if (es->analyze && ps_state)
 			{
 				appendStringInfo(&buf, " [fetched: %lu]",
-								 pg_atomic_read_u64(&ps_state->inners[i].stats_gist));
+								 pg_atomic_read_u64(&ps_state->rels[i].inner.stats_gist));
 			}
 			snprintf(label, sizeof(label),
 					 "GPU GiST Join [%d]", i+1);
@@ -2795,21 +2804,22 @@ pgstromExplainTaskState(CustomScanState *node,
 	 */
 	if (es->analyze && ps_state)
 	{
-		uint64_t   *fallback_nitems = alloca(sizeof(uint64_t) * (pts->num_rels + 1));
+		uint64_t   *fallback_nitems = alloca(sizeof(uint64_t) * (pts->num_inner_rels + 1));
 		bool		fallback_exists;
 
 		fallback_nitems[0] = pg_atomic_read_u64(&ps_state->fallback_nitems);
 		fallback_exists = (fallback_nitems[0] > 0);
-		for (int i=1; i <= pts->num_rels; i++)
+		for (int i=1; i <= pts->num_inner_rels; i++)
 		{
-			fallback_nitems[i] = pg_atomic_read_u64(&ps_state->inners[i-1].fallback_nitems);
+			pgstromSharedInnerState *ps_istate = &ps_state->rels[i-1].inner;
+			fallback_nitems[i] = pg_atomic_read_u64(&ps_istate->fallback_nitems);
 			if (fallback_nitems[i] > 0)
 				fallback_exists = true;
 		}
 		if (fallback_exists)
 		{
 			resetStringInfo(&buf);
-			for (int i=0; i <= pts->num_rels; i++)
+			for (int i=0; i <= pts->num_inner_rels; i++)
 			{
 				if (i > 0)
 					appendStringInfo(&buf, ", ");
@@ -2872,7 +2882,7 @@ pgstromExplainTaskState(CustomScanState *node,
 							 pp_info->gpusort_htup_margin);
 		if (es->analyze && ps_state)
 		{
-			pgstromSharedInnerState *istate = &ps_state->inners[pp_info->num_rels - 1];
+			pgstromSharedInnerState *istate = &ps_state->rels[pp_info->num_inner_rels-1].inner;
 
 			appendStringInfo(&buf, " [buffer reconstruction: %umsec, GPU-sorting %umsec]",
 							 pg_atomic_read_u32(&ps_state->final_reconstruction_msec),

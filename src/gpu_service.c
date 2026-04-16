@@ -1735,7 +1735,7 @@ __setupGpuQueryJoinGiSTIndexBuffer(gpuClient *gclient,
 	void	   *kern_args[10];
 	bool		has_gist = false;
 
-	for (int depth=1; depth <= h_kmrels->num_rels; depth++)
+	for (int depth=1; depth <= h_kmrels->num_inner_rels; depth++)
 	{
 		if (h_kmrels->chunks[depth-1].gist_offset == 0)
 			continue;
@@ -2322,7 +2322,7 @@ __setupGpuQueryJoinInnerBuffer(gpuClient *gclient,
 		goto error;
 	}
 	memcpy(m_kmrels, h_kmrels, mmap_sz);
-	for (int depth=1; depth <= m_kmrels->num_rels; depth++)
+	for (int depth=1; depth <= m_kmrels->num_inner_rels; depth++)
 	{
 		if (m_kmrels->chunks[depth-1].pinned_buffer)
 		{
@@ -4238,7 +4238,7 @@ gpuservHandleGpuTaskExec(gpuContext *gcontext,
 		kern_buffer_partitions *kbuf_parts;
 
 		m_kmrels = gq_buf->m_kmrels;
-		num_inner_rels = h_kmrels->num_rels;
+		num_inner_rels = h_kmrels->num_inner_rels;
 
 		kbuf_parts = KERN_MULTIRELS_PARTITION_DESC((kern_multirels *)m_kmrels, -1);
 		if (kbuf_parts)
@@ -4454,7 +4454,7 @@ gpuservHandleRightOuterJoin(gpuClient *gclient,
 	kern_multirels	   *d_kmrels = (kern_multirels *)gq_buf->m_kmrels;
 	kern_data_store	   *kds_dst = GQBUF_KDS_FINAL(gq_buf);
 	gpuMemChunk		   *d_chunk = NULL;
-	int					num_rels = (d_kmrels ? d_kmrels->num_rels : 0);
+	int					num_rels = (d_kmrels ? d_kmrels->num_inner_rels : 0);
 	bool				retval = false;
 
 	for (int depth=1; depth <= num_rels; depth++)
@@ -5724,7 +5724,7 @@ gpuservHandleGpuTaskFinal(gpuContext *gcontext,
 	struct iovec   *iov;
 	int				iovcnt = 0;
 	int				iovmax = (6 * numGpuDevAttrs + 10);
-	int				num_rels = (h_kmrels ? h_kmrels->num_rels : 0);
+	int				num_rels = (h_kmrels ? h_kmrels->num_inner_rels : 0);
 	XpuCommand	   *resp;
 	size_t			resp_sz;
 
@@ -5759,7 +5759,7 @@ gpuservHandleGpuTaskFinal(gpuContext *gcontext,
 			{
 				if ((gclient->optimal_gpus & (1UL<<dindex)) == 0)
 					continue;
-				for (int depth=1; depth <= d_kmrels->num_rels; depth++)
+				for (int depth=1; depth <= d_kmrels->num_inner_rels; depth++)
 				{
 					kern_data_store *kds = KERN_MULTIRELS_INNER_KDS(h_kmrels, depth);
 					bool   *d_ojmap;

@@ -372,7 +372,7 @@ __execFallbackCpuJoinOneDepth(pgstromTaskState *pts,
 							  uint64_t l_state,
 							  bool matched)
 {
-	if (depth > pts->num_rels)
+	if (depth > pts->num_inner_rels)
 	{
 		ExprContext	   *econtext = pts->css.ss.ps.ps_ExprContext;
 		TupleTableSlot *scan_slot = pts->css.ss.ss_ScanTupleSlot;
@@ -530,8 +530,8 @@ execCpuFallbackOneChunk(pgstromTaskState *pts)
 
 				if (depth == 0)
 					pg_atomic_fetch_add_u64(&ps_state->fallback_nitems, 1);
-				else if (depth <= pts->num_rels)
-					pg_atomic_fetch_add_u64(&ps_state->inners[depth-1].fallback_nitems, 1);
+				else if (depth <= pts->num_inner_rels)
+					pg_atomic_fetch_add_u64(&ps_state->rels[depth-1].inner.fallback_nitems, 1);
 			}
 			execCpuFallbackOneTuple(pts,
 									fb_item->depth,
@@ -584,7 +584,7 @@ __execFallbackCpuJoinRightOuterOneDepth(pgstromTaskState *pts, int depth)
 void
 ExecFallbackCpuJoinRightOuter(pgstromTaskState *pts)
 {
-	for (int depth=1; depth <= pts->num_rels; depth++)
+	for (int depth=1; depth <= pts->num_inner_rels; depth++)
 	{
 		JoinType	join_type = pts->inners[depth-1].join_type;
 

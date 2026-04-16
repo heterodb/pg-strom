@@ -530,7 +530,7 @@ pgstrom_remember_op_normal(PlannerInfo *root,
 	bool		found;
 
 	/* sanity checks */
-	Assert(list_length(op_leaf->inner_paths_list) == op_leaf->pp_info->num_rels);
+	Assert(list_length(op_leaf->inner_paths_list) == op_leaf->pp_info->num_inner_rels);
 	op_leaf->outer_rel = outer_rel;
 
 	/* lookup the hash-table */
@@ -588,7 +588,7 @@ pgstrom_remember_op_leafs(PlannerInfo *root,
 		pgstromOuterPathLeafInfo *op_leaf = lfirst(cell);
 
 		/* sanity checks */
-		Assert(list_length(op_leaf->inner_paths_list) == op_leaf->pp_info->num_rels);
+		Assert(list_length(op_leaf->inner_paths_list) == op_leaf->pp_info->num_inner_rels);
 		op_leaf->outer_rel = parent_rel;
 		total_cost += op_leaf->leaf_cost;
 

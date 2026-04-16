@@ -345,14 +345,14 @@ typedef struct
 	List	   *select_into_proj;		/* SELECT INTO direct projection if any */
 	/* inner relations */
 	int			sibling_param_id;
-	int			num_rels;
+	int			num_inner_rels;
 	pgstromPlanInnerInfo inners[FLEXIBLE_ARRAY_MEMBER];
 } pgstromPlanInfo;
 
 #define PP_INFO_NUM_ROWS(pp_info)								\
-	((pp_info)->num_rels == 0									\
+	((pp_info)->num_inner_rels == 0								\
 	 ? (pp_info)->scan_nrows									\
-	 : (pp_info)->inners[(pp_info)->num_rels - 1].join_nrows)
+	 : (pp_info)->inners[(pp_info)->num_inner_rels - 1].join_nrows)
 
 /*
  * context for partition-wise xPU-Join/PreAgg pushdown per partition leaf
@@ -381,6 +381,29 @@ typedef struct
 	pg_atomic_uint64	stats_join;			/* # of tuples by this join */
 	pg_atomic_uint64	fallback_nitems;	/* # of fallback tuples */
 } pgstromSharedInnerState;
+
+typedef struct
+{
+	/* heap scan */
+	pg_atomic_uint64	scan_block_count;	/* scan counter */
+	uint32_t			scan_block_nums;	/* = HeapScanDesc::rs_numblocks */
+	uint32_t			scan_block_start;	/* = HeapScanDesc::rs_startblock */
+	/* for arrow_fdw */
+	pg_atomic_uint32	arrow_rbatch_index;
+	pg_atomic_uint32	arrow_rbatch_nload;	/* # of loaded record-batches */
+	pg_atomic_uint32	arrow_rbatch_nskip;	/* # of skipped record-batches */
+	pg_atomic_uint32	nchunks_parquet_read; /* # of chunks in file read by arrow/parquet */
+	pg_atomic_uint32	ncaches_parquet_load; /* # of caches loaded by parquet */
+	/* for brin-index */
+	pg_atomic_uint32	brin_index_fetched;
+	pg_atomic_uint32	brin_index_skipped;
+	/* statistics */
+	pg_atomic_uint64	npages_direct_read;	/* read by GPU-Direct Storage */
+	pg_atomic_uint64	npages_vfs_read;	/* read from VFS layer */
+	pg_atomic_uint64	npages_buffer_read;	/* read from PG buffer */
+	pg_atomic_uint64	source_ntuples_raw;	/* # of raw tuples in the base relation */
+	pg_atomic_uint64	source_ntuples_in;	/* # of tuples survived from WHERE-quals */
+} pgstromSharedScanState;
 
 typedef struct
 {
@@ -434,9 +457,13 @@ typedef struct
 	int					preload_nr_setup;	/* # of setup process */
 	uint32_t			preload_shmem_handle; /* host buffer handle */
 	uint64_t			preload_shmem_length; /* host buffer length */
-	/* for join-inner relations */
-	uint32_t			num_rels;			/* if xPU-JOIN involved */
-	pgstromSharedInnerState inners[FLEXIBLE_ARRAY_MEMBER];
+	/* shared state for each inner/scan relation */
+	uint32_t			num_inner_rels;		/* for GPU-JOIN inner relations */
+	uint32_t			num_scan_rels;		/* for base relations to be scanned */
+	union {
+		pgstromSharedInnerState	inner;
+		pgstromSharedScanState	scan;
+	} rels[FLEXIBLE_ARRAY_MEMBER];
 	/*
 	 * MEMO: ...and ParallelBlockTableScanDescData should be allocated
 	 *       next to the inners[nmum_rels] array
@@ -530,7 +557,7 @@ struct pgstromTaskState
 	XpuCommand		 *(*cb_next_chunk)(struct pgstromTaskState *pts,
 									   struct iovec *xcmd_iov, int *xcmd_iovcnt);
 	/* inner relations state (if JOIN) */
-	int					num_rels;
+	int					num_inner_rels;
 	pgstromTaskInnerState inners[FLEXIBLE_ARRAY_MEMBER];
 };
 typedef struct pgstromTaskState		pgstromTaskState;
@@ -574,7 +601,7 @@ typedef struct
 	int			kvecs_ndims;
 	uint32_t	kvecs_usage;
 	Index		base_relid;		/* depth==0 */
-	int			num_rels;
+	int			num_inner_rels;
 	struct {
 		PathTarget *inner_target;
 	} pd[1];

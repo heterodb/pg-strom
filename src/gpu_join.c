@@ -206,7 +206,7 @@ tryPinnedInnerJoinBufferPath(pgstromPlanInfo *pp_info,
 	 * should not have RIGHT/FULL OUTER JOIN before pinned inner buffer
 	 * (including the current-depth itself)
 	 */
-	for (int j=0; j < pp_info->num_rels; j++)
+	for (int j=0; j < pp_info->num_inner_rels; j++)
 	{
 		pgstromPlanInnerInfo *__pp_inner = &pp_info->inners[j];
 
@@ -330,7 +330,7 @@ fixup_join_varnullingrels(RelOptInfo *joinrel, pgstromPlanInfo *pp_info)
 	__FIXUP_FIELD(pp_info->scan_quals);
 	__FIXUP_FIELD(pp_info->brin_index_conds);
 	__FIXUP_FIELD(pp_info->brin_index_quals);
-	for (int i=0; i < pp_info->num_rels; i++)
+	for (int i=0; i < pp_info->num_inner_rels; i++)
 	{
 		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[i];
 
@@ -508,7 +508,7 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 	pp_info->xpu_task_flags |= DEVTASK__JOIN;
 	pp_info->sibling_param_id = sibling_param_id;
 
-	pp_inner = &pp_info->inners[pp_info->num_rels++];
+	pp_inner = &pp_info->inners[pp_info->num_inner_rels++];
 	pp_inner->join_type = join_type;
 	pp_inner->hash_outer_keys = hash_outer_keys;
 	pp_inner->hash_inner_keys = hash_inner_keys;
@@ -734,7 +734,7 @@ __build_simple_xpujoin_path(PlannerInfo *root,
 							  pp_info->final_cost);
 	cpath->flags = CUSTOMPATH_SUPPORT_PROJECTION;
 	cpath->methods = xpujoin_path_methods;
-	Assert(list_length(inner_paths_list) == pp_info->num_rels);
+	Assert(list_length(inner_paths_list) == pp_info->num_inner_rels);
 	cpath->custom_paths = inner_paths_list;
 	cpath->custom_private = list_make1(pp_info);
 	if (p_op_leaf)
@@ -1623,7 +1623,7 @@ pgstrom_build_join_tlist_dev(codegen_context *context,
 	List	   *inner_target_list = NIL;
 	ListCell   *lc;
 
-	for (int depth=1; depth <= context->num_rels; depth++)
+	for (int depth=1; depth <= context->num_inner_rels; depth++)
 	{
 		PathTarget *target = context->pd[depth].inner_target;
 
@@ -1761,7 +1761,7 @@ build_explain_tlist_junks(codegen_context *context,
 	__build_explain_tlist_junks_walker((Node *)pp_info->host_quals, context);
 	__build_explain_tlist_junks_walker((Node *)pp_info->scan_quals, context);
 
-	for (int i=0; i < pp_info->num_rels; i++)
+	for (int i=0; i < pp_info->num_inner_rels; i++)
 	{
 		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[i];
 
@@ -1827,7 +1827,7 @@ PlanGpuJoinPathCommon(PlannerInfo *root,
 	List	   *hash_keys_stacked = NIL;
 	List	   *gist_quals_stacked = NIL;
 
-	Assert(pp_info->num_rels == list_length(custom_plans));
+	Assert(pp_info->num_inner_rels == list_length(custom_plans));
 	/* codegen for outer scan, if any */
 	if (pp_info->scan_quals)
 	{
@@ -1841,7 +1841,7 @@ PlanGpuJoinPathCommon(PlannerInfo *root,
 	/*
 	 * codegen for hashing, join-quals, and gist-quals
 	 */
-	for (int i=0; i < pp_info->num_rels; i++)
+	for (int i=0; i < pp_info->num_inner_rels; i++)
 	{
 		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[i];
 
@@ -2216,11 +2216,12 @@ innerPreloadSetupPinnedInnerBufferPartitions(kern_multirels *h_kmrels,
 	size_t		largest_sz = 0;
 	int			largest_depth = -1;
 
-	for (int depth=1; depth <= pts->num_rels; depth++)
+	for (int depth=1; depth <= pts->num_inner_rels; depth++)
 	{
 		if (pts->inners[depth-1].inner_pinned_buffer)
 		{
-			size_t	sz = pg_atomic_read_u64(&ps_state->inners[depth-1].inner_total);
+			pgstromSharedInnerState *ps_istate = &ps_state->rels[depth-1].inner;
+			size_t	sz = pg_atomic_read_u64(&ps_istate->inner_total);
 
 			if (largest_depth < 0 || sz > largest_sz)
 			{
@@ -2328,18 +2329,19 @@ innerPreloadAllocHostBuffer(pgstromTaskState *pts)
 	 * 2nd pass: initialization of buffer metadata
 	 */
 again:
-	offset = MAXALIGN(offsetof(kern_multirels, chunks[pts->num_rels]));
+	offset = MAXALIGN(offsetof(kern_multirels, chunks[pts->num_inner_rels]));
 	offset += innerPreloadSetupPinnedInnerBufferPartitions(h_kmrels, pts, offset);
-	for (int depth=1; depth <= pts->num_rels; depth++)
+	for (int depth=1; depth <= pts->num_inner_rels; depth++)
 	{
 		pgstromTaskInnerState *istate = &pts->inners[depth-1];
+		pgstromSharedInnerState *ps_istate = &ps_state->rels[depth-1].inner;
 		TupleDesc	tupdesc = istate->ps->ps_ResultTupleDesc;
 		uint64_t	nrooms;
 		uint64_t	usage;
 		size_t		nbytes;
 
-		nrooms = pg_atomic_read_u64(&ps_state->inners[depth-1].inner_nitems);
-		usage  = pg_atomic_read_u64(&ps_state->inners[depth-1].inner_usage);
+		nrooms = pg_atomic_read_u64(&ps_istate->inner_nitems);
+		usage  = pg_atomic_read_u64(&ps_istate->inner_usage);
 		if (nrooms >= UINT_MAX)
 			elog(ERROR, "GpuJoin: Inner Relation[%d] has %lu tuples, too large",
 				 depth, nrooms);
@@ -2464,7 +2466,7 @@ again:
 	 */
 	offset = PAGE_ALIGN(offset);
 	ojmap_sz = 0;
-	for (int depth=1; depth <= pts->num_rels; depth++)
+	for (int depth=1; depth <= pts->num_inner_rels; depth++)
 	{
 		pgstromTaskInnerState *istate = &pts->inners[depth-1];
 		uint64_t	nrooms;
@@ -2473,7 +2475,8 @@ again:
 		if (istate->join_type == JOIN_RIGHT ||
 			istate->join_type == JOIN_FULL)
         {
-			nrooms = pg_atomic_read_u64(&ps_state->inners[depth-1].inner_nitems);
+			pgstromSharedInnerState *ps_istate = &ps_state->rels[depth-1].inner;
+			nrooms = pg_atomic_read_u64(&ps_istate->inner_nitems);
 			nbytes = MAXALIGN(sizeof(bool) * nrooms);
 			if (h_kmrels)
 			{
@@ -2501,10 +2504,10 @@ again:
 		Assert(ps_state->preload_shmem_handle != 0);
 		h_kmrels = __mmapShmem(ps_state->preload_shmem_handle, offset);
 		memset(h_kmrels, 0, offsetof(kern_multirels,
-									 chunks[pts->num_rels]));
+									 chunks[pts->num_inner_rels]));
 		h_kmrels->length = offset;
 		h_kmrels->ojmap_sz = PAGE_ALIGN(ojmap_sz);
-		h_kmrels->num_rels = pts->num_rels;
+		h_kmrels->num_inner_rels = pts->num_inner_rels;
 		ps_state->preload_shmem_length = offset;
 		goto again;
 	}
@@ -2589,14 +2592,8 @@ __innerPreloadSetupHashBuffer(kern_data_store *kds,
 uint32_t
 GpuJoinInnerPreload(pgstromTaskState *pts)
 {
-	pgstromTaskState   *leader = pts;
-	pgstromSharedState *ps_state;
+	pgstromSharedState *ps_state = pts->ps_state;
 	MemoryContext		memcxt;
-
-	//pick up leader's ps_state if partitionwise plan
-	//if (sibling is exist)
-	// leader = pts->sibling->leader;
-	ps_state = leader->ps_state;
 
 	/* memory context for temporary store  */
 	memcxt = AllocSetContextCreate(CurrentMemoryContext,
@@ -2614,9 +2611,10 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 			/*
 			 * Scan inner relations, often in parallel
 			 */
-			for (int i=0; i < pts->num_rels; i++)
+			for (int i=0; i < pts->num_inner_rels; i++)
 			{
-				pgstromTaskInnerState *istate = &leader->inners[i];
+				pgstromTaskInnerState *istate = &pts->inners[i];
+				pgstromSharedInnerState *ps_istate = &ps_state->rels[i].inner;
 
 				if (istate->inner_pinned_buffer)
 				{
@@ -2631,16 +2629,16 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 					Assert(pgstrom_is_gpuscan_state(istate->ps) ||
 						   pgstrom_is_gpujoin_state(istate->ps));
 					execInnerPreLoadPinnedOneDepth((pgstromTaskState *)istate->ps,
-												   &ps_state->inners[i].inner_nitems,
-												   &ps_state->inners[i].inner_usage,
-												   &ps_state->inners[i].inner_total,
-												   &pts->inners[i].inner_buffer_id);
+												   &ps_istate->inner_nitems,
+												   &ps_istate->inner_usage,
+												   &ps_istate->inner_total,
+												   &istate->inner_buffer_id);
 				}
 				else
 				{
 					execInnerPreloadOneDepth(memcxt, pts, istate,
-											 &ps_state->inners[i].inner_nitems,
-											 &ps_state->inners[i].inner_usage);
+											 &ps_istate->inner_nitems,
+											 &ps_istate->inner_usage);
 				}
 			}
 
@@ -2682,7 +2680,7 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 			 */
 			PG_TRY();
 			{
-				innerPreloadAllocHostBuffer(leader);
+				innerPreloadAllocHostBuffer(pts);
 			}
 			PG_CATCH();
 			{
@@ -2701,9 +2699,9 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 											ps_state->preload_shmem_length);
 			}
 
-			for (int depth=1; depth <= leader->num_rels; depth++)
+			for (int depth=1; depth <= pts->num_inner_rels; depth++)
 			{
-				pgstromTaskInnerState *istate = &leader->inners[depth-1];
+				pgstromTaskInnerState *istate = &pts->inners[depth-1];
 				inner_preload_buffer *preload_buf = istate->preload_buffer;
 				kern_data_store *kds = KERN_MULTIRELS_INNER_KDS(pts->h_kmrels, depth);
 				uint64_t	base_nitems;
@@ -2804,7 +2802,7 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 void
 GpuJoinInnerPreloadAfterWorks(pgstromTaskState *pts)
 {
-	for (int i=0; i < pts->num_rels; i++)
+	for (int i=0; i < pts->num_inner_rels; i++)
 	{
 		pgstromTaskInnerState *istate = &pts->inners[i];
 

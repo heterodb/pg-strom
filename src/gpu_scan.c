@@ -845,7 +845,7 @@ assign_custom_cscan_tlist(List *tlist_dev, pgstromPlanInfo *pp_info)
 			codegen_kvar_defitem *kvdef = lfirst(lc2);
 
 			if (kvdef->kv_depth >= 0 &&
-				kvdef->kv_depth <= pp_info->num_rels &&
+				kvdef->kv_depth <= pp_info->num_inner_rels &&
 				kvdef->kv_resno != InvalidAttrNumber &&
 				equal(tle->expr, kvdef->kv_expr))
 			{

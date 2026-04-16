@@ -179,8 +179,8 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 	privs = lappend(privs, pp_info->select_into_proj);
 	/* inner relations */
 	privs = lappend(privs, makeInteger(pp_info->sibling_param_id));
-	privs = lappend(privs, makeInteger(pp_info->num_rels));
-	for (int i=0; i < pp_info->num_rels; i++)
+	privs = lappend(privs, makeInteger(pp_info->num_inner_rels));
+	for (int i=0; i < pp_info->num_inner_rels; i++)
 	{
 		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[i];
 		List   *__exprs = NIL;
@@ -297,10 +297,10 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	pp_data.select_into_proj = list_nth(privs, pindex++);
 	/* inner relations */
 	pp_data.sibling_param_id = intVal(list_nth(privs, pindex++));
-	pp_data.num_rels = intVal(list_nth(privs, pindex++));
-	pp_info = palloc0(offsetof(pgstromPlanInfo, inners[pp_data.num_rels]));
+	pp_data.num_inner_rels = intVal(list_nth(privs, pindex++));
+	pp_info = palloc0(offsetof(pgstromPlanInfo, inners[pp_data.num_inner_rels]));
 	memcpy(pp_info, &pp_data, offsetof(pgstromPlanInfo, inners));
-	for (int i=0; i < pp_info->num_rels; i++)
+	for (int i=0; i < pp_info->num_inner_rels; i++)
 	{
 		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[i];
 		List   *__exprs = list_nth(exprs, eindex++);
@@ -341,9 +341,9 @@ copy_pgstrom_plan_info(const pgstromPlanInfo *pp_orig)
 	/*
 	 * NOTE: we add one pgstromPlanInnerInfo margin to be used for GpuJoin.
 	 */
-	pp_dest = palloc0(offsetof(pgstromPlanInfo, inners[pp_orig->num_rels+1]));
+	pp_dest = palloc0(offsetof(pgstromPlanInfo, inners[pp_orig->num_inner_rels+1]));
 	memcpy(pp_dest, pp_orig, offsetof(pgstromPlanInfo,
-									  inners[pp_orig->num_rels]));
+									  inners[pp_orig->num_inner_rels]));
 	pp_dest->used_params      = list_copy(pp_dest->used_params);
 	pp_dest->host_quals       = copyObject(pp_dest->host_quals);
 	pp_dest->scan_quals       = copyObject(pp_dest->scan_quals);
@@ -362,7 +362,7 @@ copy_pgstrom_plan_info(const pgstromPlanInfo *pp_orig)
 	pp_dest->groupby_actions  = list_copy(pp_dest->groupby_actions);
 	pp_dest->groupby_typmods  = list_copy(pp_dest->groupby_typmods);
 	pp_dest->projection_hashkeys = copyObject(pp_dest->projection_hashkeys);
-	for (int j=0; j < pp_orig->num_rels; j++)
+	for (int j=0; j < pp_orig->num_inner_rels; j++)
 	{
 		pgstromPlanInnerInfo *pp_inner = &pp_dest->inners[j];
 

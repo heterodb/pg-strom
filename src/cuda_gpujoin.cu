@@ -1063,7 +1063,7 @@ kern_gpujoin_main(kern_session_info *session,
 	uint64_t		   *l_state;
 	bool			   *matched;
 	uint32_t			wp_base_sz;
-	uint32_t			n_rels = (kmrels ? kmrels->num_rels : 0);
+	uint32_t			n_rels = (kmrels ? kmrels->num_inner_rels : 0);
 	int					depth;
 
 	/* sanity checks */

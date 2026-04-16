@@ -1469,7 +1469,7 @@ lookup_input_varnode_defitem(codegen_context *context,
 		goto found;
 	}
 
-	for (depth = 1; depth <= context->num_rels; depth++)
+	for (depth = 1; depth <= context->num_inner_rels; depth++)
 	{
 		PathTarget *target = context->pd[depth].inner_target;
 
@@ -1645,16 +1645,16 @@ create_codegen_context(PlannerInfo *root,
 	int			depth = 1;
 
 	/* allocation with possible max length */
-	context = palloc0(offsetof(codegen_context, pd[pp_info->num_rels +
-												   pp_info->num_rels + 2]));
+	context = palloc0(offsetof(codegen_context, pd[pp_info->num_inner_rels +
+												   pp_info->num_inner_rels + 2]));
 	context->elevel = ERROR;
 	context->root = root;
 	context->xpu_task_flags = pp_info->xpu_task_flags;
-	context->kvecs_ndims = pp_info->num_rels + 1;
+	context->kvecs_ndims = pp_info->num_inner_rels + 1;
 	context->kvecs_usage = 0;
 	context->base_relid = pp_info->base_relid;
-	context->num_rels = pp_info->num_rels;
-	Assert(pp_info->num_rels == list_length(cpath->custom_paths));
+	context->num_inner_rels = pp_info->num_inner_rels;
+	Assert(pp_info->num_inner_rels == list_length(cpath->custom_paths));
 	foreach (lc, cpath->custom_paths)
 	{
 		Path   *ipath = lfirst(lc);
@@ -2968,7 +2968,7 @@ __codegen_build_movevars_one(codegen_context *context, int depth, int gist_depth
 	kexp->args_offset = sz;
 	kexp->u.move.depth = depth;
 
-	Assert(depth >= 0 && depth <= context->num_rels);
+	Assert(depth >= 0 && depth <= context->num_inner_rels);
 	foreach (lc, context->kvars_deflist)
 	{
 		const codegen_kvar_defitem *kvdef = lfirst(lc);
@@ -3012,14 +3012,14 @@ codegen_build_packed_kvars_move(codegen_context *context, pgstromPlanInfo *pp_in
 	StringInfoData buf;
 	size_t		sz;
 	int			nvalids = 0;
-	int			gist_depth = context->num_rels + 1;
+	int			gist_depth = context->num_inner_rels + 1;
 
 	/* Only NVIDIA-GPU has kvec-buffer for MoveVars across depth */
 	if ((context->xpu_task_flags & DEVKIND__NVIDIA_GPU) == 0)
 		return;
 
 	sz = MAXALIGN(offsetof(kern_expression,
-						   u.pack.offset[context->num_rels+1]));
+						   u.pack.offset[context->num_inner_rels+1]));
 	kexp = alloca(sz);
 	memset(kexp, 0, sz);
 	kexp->exptype  = TypeOpCode__int4;
@@ -3030,7 +3030,7 @@ codegen_build_packed_kvars_move(codegen_context *context, pgstromPlanInfo *pp_in
 
 	initStringInfo(&buf);
 	buf.len = sz;
-	for (int depth=0; depth <= context->num_rels; depth++)
+	for (int depth=0; depth <= context->num_inner_rels; depth++)
 	{
 		karg = __codegen_build_movevars_one(context, depth, -1);
 		if (karg)
@@ -3119,7 +3119,7 @@ try_inject_projection_expression(codegen_context *context,
 	int		pos = buf->len;
 
 	kvdef = __try_inject_temporary_expression(context, buf, expr,
-											  context->num_rels+1,
+											  context->num_inner_rels+1,
 											  true);
 	for (int i=0; i < kexp_proj->u.proj.nattrs; i++)
 	{
@@ -3503,18 +3503,18 @@ codegen_build_packed_gistevals(codegen_context *context,
 	bytea		   *result = NULL;
 
 	head_sz = MAXALIGN(offsetof(kern_expression,
-								u.pack.offset[pp_info->num_rels+1]));
+								u.pack.offset[pp_info->num_inner_rels+1]));
 	kexp = alloca(head_sz);
 	memset(kexp, 0, head_sz);
 	kexp->exptype  = TypeOpCode__int4;
     kexp->expflags = context->kexp_flags;
     kexp->opcode   = FuncOpCode__Packed;
     kexp->args_offset = head_sz;
-    kexp->u.pack.npacked = pp_info->num_rels + 1;
+    kexp->u.pack.npacked = pp_info->num_inner_rels + 1;
 
 	initStringInfo(&buf);
 	buf.len = head_sz;
-	for (int i=0; i < pp_info->num_rels; i++)
+	for (int i=0; i < pp_info->num_inner_rels; i++)
 	{
 		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[i];
 		Expr	   *gist_clause = pp_inner->gist_clause;
@@ -3636,7 +3636,7 @@ codegen_build_projection(codegen_context *context,
 		const kern_expression  *khash
 			= __codegen_build_hash_value(context,
 										 proj_hash,
-										 context->num_rels+1);
+										 context->num_inner_rels+1);
 		if (khash)
 			kexp->u.proj.hash = __appendBinaryStringInfo(&buf, khash, khash->len);
 	}
@@ -3695,7 +3695,7 @@ codegen_build_groupby_keyhash(codegen_context *context,
 			codegen_kvar_defitem *kvdef;
 
 			kvdef = __try_inject_temporary_expression(context, &buf, tle->expr,
-													  context->num_rels+1,
+													  context->num_inner_rels+1,
 													  false);
 			groupby_key_items = lappend(groupby_key_items, kvdef);
 			kexp.nr_args++;
@@ -3905,7 +3905,7 @@ try_inject_groupby_expression(codegen_context *context,
 
 	Assert(kexp_pagg->opcode == FuncOpCode__AggFuncs);
 	kvdef = __try_inject_temporary_expression(context, buf, expr,
-											  context->num_rels+1,
+											  context->num_inner_rels+1,
 											  false);
 	for (int i=0; i < kexp_pagg->u.pagg.nattrs; i++)
 	{
@@ -4238,8 +4238,8 @@ pgstrom_xpu_expression(Expr *expr,
 					   int *p_devcost)
 {
 	codegen_context *context;
-	int			num_rels = list_length(inner_target_list);
-	int			sz = offsetof(codegen_context, pd[num_rels+2]);
+	int			num_inner_rels = list_length(inner_target_list);
+	int			sz = offsetof(codegen_context, pd[num_inner_rels+2]);
 	int			depth;
 	ListCell   *lc;
 
@@ -4250,7 +4250,7 @@ pgstrom_xpu_expression(Expr *expr,
 	context->top_expr = expr;
 	context->xpu_task_flags = xpu_task_flags;
 	context->base_relid = scan_relid;
-	context->num_rels = num_rels;
+	context->num_inner_rels = num_inner_rels;
 	depth = 1;
 	foreach (lc, inner_target_list)
 		context->pd[depth++].inner_target = (PathTarget *)lfirst(lc);
@@ -5133,7 +5133,7 @@ pgstrom_explain_kvecs_buffer(const CustomScanState *css,
 	initStringInfo(&buf);
 	appendStringInfo(&buf, "nbytes: %u, ndims: %d",
 					 pp_info->kvecs_bufsz,
-					 pp_info->num_rels + 2);
+					 pp_info->num_inner_rels + 2);
 	if (nitems > 1)
 		appendStringInfo(&buf, ", items=[");
 	else if (nitems > 0)
