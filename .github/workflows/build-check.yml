@@ -1,11 +1,7 @@
 name: Build Check
 
-# Run build verification on PR creation (temporary) and after approval.
+# Run build verification after PR approval.
 on:
-  pull_request:
-    types: [opened, reopened, synchronize]
-  pull_request_review:
-    types: [submitted]
   push:
     branches: [master]
   workflow_dispatch:
@@ -20,7 +16,6 @@ jobs:
     if: >
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'push' && github.actor == 'kaigai') ||
-      github.event_name == 'pull_request' ||
       (github.event_name == 'pull_request_review' &&
        github.event.review.state == 'approved' &&
        (github.event.review.author_association == 'OWNER' ||
@@ -106,7 +101,6 @@ jobs:
     if: >
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'push' && github.actor == 'kaigai') ||
-      github.event_name == 'pull_request' ||
       (github.event_name == 'pull_request_review' &&
        github.event.review.state == 'approved' &&
        (github.event.review.author_association == 'OWNER' ||
