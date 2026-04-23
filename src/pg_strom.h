@@ -247,7 +247,6 @@ typedef struct devfunc_info
 } devfunc_info;
 
 typedef struct XpuConnection	XpuConnection;
-typedef struct GpuCacheDesc		GpuCacheDesc;
 typedef struct ArrowFdwState	ArrowFdwState;
 typedef struct BrinIndexState	BrinIndexState;
 
@@ -302,7 +301,7 @@ typedef struct
 	Cost		final_cost;			/* cost for sendback and host-side tasks */
 	double		final_nrows;		/* copy of result_rel->rows */
 	/* BRIN-index support */
-	Oid			brin_index_oid;		/* OID of BRIN-index, if any */
+	List	   *brin_index_oids;	/* OID of BRIN-index, if any */
 	List	   *brin_index_conds;	/* BRIN-index key conditions */
 	List	   *brin_index_quals;	/* Original BRIN-index qualifier */
 	/* XPU code for JOIN */
@@ -386,23 +385,27 @@ typedef struct
 {
 	/* heap scan */
 	pg_atomic_uint64	scan_block_count;	/* scan counter */
-	uint32_t			scan_block_nums;	/* = HeapScanDesc::rs_numblocks */
-	uint32_t			scan_block_start;	/* = HeapScanDesc::rs_startblock */
-	/* for arrow_fdw */
+	uint64_t			scan_block_nums;	/* =RelationGetNumberOfBlocks */
+	/* arrow_fdw */
 	pg_atomic_uint32	arrow_rbatch_index;
 	pg_atomic_uint32	arrow_rbatch_nload;	/* # of loaded record-batches */
 	pg_atomic_uint32	arrow_rbatch_nskip;	/* # of skipped record-batches */
 	pg_atomic_uint32	nchunks_parquet_read; /* # of chunks in file read by arrow/parquet */
 	pg_atomic_uint32	ncaches_parquet_load; /* # of caches loaded by parquet */
-	/* for brin-index */
-	pg_atomic_uint32	brin_index_fetched;
-	pg_atomic_uint32	brin_index_skipped;
 	/* statistics */
 	pg_atomic_uint64	npages_direct_read;	/* read by GPU-Direct Storage */
 	pg_atomic_uint64	npages_vfs_read;	/* read from VFS layer */
 	pg_atomic_uint64	npages_buffer_read;	/* read from PG buffer */
 	pg_atomic_uint64	source_ntuples_raw;	/* # of raw tuples in the base relation */
 	pg_atomic_uint64	source_ntuples_in;	/* # of tuples survived from WHERE-quals */
+	/* brin-index (variable length) */
+	pg_atomic_uint32	brin_num_fetched;
+	pg_atomic_uint32	brin_num_skipped;
+	pthread_mutex_t		brin_build_mutex;
+	int					brin_build_status;
+	uint32_t			brin_nitems;
+	pg_atomic_uint32	brin_index;
+	BlockNumber			brin_chunks[FLEXIBLE_ARRAY_MEMBER];
 } pgstromSharedScanState;
 
 typedef struct
@@ -457,21 +460,11 @@ typedef struct
 	int					preload_nr_setup;	/* # of setup process */
 	uint32_t			preload_shmem_handle; /* host buffer handle */
 	uint64_t			preload_shmem_length; /* host buffer length */
-	/* shared state for each inner/scan relation */
-	uint32_t			num_inner_rels;		/* for GPU-JOIN inner relations */
-	uint32_t			num_scan_rels;		/* for base relations to be scanned */
-	union {
-		pgstromSharedInnerState	inner;
-		pgstromSharedScanState	scan;
-	} rels[FLEXIBLE_ARRAY_MEMBER];
-	/*
-	 * MEMO: ...and ParallelBlockTableScanDescData should be allocated
-	 *       next to the inners[nmum_rels] array
-	 */
 } pgstromSharedState;
 
 typedef struct
 {
+	pgstromSharedInnerState *dsm;
 	PlanState	   *ps;
 	ExprContext	   *econtext;
 
@@ -509,6 +502,26 @@ typedef struct
 	List		   *inner_load_dst;		/* resno of fallback slot */
 } pgstromTaskInnerState;
 
+typedef struct
+{
+	pgstromSharedScanState *dsm;
+	Index			scan_relid;
+	Relation		scan_rel;
+	/* arrow/parquet */
+	ArrowFdwState  *arrow_state;
+	/* heap scan */
+	Buffer			heap_vm_buffer;
+	uint64_t		heap_block_pos;
+	uint64_t		heap_block_end;
+	const char	   *heap_pathname;
+	const kern_data_store *kds_head;
+	/* brin index */
+	BrinIndexState *brin_state;
+	Oid				brin_oid;
+	List		   *brin_conds;
+	List		   *brin_quals;
+} pgstromTaskScanState;
+
 struct pgstromTaskState
 {
 	CustomScanState		css;
@@ -519,17 +532,13 @@ struct pgstromTaskState
 	pgstromPlanInfo	   *pp_info;
 	ArrowFdwState	   *arrow_state;
 	BrinIndexState	   *br_state;
-	GpuCacheDesc	   *gcache_desc;
-	pg_atomic_uint32   *gcache_fetch_count;
 	kern_multirels	   *h_kmrels;		/* host inner buffer (if JOIN) */
-	const char		   *kds_pathname;	/* pathname to be used for KDS setup */
 	/* current chunk (already processed by the device) */
 	XpuCommand		   *curr_resp;
 	HeapTupleData		curr_htup;
 	kern_data_store	   *curr_kds;
 	int					curr_chunk;
 	int64_t				curr_index;
-	bool				scan_done;
 	bool				final_done;
 	/* base relation scan, if any */
 	TupleTableSlot	   *base_slot;
@@ -547,15 +556,15 @@ struct pgstromTaskState
 	List			   *fallback_load_src;	/* source resno of base-rel */
 	List			   *fallback_load_dst;	/* dest resno of fallback-slot */
 	bytea			   *kern_fallback_desc;
-	/* request command buffer (+ status for table scan) */
-	Buffer				curr_vm_buffer;		/* for visibility-map */
-	uint64_t			curr_block_num;		/* for KDS_FORMAT_BLOCK */
-	uint64_t			curr_block_tail;	/* for KDS_FORMAT_BLOCK */
+	/* request command buffer */
+//	Buffer				curr_vm_buffer;		/* for visibility-map */
+//	uint64_t			curr_block_num;		/* for KDS_FORMAT_BLOCK */
+//	uint64_t			curr_block_tail;	/* for KDS_FORMAT_BLOCK */
 	StringInfoData		xcmd_buf;
-	/* callbacks */
-	TupleTableSlot	 *(*cb_next_tuple)(struct pgstromTaskState *pts);
-	XpuCommand		 *(*cb_next_chunk)(struct pgstromTaskState *pts,
-									   struct iovec *xcmd_iov, int *xcmd_iovcnt);
+	/* scan relations state (can be multiple) */
+	int					num_scan_rels;
+	int					curr_scan_rel;
+	pgstromTaskScanState *scan_rels;
 	/* inner relations state (if JOIN) */
 	int					num_inner_rels;
 	pgstromTaskInnerState inners[FLEXIBLE_ARRAY_MEMBER];
@@ -676,16 +685,19 @@ extern Cost		cost_brin_bitmap_build(PlannerInfo *root,
 									   IndexOptInfo *indexOpt,
 									   List *indexQuals);
 extern void		pgstromBrinIndexExecBegin(pgstromTaskState *pts,
-										  Oid index_oid,
-										  List *index_conds,
-										  List *index_quals);
-extern bool		pgstromBrinIndexNextChunk(pgstromTaskState *pts);
-extern void		pgstromBrinIndexExecEnd(pgstromTaskState *pts);
-extern void		pgstromBrinIndexExecReset(pgstromTaskState *pts);
-extern Size		pgstromBrinIndexEstimateDSM(pgstromTaskState *pts);
-extern Size		pgstromBrinIndexInitDSM(pgstromTaskState *pts, char *dsm_addr);
-extern Size		pgstromBrinIndexAttachDSM(pgstromTaskState *pts, char *dsm_addr);
-extern void		pgstromBrinIndexShutdownDSM(pgstromTaskState *pts);
+										  pgstromTaskScanState *ptss);
+extern bool		pgstromBrinIndexNextChunk(pgstromTaskState *pts,
+										  pgstromTaskScanState *ptss);
+extern void		pgstromBrinIndexExecEnd(pgstromTaskState *pts,
+										pgstromTaskScanState *ptss);
+extern void		pgstromBrinIndexExecReset(pgstromTaskState *pts,
+										  pgstromTaskScanState *ptss);
+extern Size		pgstromBrinIndexEstimateDSM(BrinIndexState *brin_state);
+extern Size		pgstromBrinIndexInitDSM(BrinIndexState *brin_state,
+										pgstromSharedScanState *ptss);
+extern Size		pgstromBrinIndexAttachDSM(BrinIndexState *brin_state,
+										  pgstromSharedScanState *ptss);
+extern Size		pgstromBrinIndexShutdownDSM(BrinIndexState *brin_state);
 extern void		pgstromBrinIndexExplain(pgstromTaskState *pts,
 										List *dcontext,
 										ExplainState *es);
@@ -718,6 +730,7 @@ extern size_t	setup_kern_data_store(kern_data_store *kds,
 									  size_t length,
 									  char format);
 extern XpuCommand *pgstromRelScanChunkDirect(pgstromTaskState *pts,
+											 pgstromTaskScanState *ptss,
 											 struct iovec *xcmd_iov,
 											 int *xcmd_iovcnt);
 extern void		pgstrom_init_relscan(void);
@@ -884,6 +897,7 @@ extern void		pgstrom_inc_perf_counter(int num);
 extern void		pgstrom_add_perf_counter(int num, const struct timeval *tv_base);
 extern void		pgstrom_print_perf_counter(void);
 
+#if 0
 /*
  * gpu_cache.c
  */
@@ -917,7 +931,7 @@ extern void	   *gpuCacheGetDeviceBuffer(const GpuCacheIdent *ident,
 										CUdeviceptr *p_gcache_extra_devptr,
 										char *errbuf, size_t errbuf_sz);
 extern void		gpuCachePutDeviceBuffer(void *gc_lmap);
-
+#endif
 /*
  * gpu_scan.c
  */
@@ -1015,15 +1029,17 @@ extern bool		pgstromArrowFdwExecInit(pgstromTaskState *pts,
 										List *outer_quals,
 										const Bitmapset *outer_refs);
 extern XpuCommand *pgstromScanChunkArrowFdw(pgstromTaskState *pts,
+											pgstromTaskScanState *ptss,
 											struct iovec *xcmd_iov,
 											int *xcmd_iovcnt);
 extern void		pgstromArrowFdwExecEnd(ArrowFdwState *arrow_state);
 extern void		pgstromArrowFdwExecReset(ArrowFdwState *arrow_state);
-extern void		pgstromArrowFdwInitDSM(ArrowFdwState *arrow_state,
-									   pgstromSharedState *ps_state);
-extern void		pgstromArrowFdwAttachDSM(ArrowFdwState *arrow_state,
-										 pgstromSharedState *ps_state);
-extern void		pgstromArrowFdwShutdown(ArrowFdwState *arrow_state);
+extern Size		pgstromArrowFdwEstimateDSM(ArrowFdwState *arrow_state);
+extern Size		pgstromArrowFdwInitDSM(ArrowFdwState *arrow_state,
+									   pgstromSharedScanState *psss);
+extern Size		pgstromArrowFdwAttachDSM(ArrowFdwState *arrow_state,
+										 pgstromSharedScanState *psss);
+extern Size		pgstromArrowFdwShutdownDSM(ArrowFdwState *arrow_state);
 extern void		pgstromArrowFdwExplain(ScanState *ss,
 									   ArrowFdwState *arrow_state,
 									   ExplainState *es,

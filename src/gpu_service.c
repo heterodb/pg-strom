@@ -95,15 +95,11 @@ struct gpuClient
 	struct gpuMemChunk *__session[1];	/* per device session info */
 };
 
-#define GPUSERV_WORKER_KIND__GPUTASK		't'
-#define GPUSERV_WORKER_KIND__GPUCACHE		'c'
-
 typedef struct
 {
 	dlist_node		chain;
 	gpuContext	   *gcontext;
 	pthread_t		worker;
-	char			kind;	/* one of GPUSERV_WORKER_KIND__* */
 	volatile bool	termination;
 } gpuWorker;
 
@@ -3825,7 +3821,6 @@ __gpuservLaunchGpuTaskExecKernel(gpuContext *gcontext,
 	gpuQueryBuffer  *gq_buf = gclient->gq_buf;
 	kern_gputask	*kgtask = NULL;
 	kern_data_store *kds_fallback = NULL;
-	void		   *gc_lmap = NULL;
 	gpuMemChunk	   *t_chunk = NULL;		/* for kern_gputask */
 	CUdeviceptr		m_session;
 	CUresult		rc;
@@ -4053,8 +4048,6 @@ resume_kernel:
 bailout:
 	if (t_chunk)
 		gpuMemFree(t_chunk);
-	if (gc_lmap)
-		gpuCachePutDeviceBuffer(gc_lmap);
 	return status;
 }
 
@@ -4078,7 +4071,6 @@ gpuservHandleGpuTaskExec(gpuContext *gcontext,
 	uint32_t		nchunks_parquet_read = 0;
 	uint32_t		ncaches_parquet_load = 0;
 	kern_exec_results *kern_stats;			/* for statistics */
-	void		   *gc_lmap = NULL;
 	gpuMemChunk	   *t_chunk = NULL;			/* for kgtask */
 	gpuMemChunk	   *s_chunk = NULL;			/* for kds_src */
 	gpuMemChunk	   *d_chunk = NULL;			/* for kds_dst */
@@ -4096,27 +4088,13 @@ gpuservHandleGpuTaskExec(gpuContext *gcontext,
 		kds_src_iovec = (strom_io_vector *)((char *)xcmd + xcmd->u.task.kds_src_iovec);
 	if (xcmd->u.task.kds_src_offset)
 		kds_src = (kern_data_store *)((char *)xcmd + xcmd->u.task.kds_src_offset);
-	if (!kds_src)
+	else
 	{
-		const GpuCacheIdent *ident = (GpuCacheIdent *)xcmd->u.task.data;
-		char		errbuf[120];
-
-		Assert(xcmd->tag == XpuCommandTag__XpuTaskExecGpuCache);
-		gc_lmap = gpuCacheGetDeviceBuffer(ident,
-										  &m_kds_src,
-										  &m_kds_extra,
-										  errbuf, sizeof(errbuf));
-		if (!gc_lmap)
-		{
-			gpuClientELog(gclient, "no GpuCache (dat=%u,rel=%u,sig=%09lx) found - %s",
-						  ident->database_oid,
-						  ident->table_oid,
-						  ident->signature,
-						  errbuf);
-			return;
-		}
+		gpuClientELog(gclient, "No source kds buffer found");
+		return;
 	}
-	else if (kds_src->format == KDS_FORMAT_ROW)
+
+	if (kds_src->format == KDS_FORMAT_ROW)
 	{
 		rc = gpuMemoryPrefetchKDS(kds_src, MY_MEMLOCATION_PER_THREAD);
 		if (rc != CUDA_SUCCESS)
@@ -4336,44 +4314,6 @@ bailout:
 		gpuMemFree(s_chunk);
 	if (d_chunk)
 		gpuMemFree(d_chunk);
-    if (gc_lmap)
-		gpuCachePutDeviceBuffer(gc_lmap);
-}
-
-/* ------------------------------------------------------------
- *
- * gpuservGpuCacheManager - GpuCache worker
- *
- * ------------------------------------------------------------
- */
-static void *
-gpuservGpuCacheManager(void *__arg)
-{
-	gpuWorker  *gworker = (gpuWorker *)__arg;
-	gpuContext *gcontext = gworker->gcontext;
-
-	/* switch heterodb-extra ereport callback */
-	heterodbExtraRegisterEreportCallback(gpuservWorkerEreportCallback);
-
-	gpuContextSwitchTo(gcontext);
-
-	__gsDebug("GPU-%d GpuCache manager thread launched.",
-			  MY_DINDEX_PER_THREAD);
-	
-	gpucacheManagerEventLoop(gcontext->cuda_dindex,
-							 gcontext->cuda_context,
-							 gcontext->cufn_gpucache_apply_redo,
-							 gcontext->cufn_gpucache_compaction);
-
-	/* delete gpuWorker from the gpuContext */
-	pthreadMutexLock(&gcontext->worker_lock);
-	dlist_delete(&gworker->chain);
-	pthreadMutexUnlock(&gcontext->worker_lock);
-	free(gworker);
-
-	__gsDebug("GPU-%d GpuCache manager terminated.",
-			  MY_DINDEX_PER_THREAD);
-	return NULL;
 }
 
 /* ----------------------------------------------------------------
@@ -5982,7 +5922,6 @@ gpuservGpuWorkerMain(void *__arg)
 				switch (xcmd->tag)
 				{
 					case XpuCommandTag__XpuTaskExec:
-					case XpuCommandTag__XpuTaskExecGpuCache:
 						gpuservHandleGpuTaskExec(gcontext, gclient, xcmd);
 						break;
 					case XpuCommandTag__XpuTaskFinal:
@@ -6354,7 +6293,6 @@ static void
 __gpuContextAdjustWorkersOne(gpuContext *gcontext, uint32_t nworkers)
 {
 	pthread_attr_t th_attr;
-	bool		has_gpucache = false;
 	bool		needs_wakeup = false;
 	uint32_t	count = 0;
 	int			nr_startup = 0;
@@ -6366,12 +6304,7 @@ __gpuContextAdjustWorkersOne(gpuContext *gcontext, uint32_t nworkers)
 	{
 		gpuWorker *gworker = dlist_container(gpuWorker, chain, __iter.cur);
 
-		if (gworker->kind == GPUSERV_WORKER_KIND__GPUCACHE)
-		{
-			if (!gworker->termination)
-				has_gpucache = true;
-		}
-		else if (count < nworkers)
+		if (count < nworkers)
 		{
 			if (!gworker->termination)
 				count++;
@@ -6388,7 +6321,7 @@ __gpuContextAdjustWorkersOne(gpuContext *gcontext, uint32_t nworkers)
 	pthreadMutexUnlock(&gcontext->worker_lock);
 	if (needs_wakeup)
 		pthreadCondBroadcast(&gcontext->cond);
-	if (count >= nworkers && has_gpucache)
+	if (count >= nworkers)
 		goto out;
 
 	/* launch workers */
@@ -6407,7 +6340,6 @@ __gpuContextAdjustWorkersOne(gpuContext *gcontext, uint32_t nworkers)
 			break;
 		}
 		gworker->gcontext = gcontext;
-		gworker->kind = GPUSERV_WORKER_KIND__GPUTASK;
 		if ((errno = pthread_create(&gworker->worker,
 									&th_attr,
 									gpuservGpuWorkerMain,
@@ -6421,40 +6353,14 @@ __gpuContextAdjustWorkersOne(gpuContext *gcontext, uint32_t nworkers)
 		dlist_push_tail(&gcontext->worker_list, &gworker->chain);
 		pthreadMutexUnlock(&gcontext->worker_lock);
 		count++;
-		nr_startup += 2;
-	}
-	if (!has_gpucache)
-	{
-		gpuWorker  *gworker = calloc(1, sizeof(gpuWorker));
-
-		if (!gworker)
-		{
-			elog(LOG, "out of memory");
-			return;
-		}
-		gworker->gcontext = gcontext;
-		gworker->kind = GPUSERV_WORKER_KIND__GPUCACHE;
-		if ((errno = pthread_create(&gworker->worker,
-									&th_attr,
-									gpuservGpuCacheManager,
-									gworker)) != 0)
-		{
-			elog(LOG, "failed on pthread_create: %m");
-			free(gworker);
-			return;
-		}
-		pthreadMutexLock(&gcontext->worker_lock);
-		dlist_push_tail(&gcontext->worker_list, &gworker->chain);
-		pthreadMutexUnlock(&gcontext->worker_lock);
-		nr_startup += 3;
+		nr_startup++;
 	}
 out:
 	if (nr_startup > 0 || nr_terminate > 0)
 	{
-		elog(LOG, "GPU%d workers - %d startup%s, %d terminate",
+		elog(LOG, "GPU%d workers - %d startup, %d terminate",
 			 gcontext->cuda_dindex,
-			 nr_startup >> 1,
-			 (nr_startup & 1) ? " (with GpuCacheManager)" : "",
+			 nr_startup,
 			 nr_terminate);
 	}
 }
@@ -6565,8 +6471,6 @@ gpuservCleanupGpuContext(gpuContext *gcontext)
 	for (;;)
 	{
 		pthreadCondBroadcast(&gcontext->cond);
-		gpucacheManagerWakeUp(gcontext->cuda_dindex);
-
 		pthreadMutexLock(&gcontext->worker_lock);
 		if (dlist_is_empty(&gcontext->worker_list))
 		{

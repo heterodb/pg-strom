@@ -531,7 +531,7 @@ execCpuFallbackOneChunk(pgstromTaskState *pts)
 				if (depth == 0)
 					pg_atomic_fetch_add_u64(&ps_state->fallback_nitems, 1);
 				else if (depth <= pts->num_inner_rels)
-					pg_atomic_fetch_add_u64(&ps_state->rels[depth-1].inner.fallback_nitems, 1);
+					pg_atomic_fetch_add_u64(&pts->inners[depth-1].dsm->fallback_nitems, 1);
 			}
 			execCpuFallbackOneTuple(pts,
 									fb_item->depth,

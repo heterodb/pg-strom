@@ -2689,7 +2689,6 @@ typedef struct
 #define XpuCommandTag__SuccessHalfWay		2
 #define XpuCommandTag__OpenSession			100
 #define XpuCommandTag__XpuTaskExec			110
-#define XpuCommandTag__XpuTaskExecGpuCache	111
 #define XpuCommandTag__XpuTaskFinal			119
 #define XpuCommandMagicNumber				0xdeadbeafU
 

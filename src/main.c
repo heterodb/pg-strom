@@ -944,7 +944,6 @@ _PG_init(void)
 		pgstrom_init_gpu_scan();
 		pgstrom_init_gpu_join();
 		pgstrom_init_gpu_preagg();
-		pgstrom_init_gpu_cache();
 		pgstrom_init_select_into();
 	}
 	/* callback for the extension checker */

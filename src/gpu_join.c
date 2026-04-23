@@ -2211,7 +2211,6 @@ innerPreloadSetupPinnedInnerBufferPartitions(kern_multirels *h_kmrels,
 											 pgstromTaskState *pts,
 											 size_t offset)
 {
-	pgstromSharedState *ps_state = pts->ps_state;
 	size_t		partition_sz = pgstrom_pinned_inner_buffer_partition_size();
 	size_t		largest_sz = 0;
 	int			largest_depth = -1;
@@ -2220,8 +2219,8 @@ innerPreloadSetupPinnedInnerBufferPartitions(kern_multirels *h_kmrels,
 	{
 		if (pts->inners[depth-1].inner_pinned_buffer)
 		{
-			pgstromSharedInnerState *ps_istate = &ps_state->rels[depth-1].inner;
-			size_t	sz = pg_atomic_read_u64(&ps_istate->inner_total);
+			pgstromSharedInnerState *psis = pts->inners[depth-1].dsm;
+			size_t	sz = pg_atomic_read_u64(&psis->inner_total);
 
 			if (largest_depth < 0 || sz > largest_sz)
 			{
@@ -2334,14 +2333,14 @@ again:
 	for (int depth=1; depth <= pts->num_inner_rels; depth++)
 	{
 		pgstromTaskInnerState *istate = &pts->inners[depth-1];
-		pgstromSharedInnerState *ps_istate = &ps_state->rels[depth-1].inner;
+		pgstromSharedInnerState *psis = istate->dsm;
 		TupleDesc	tupdesc = istate->ps->ps_ResultTupleDesc;
 		uint64_t	nrooms;
 		uint64_t	usage;
 		size_t		nbytes;
 
-		nrooms = pg_atomic_read_u64(&ps_istate->inner_nitems);
-		usage  = pg_atomic_read_u64(&ps_istate->inner_usage);
+		nrooms = pg_atomic_read_u64(&psis->inner_nitems);
+		usage  = pg_atomic_read_u64(&psis->inner_usage);
 		if (nrooms >= UINT_MAX)
 			elog(ERROR, "GpuJoin: Inner Relation[%d] has %lu tuples, too large",
 				 depth, nrooms);
@@ -2475,8 +2474,9 @@ again:
 		if (istate->join_type == JOIN_RIGHT ||
 			istate->join_type == JOIN_FULL)
         {
-			pgstromSharedInnerState *ps_istate = &ps_state->rels[depth-1].inner;
-			nrooms = pg_atomic_read_u64(&ps_istate->inner_nitems);
+			pgstromSharedInnerState *psis = istate->dsm;
+
+			nrooms = pg_atomic_read_u64(&psis->inner_nitems);
 			nbytes = MAXALIGN(sizeof(bool) * nrooms);
 			if (h_kmrels)
 			{
@@ -2614,7 +2614,7 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 			for (int i=0; i < pts->num_inner_rels; i++)
 			{
 				pgstromTaskInnerState *istate = &pts->inners[i];
-				pgstromSharedInnerState *ps_istate = &ps_state->rels[i].inner;
+				pgstromSharedInnerState *psis = istate->dsm;
 
 				if (istate->inner_pinned_buffer)
 				{
@@ -2629,16 +2629,16 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 					Assert(pgstrom_is_gpuscan_state(istate->ps) ||
 						   pgstrom_is_gpujoin_state(istate->ps));
 					execInnerPreLoadPinnedOneDepth((pgstromTaskState *)istate->ps,
-												   &ps_istate->inner_nitems,
-												   &ps_istate->inner_usage,
-												   &ps_istate->inner_total,
+												   &psis->inner_nitems,
+												   &psis->inner_usage,
+												   &psis->inner_total,
 												   &istate->inner_buffer_id);
 				}
 				else
 				{
 					execInnerPreloadOneDepth(memcxt, pts, istate,
-											 &ps_istate->inner_nitems,
-											 &ps_istate->inner_usage);
+											 &psis->inner_nitems,
+											 &psis->inner_usage);
 				}
 			}
 

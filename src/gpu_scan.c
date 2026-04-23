@@ -128,6 +128,9 @@ __gpuScanBuildPlanInfo(PlannerInfo *root,
 {
 	double		parallel_divisor = 1.0;
 	List	   *scan_relids = NIL;
+	List	   *brin_index_oids = NIL;
+	List	   *brin_index_conds = NIL;
+	List	   *brin_index_quals = NIL;
 	Cost		startup_cost = pgstrom_gpu_setup_cost;
 	Cost		run_cost = 0.0;
 	Cost		final_cost = 0.0;
@@ -181,12 +184,7 @@ __gpuScanBuildPlanInfo(PlannerInfo *root,
 			avg_page_cost = spc_seq_page_cost * (1.0 - __rel->allvisfrac) +
 				pgstrom_gpu_direct_seq_page_cost * __rel->allvisfrac;
 		}
-		else if (baseRelHasGpuCache(root, __rel))
-		{
-			/* assume GPU-Cache is available */
-			avg_page_cost = 0.0;
-		}
-		else if (GetOptimalGpuForBaseRel(root, __rel))
+		else if (GetOptimalGpuForBaseRel(root, __rel) != 0UL)
 		{
 			/* assume GPU-Direct SQL is available */
 			avg_page_cost = spc_seq_page_cost * (1.0 - __rel->allvisfrac) +
@@ -226,6 +224,18 @@ __gpuScanBuildPlanInfo(PlannerInfo *root,
 				/* disable BRIN-index if no benefit */
 				indexOpt = NULL;
 			}
+		}
+		if (indexOpt)
+		{
+			brin_index_oids = lappend_oid(brin_index_oids, indexOpt->indexoid);
+			brin_index_conds = lappend(brin_index_conds, indexConds);
+			brin_index_quals = lappend(brin_index_quals, indexQuals);
+		}
+		else
+		{
+			brin_index_oids = lappend_oid(brin_index_oids, InvalidOid);
+			brin_index_conds = lappend(brin_index_conds, NIL);
+			brin_index_quals = lappend(brin_index_quals, NIL);
 		}
 		total_ntuples += __ntuples;
 		total_npages += __npages;
@@ -302,13 +312,9 @@ __gpuScanBuildPlanInfo(PlannerInfo *root,
 	pp_info->run_cost = run_cost;
 	pp_info->final_cost = final_cost;
 	pp_info->final_nrows = baserel->rows;
-#if 0
-	if (indexOpt)
-	{
-		//FIXME: IndexOpt of BRIN must be multi-relations
-
-	}
-#endif
+	pp_info->brin_index_oids = brin_index_oids;
+	pp_info->brin_index_conds = brin_index_conds;
+	pp_info->brin_index_quals = brin_index_quals;
 	pp_info->outer_refs = outer_refs;
 	pp_info->sibling_param_id = -1;		//to be deprecated
 	return pp_info;
@@ -415,9 +421,10 @@ __gpuScanAddCustomPath(PlannerInfo *root,
 	List	   *dev_costs = NIL;
 	List	   *host_quals = NIL;
 	ListCell   *lc;
-	Bitmapset  *outer_refs = NULL;
+	Bitmapset  *outer_refs;
 	int			parallel_nworkers = 0;
 
+	outer_refs = pickup_outer_referenced(root, baserel);
 	/* Fetch device/host qualifiers */
 	foreach (lc, baserel->baserestrictinfo)
 	{
@@ -437,6 +444,7 @@ __gpuScanAddCustomPath(PlannerInfo *root,
 		{
 			host_quals = lappend(host_quals, rinfo);
 		}
+		pull_varattnos((Node *)rinfo->clause, baserel->relid, &outer_refs);
 	}
 	/* Also checks parametalized qualifiers */
 	param_info = get_baserel_parampathinfo(root, baserel,
@@ -461,13 +469,10 @@ __gpuScanAddCustomPath(PlannerInfo *root,
 			{
 				host_quals = lappend(host_quals, rinfo);
 			}
+			pull_varattnos((Node *)rinfo->clause, baserel->relid, &outer_refs);
 		}
 	}
 	sort_device_qualifiers(dev_quals, dev_costs);
-	/* pickup referenced columns */
-	outer_refs = pickup_outer_referenced(root, baserel);
-	pull_varattnos((Node *)dev_quals, baserel->relid, &outer_refs);
-	pull_varattnos((Node *)host_quals, baserel->relid, &outer_refs);
 
 	/*
 	 * Single GpuScanPath

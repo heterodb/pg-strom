@@ -112,12 +112,7 @@ disk_cost_postgresql_heap(PlannerInfo *root,
 	get_tablespace_page_costs(baserel->reltablespace,
 							  &spc_rand_page_cost,
 							  &spc_seq_page_cost);
-	if (baseRelHasGpuCache(root, baserel) >= 0)
-	{
-		/* assume GPU-Cache is available */
-		avg_seq_page_cost = 0;
-	}
-	else if (GetOptimalGpuForBaseRel(root, baserel) != 0UL)
+	if (GetOptimalGpuForBaseRel(root, baserel) != 0UL)
 	{
 		/* assume GPU-Direct SQL is available */
 		avg_seq_page_cost = spc_seq_page_cost * (1.0 - baserel->allvisfrac) +
@@ -378,24 +373,6 @@ setup_kern_data_store(kern_data_store *kds,
 							 attr->atttypmod,
 							 &attcacheoff);
 	}
-	/* internal system attribute */
-	if (format == KDS_FORMAT_COLUMN)
-	{
-		kern_colmeta *cmeta = &kds->colmeta[kds->nr_colmeta++];
-
-		memset(cmeta, 0, sizeof(kern_colmeta));
-		cmeta->attbyval = false;
-		cmeta->attalign = sizeof(int32_t);
-		cmeta->attlen = sizeof(GpuCacheSysattr);
-		cmeta->attnum = -1;
-		cmeta->attcacheoff = -1;
-		cmeta->atttypid = InvalidOid;
-		cmeta->atttypmod = -1;
-		cmeta->atttypkind = TYPE_KIND__BASE;
-		cmeta->kds_format = kds->format;
-		cmeta->kds_offset = (uint32_t)((char *)cmeta - (char *)kds);
-		strcpy(cmeta->attname, "__gcache_sysattr__");
-	}
 	return MAXALIGN(offsetof(kern_data_store, colmeta[kds->nr_colmeta]));
 }
 
@@ -419,8 +396,6 @@ estimate_kern_data_store(TupleDesc tupdesc)
 			continue;
 		nr_colmeta += count_num_of_subfields(attr->atttypid);
 	}
-	/* internal system attribute if KDS_FORMAT_COLUMN */
-	nr_colmeta++;
 	return MAXALIGN(offsetof(kern_data_store, colmeta[nr_colmeta]));
 }
 
@@ -560,10 +535,11 @@ __relScanDirectCheckBufferClean(SMgrRelation smgr, BlockNumber block_num)
 
 XpuCommand *
 pgstromRelScanChunkDirect(pgstromTaskState *pts,
+						  pgstromTaskScanState *ptss,
 						  struct iovec *xcmd_iov, int *xcmd_iovcnt)
 {
 	pgstromSharedState *ps_state = pts->ps_state;
-	Relation		relation = pts->css.ss.ss_currentRelation;
+	Relation		relation = ptss->scan_rel;
 	SMgrRelation	smgr = RelationGetSmgr(relation);
 	XpuCommand	   *xcmd;
 	kern_data_store *kds;
@@ -576,9 +552,31 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 	uint32_t		kds_src_pathname = 0;
 	uint32_t		kds_src_iovec = 0;
 	uint32_t		kds_nrooms;
-	uint32_t		scan_block_start = ps_state->scan_block_start;
+	size_t			sz;
 
+	/* setup kds_head on the first call */
+	if (!ptss->kds_head)
+	{
+		EState	   *estate = pts->css.ss.ps.state;
+		TupleDesc	tupdesc = RelationGetDescr(relation);
+		size_t		head_sz = estimate_kern_data_store(tupdesc);
+
+		kds = MemoryContextAllocZero(estate->es_query_cxt, head_sz);
+		setup_kern_data_store(kds, tupdesc, head_sz, KDS_FORMAT_BLOCK);
+		ptss->kds_head = kds;
+	}
+	/* setup XPU command */
+	sz = offsetof(XpuCommand, u.task.data) + ptss->kds_head->length;
+	resetStringInfo(&pts->xcmd_buf);
+	enlargeStringInfo(&pts->xcmd_buf, sz);
+	xcmd = (XpuCommand *)pts->xcmd_buf.data;
+	memset(xcmd, 0, offsetof(XpuCommand, u.task.data));
+	xcmd->magic = XpuCommandMagicNumber;
+	xcmd->tag   = XpuCommandTag__XpuTaskExec;
+	xcmd->u.task.kds_src_offset = offsetof(XpuCommand, u.task.data);
 	kds = __XCMD_GET_KDS_SRC(&pts->xcmd_buf);
+	memcpy(kds, ptss->kds_head, ptss->kds_head->length);
+	pts->xcmd_buf.len = sz;
 	kds_nrooms = (PGSTROM_CHUNK_SIZE -
 				  KDS_HEAD_LENGTH(kds)) / (sizeof(BlockNumber) + BLCKSZ);
 	kds->nitems = 0;
@@ -594,27 +592,13 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 	strom_iovec = alloca(offsetof(strom_io_vector, ioc[kds_nrooms]));
 	strom_iovec->nr_chunks = 0;
 	strom_blknums = alloca(sizeof(BlockNumber) * kds_nrooms);
-	strom_nblocks = 0;
 
-	/*
-	 * PostgreSQL may adjust the scan start position for concurrent sequential
-	 * scans to improve buffer hit rates, and PG-Strom honors this behavior.
-	 * In contrast, when a BRIN index is in use, the scan start position must
-	 * not be shifted, because the BRIN index precisely specifies which blocks
-	 * should be scanned. Otherwise, incorrect results could be produced.
-	 * Hence, scan_block_start is cleared so that the table is scanned exactly
-	 * according to the BRIN index.
-	 */
-	if (pts->br_state)
-		scan_block_start = 0;
-
-	while (!pts->scan_done)
+	for (;;)
 	{
-		while (pts->curr_block_num < pts->curr_block_tail &&
+		while (ptss->heap_block_pos < ptss->heap_block_end &&
 			   kds->nitems < kds_nrooms)
 		{
-			BlockNumber		block_num = (pts->curr_block_num +
-										 scan_block_start) % ps_state->scan_block_nums;
+			BlockNumber		block_num = ptss->heap_block_pos;
 			/*
 			 * MEMO: right now, we allow GPU Direct SQL for the all-visible
 			 * pages only, due to the restrictions about MVCC checks.
@@ -624,11 +608,11 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 			 * HEAP_XMIN_* or HEAP_XMAX_* flags correctly, we can have MVCC
 			 * logic in the device code.
 			 */
-			if (VM_ALL_VISIBLE(relation, block_num, &pts->curr_vm_buffer) &&
+			if (VM_ALL_VISIBLE(relation, block_num, &ptss->heap_vm_buffer) &&
 				__relScanDirectCheckBufferClean(smgr, block_num))
 			{
 				/*
-				 * We don't allow xPU Direct SQL across multiple heap
+				 * We don't allow GPU Direct SQL across multiple heap
 				 * segments (for the code simplification). So, once
 				 * relation scan is broken out, then restart with new
 				 * KDS buffer.
@@ -663,9 +647,8 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 			{
 				__relScanDirectCachedBlock(pts, block_num);
 			}
-			pts->curr_block_num++;
+			ptss->heap_block_pos++;
 		}
-
 		if (kds->nitems >= kds_nrooms)
 		{
 			/* ok, we cannot load more pages in this chunk */
@@ -673,21 +656,27 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 		}
 		else if (pts->br_state)
 		{
-			if (!pgstromBrinIndexNextChunk(pts))
-				pts->scan_done = true;
+			if (!pgstromBrinIndexNextChunk(pts, ptss))
+			{
+				pts->curr_scan_rel++;
+				break;
+			}
 		}
 		else
 		{
 			/* full table scan */
-			uint32_t	num_blocks = kds_nrooms - kds->nitems;
+			uint32_t	required = kds_nrooms - kds->nitems;
 
-			pts->curr_block_num  = pg_atomic_fetch_add_u64(&ps_state->scan_block_count,
-														   num_blocks);
-			pts->curr_block_tail = pts->curr_block_num + num_blocks;
-			if (pts->curr_block_num >= ps_state->scan_block_nums)
-				pts->scan_done = true;
-			if (pts->curr_block_tail > ps_state->scan_block_nums)
-				pts->curr_block_tail = ps_state->scan_block_nums;
+			ptss->heap_block_pos = pg_atomic_fetch_add_u64(&ptss->dsm->scan_block_count,
+														   required);
+			ptss->heap_block_end = ptss->heap_block_pos + required;
+			if (ptss->heap_block_end > ptss->dsm->scan_block_nums)
+				ptss->heap_block_end = ptss->dsm->scan_block_nums;
+			if (ptss->heap_block_pos >= ptss->dsm->scan_block_nums)
+			{
+				pts->curr_scan_rel++;
+				break;
+			}
 		}
 	}
 out:
@@ -708,10 +697,8 @@ out:
 
 	if (strom_iovec->nr_chunks > 0)
 	{
-		size_t		sz;
-
 		kds_src_pathname = pts->xcmd_buf.len;
-		appendStringInfoString(&pts->xcmd_buf, pts->kds_pathname);
+		appendStringInfoString(&pts->xcmd_buf, ptss->heap_pathname);
 		if (segment_id > 0)
 			appendStringInfo(&pts->xcmd_buf, ".%u", segment_id);
 		appendStringInfoChar(&pts->xcmd_buf, '\0');

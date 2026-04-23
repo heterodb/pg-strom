@@ -5292,9 +5292,10 @@ retry:
  */
 XpuCommand *
 pgstromScanChunkArrowFdw(pgstromTaskState *pts,
+						 pgstromTaskScanState *ptss,
 						 struct iovec *xcmd_iov, int *xcmd_iovcnt)
 {
-	ArrowFdwState  *arrow_state = pts->arrow_state;
+	ArrowFdwState  *arrow_state = ptss->arrow_state;
 	LargeStringInfo	chunk_buffer = &arrow_state->chunk_buffer;
 	RecordBatchState *rb_state;
 	ArrowFileState *af_state;
@@ -5307,7 +5308,7 @@ pgstromScanChunkArrowFdw(pgstromTaskState *pts,
 	rb_state = __arrowFdwNextRecordBatch(arrow_state);
 	if (!rb_state)
 	{
-		pts->scan_done = true;
+		pts->curr_scan_rel++;
 		return NULL;
 	}
 	af_state = rb_state->af_state;
@@ -5319,17 +5320,20 @@ pgstromScanChunkArrowFdw(pgstromTaskState *pts,
 								pts->xcmd_buf.len);
 	/* kds_src (arrow or parquet) */
 	kds_src_offset = chunk_buffer->len;
-	kds_src = __arrowFdwSetupKDSHead(pts->css.ss.ss_currentRelation,
+	kds_src = __arrowFdwSetupKDSHead(ptss->scan_rel,
 									 arrow_state->referenced,
 									 rb_state,
 									 chunk_buffer);
 	if (kds_src->format == KDS_FORMAT_ARROW)
 	{
 		/* related i/o vector */
-		strom_io_vector *iovec = arrowFdwSetupIOvector(rb_state,
-													   arrow_state->referenced,
-													   kds_src);
-		size_t		iovec_sz = offsetof(strom_io_vector, ioc[iovec->nr_chunks]);
+		strom_io_vector *iovec;
+		size_t		iovec_sz;
+
+		iovec = arrowFdwSetupIOvector(rb_state,
+									  arrow_state->referenced,
+									  kds_src);
+		iovec_sz = offsetof(strom_io_vector, ioc[iovec->nr_chunks]);
 		kds_src_iovec = appendBinaryLargeStringInfo(chunk_buffer,
 													iovec, iovec_sz);
 	}
@@ -5462,25 +5466,32 @@ ArrowIsForeignScanParallelSafe(PlannerInfo *root,
 /*
  * ArrowEstimateDSMForeignScan
  */
+Size
+pgstromArrowFdwEstimateDSM(ArrowFdwState *arrow_state)
+{
+	return MAXALIGN(sizeof(pgstromSharedScanState));
+}
+
 static Size
 ArrowEstimateDSMForeignScan(ForeignScanState *node,
 							ParallelContext *pcxt)
 {
-	return offsetof(pgstromSharedState, rels);
+	return pgstromArrowFdwEstimateDSM(node->fdw_state);
 }
 
 /*
  * ArrowInitializeDSMForeignScan
  */
-void
+Size
 pgstromArrowFdwInitDSM(ArrowFdwState *arrow_state,
-					   pgstromSharedState *ps_state)
+					   pgstromSharedScanState *psss)
 {
-	arrow_state->rbatch_index = &ps_state->arrow_rbatch_index;
-	arrow_state->rbatch_nload = &ps_state->arrow_rbatch_nload;
-	arrow_state->rbatch_nskip = &ps_state->arrow_rbatch_nskip;
-	arrow_state->nchunks_parquet_read = &ps_state->nchunks_parquet_read;
-	arrow_state->ncaches_parquet_load = &ps_state->ncaches_parquet_load;
+	arrow_state->rbatch_index = &psss->arrow_rbatch_index;
+	arrow_state->rbatch_nload = &psss->arrow_rbatch_nload;
+	arrow_state->rbatch_nskip = &psss->arrow_rbatch_nskip;
+	arrow_state->nchunks_parquet_read = &psss->nchunks_parquet_read;
+	arrow_state->ncaches_parquet_load = &psss->ncaches_parquet_load;
+	return pgstromArrowFdwEstimateDSM(arrow_state);
 }
 
 static void
@@ -5488,24 +5499,20 @@ ArrowInitializeDSMForeignScan(ForeignScanState *node,
                               ParallelContext *pcxt,
                               void *coordinate)
 {
-	pgstromSharedState *ps_state = (pgstromSharedState *)coordinate;
+	pgstromSharedScanState *psss = (pgstromSharedScanState *)coordinate;
 
-	memset(ps_state, 0, offsetof(pgstromSharedState, rels));
-	pgstromArrowFdwInitDSM(node->fdw_state, ps_state);
+	memset(psss, 0, sizeof(pgstromSharedScanState));
+	pgstromArrowFdwInitDSM(node->fdw_state, psss);
 }
 
 /*
  * ArrowInitializeWorkerForeignScan
  */
-void
+Size
 pgstromArrowFdwAttachDSM(ArrowFdwState *arrow_state,
-						 pgstromSharedState *ps_state)
+						 pgstromSharedScanState *psss)
 {
-	arrow_state->rbatch_index = &ps_state->arrow_rbatch_index;
-	arrow_state->rbatch_nload = &ps_state->arrow_rbatch_nload;
-	arrow_state->rbatch_nskip = &ps_state->arrow_rbatch_nskip;
-	arrow_state->nchunks_parquet_read = &ps_state->nchunks_parquet_read;
-	arrow_state->ncaches_parquet_load = &ps_state->ncaches_parquet_load;
+	return pgstromArrowFdwInitDSM(arrow_state, psss);
 }
 
 static void
@@ -5513,16 +5520,16 @@ ArrowInitializeWorkerForeignScan(ForeignScanState *node,
 								 shm_toc *toc,
 								 void *coordinate)
 {
-	pgstromSharedState *ps_state = (pgstromSharedState *)coordinate;
+	pgstromSharedScanState *psss = (pgstromSharedScanState *)coordinate;
 
-	pgstromArrowFdwAttachDSM(node->fdw_state, ps_state);
+	pgstromArrowFdwAttachDSM(node->fdw_state, psss);
 }
 
 /*
  * ArrowShutdownForeignScan
  */
-void
-pgstromArrowFdwShutdown(ArrowFdwState *arrow_state)
+Size
+pgstromArrowFdwShutdownDSM(ArrowFdwState *arrow_state)
 {
 	uint32		temp;
 
@@ -5545,12 +5552,14 @@ pgstromArrowFdwShutdown(ArrowFdwState *arrow_state)
 	temp = pg_atomic_read_u32(arrow_state->ncaches_parquet_load);
 	pg_atomic_write_u32(&arrow_state->__ncaches_parquet_load, temp);
 	arrow_state->ncaches_parquet_load = &arrow_state->__ncaches_parquet_load;
+
+	return pgstromArrowFdwEstimateDSM(arrow_state);
 }
 
 static void
 ArrowShutdownForeignScan(ForeignScanState *node)
 {
-	pgstromArrowFdwShutdown(node->fdw_state);
+	pgstromArrowFdwShutdownDSM(node->fdw_state);
 }
 
 #if 1

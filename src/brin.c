@@ -443,17 +443,6 @@ cost_brin_bitmap_build(PlannerInfo *root,
 	return index_build_cost;
 }
 
-
-typedef struct
-{
-	volatile int	build_status;
-	slock_t			lock;	/* once 'build_status' is set, no need to take
-							 * this lock again. */
-	pg_atomic_uint32 index;
-	uint32_t		nitems;
-	BlockNumber		chunks[FLEXIBLE_ARRAY_MEMBER];
-} BrinIndexResults;
-
 struct BrinIndexState
 {
 	Relation		index_rel;
@@ -469,9 +458,12 @@ struct BrinIndexState
 	int				NumRuntimeKeys;
 	bool			RuntimeKeysIsReady;
 	ExprContext	   *RuntimeExprContext;
-	BrinIndexResults *brinResults;
 	uint32_t		curr_chunk_id;
 	uint32_t		curr_block_id;
+	pg_atomic_uint32 *brin_num_fetched;
+	pg_atomic_uint32 __brin_num_fetched_local;
+	pg_atomic_uint32 *brin_num_skipped;
+	pg_atomic_uint32 __brin_num_skipped_local;
 };
 
 /*
@@ -479,20 +471,18 @@ struct BrinIndexState
  */
 void
 pgstromBrinIndexExecBegin(pgstromTaskState *pts,
-						  Oid index_oid,
-						  List *index_conds,
-						  List *index_quals)
+						  pgstromTaskScanState *ptss)
 {
 	/* see ExecInitBitmapIndexScan */
 	EState		   *estate = pts->css.ss.ps.state;
-	Relation		relation = pts->css.ss.ss_currentRelation;
-	Index			scanrelid = ((Scan *)pts->css.ss.ps.plan)->scanrelid;
+	Relation		relation = ptss->scan_rel;
 	LOCKMODE		lockmode = NoLock;
 	BrinIndexState *br_state;
 
-	if (!OidIsValid(index_oid))
+	if (!OidIsValid(ptss->brin_oid))
 	{
-		Assert(index_conds == NIL && index_quals == NIL);
+		Assert(ptss->brin_conds == NIL &&
+			   ptss->brin_quals == NIL);
 		return;
 	}
 	br_state = palloc0(sizeof(BrinIndexState));
@@ -500,9 +490,9 @@ pgstromBrinIndexExecBegin(pgstromTaskState *pts,
 	/*
 	 * open the index relation
 	 */
-	lockmode = exec_rt_fetch(scanrelid, estate)->rellockmode;
-	br_state->index_rel = index_open(index_oid, lockmode);
-	br_state->index_quals = copyObject(index_quals);
+	lockmode = exec_rt_fetch(ptss->scan_relid, estate)->rellockmode;
+	br_state->index_rel = index_open(ptss->brin_oid, lockmode);
+	br_state->index_quals = copyObject(ptss->brin_quals);
 	br_state->brinRevmap = brinRevmapInitialize(br_state->index_rel,
 												&br_state->pagesPerRange);
 	br_state->brinDesc = brin_build_desc(br_state->index_rel); 
@@ -511,13 +501,15 @@ pgstromBrinIndexExecBegin(pgstromTaskState *pts,
 						 br_state->pagesPerRange - 1) / br_state->pagesPerRange;
 	br_state->curr_chunk_id = 0;
 	br_state->curr_block_id = UINT_MAX;
+	br_state->brin_num_fetched = &br_state->__brin_num_fetched_local;
+	br_state->brin_num_skipped = &br_state->__brin_num_skipped_local;
 
 	/*
 	 * build the index scan keys from the index conditions
 	 */
 	ExecIndexBuildScanKeys(&pts->css.ss.ps,
 						   br_state->index_rel,
-						   index_conds,
+						   ptss->brin_conds,
 						   false,
 						   &br_state->ScanKeys,
 						   &br_state->NumScanKeys,
@@ -537,17 +529,18 @@ pgstromBrinIndexExecBegin(pgstromTaskState *pts,
 	{
 		br_state->RuntimeExprContext = NULL;
 	}
-	pts->br_state = br_state;
+	ptss->brin_state = br_state;
 }
 
 /*
  * BrinIndexExecReset
  */
 void
-pgstromBrinIndexExecReset(pgstromTaskState *pts)
+pgstromBrinIndexExecReset(pgstromTaskState *pts,
+						  pgstromTaskScanState *ptss)
 {
 	/* See, ExecReScanBitmapIndexScan */
-	BrinIndexState *br_state = pts->br_state;
+	BrinIndexState *br_state = ptss->brin_state;
 
 	if (br_state->NumRuntimeKeys != 0)
 	{
@@ -561,19 +554,10 @@ pgstromBrinIndexExecReset(pgstromTaskState *pts)
 	}
 	br_state->curr_chunk_id = 0;
 	br_state->curr_block_id = UINT_MAX;
-
-	/*
-	 * NOTE: In non-parallel execution, br_state->brinResults is initialized
-	 * on the first invocation of the executor, so when ExecReset is called,
-	 * a valid object may not have been allocated yet.
-	 */
-	if (br_state->brinResults)
-	{
-		BrinIndexResults *br_results = br_state->brinResults;
-		br_results->build_status = 0;
-		br_results->nitems   = 0;
-		pg_atomic_init_u32(&br_results->index, 0);
-	}
+	/* brin_nitems/brin_chunks shall be initialized on the next call */
+	pthreadMutexLock(&ptss->dsm->brin_build_mutex);
+	ptss->dsm->brin_build_status = 0;
+	pthreadMutexUnlock(&ptss->dsm->brin_build_mutex);
 }
 
 /*
@@ -630,13 +614,13 @@ check_null_keys(BrinValues *bval, ScanKey *nullkeys, int nnullkeys)
  * __BrinIndexExecBuildResults
  */
 static void
-__BrinIndexExecBuildResults(pgstromTaskState *pts)
+__BrinIndexExecBuildResults(pgstromTaskState *pts,
+							pgstromTaskScanState *ptss)
 {
 	/* see bringetbitmap() */
-	pgstromSharedState *ps_state = pts->ps_state;
 	EState		   *estate __attribute__((unused)) = pts->css.ss.ps.state;
-	BrinIndexState *br_state = pts->br_state;
-	BrinIndexResults *br_results = br_state->brinResults;
+	pgstromSharedScanState *psss = ptss->dsm;
+	BrinIndexState *br_state = ptss->brin_state;
 	BrinDesc	   *bdesc = br_state->brinDesc;
 	TupleDesc		bd_tupdesc = bdesc->bd_tupdesc;
 	Buffer			buffer = InvalidBuffer;
@@ -729,7 +713,7 @@ __BrinIndexExecBuildResults(pgstromTaskState *pts)
 	 * incrementing by the number of pages per range; this gives us a full
 	 * view of the table.
 	 */
-	br_results->nitems = 0;
+	psss->brin_nitems = 0;
 	for (chunk_id = 0; chunk_id < br_state->nchunks; chunk_id++)
 	{
 		BrinTuple  *__btup;
@@ -859,147 +843,133 @@ __BrinIndexExecBuildResults(pgstromTaskState *pts)
 	skip:
 		if (addrange)
 		{
-			int		idx = br_results->nitems++;
-
-			br_results->chunks[idx] = chunk_id;
+			uint32_t	idx = psss->brin_nitems++;
+			psss->brin_chunks[idx] = chunk_id;
 		}
 	}
 	/* update statistics */
-	pg_atomic_fetch_add_u32(&ps_state->brin_index_fetched, br_results->nitems);
-	pg_atomic_fetch_add_u32(&ps_state->brin_index_skipped,
-							br_state->nchunks - br_results->nitems);
+	pg_atomic_fetch_add_u32(br_state->brin_num_fetched,
+							psss->brin_nitems);
+	pg_atomic_fetch_add_u32(br_state->brin_num_skipped,
+							br_state->nchunks - psss->brin_nitems);
 	MemoryContextSwitchTo(oldcxt);
 	MemoryContextDelete(per_range_cxt);
 
 	if (buffer != InvalidBuffer)
 		ReleaseBuffer(buffer);
-	pg_memory_barrier();
-	br_results->build_status = 1;
 }
 
-static inline BrinIndexResults *
-__BrinIndexGetResults(pgstromTaskState *pts)
+static void
+__TryBrinIndexExecBuildResults(pgstromTaskState *pts,
+							   pgstromTaskScanState *ptss)
 {
-	BrinIndexState *br_state = pts->br_state;
-	BrinIndexResults *br_results;
+	pgstromSharedScanState *psss = ptss->dsm;
 
-	/*
-	 * At the first call of pgstromBrinIndexNextXXXX() at the single process
-	 * execution, 'brinResults' shall not be allocated yet. So, allocate it
-	 * on the local memory.
-	 */
-	if (!br_state->brinResults)
-		pgstromBrinIndexInitDSM(pts, NULL);
-
-	if (br_state->NumRuntimeKeys != 0 &&
-		!br_state->RuntimeKeysIsReady)
-		pgstromBrinIndexExecReset(pts);
-
-	br_results = br_state->brinResults;
-	if (br_results->build_status <= 0)
+	pthreadMutexLock(&psss->brin_build_mutex);
+	if (psss->brin_build_status == 0)
 	{
-		SpinLockAcquire(&br_results->lock);
 		PG_TRY();
 		{
-			if (br_results->build_status == 0)
-				__BrinIndexExecBuildResults(pts);
-			else if (br_results->build_status < 0)
-				elog(ERROR, "failed on __BrinIndexExecBuildResults by other workers");
+			__BrinIndexExecBuildResults(pts, ptss);
+			psss->brin_build_status = 1;
 		}
 		PG_CATCH();
 		{
-			br_results->build_status = -1;
-			SpinLockRelease(&br_results->lock);
+			psss->brin_build_status = -1;
+			pthreadMutexUnlock(&psss->brin_build_mutex);
 			PG_RE_THROW();
 		}
 		PG_END_TRY();
-		Assert(br_results->build_status > 0);
-		SpinLockRelease(&br_results->lock);
 	}
-	return br_results;
+	else if (psss->brin_build_status < 0)
+	{
+		pthreadMutexUnlock(&psss->brin_build_mutex);
+		elog(ERROR, "failed on __BrinIndexExecBuildResults by other workers");
+	}
+	pthreadMutexUnlock(&psss->brin_build_mutex);
 }
 
 bool
-pgstromBrinIndexNextChunk(pgstromTaskState *pts)
+pgstromBrinIndexNextChunk(pgstromTaskState *pts,
+						  pgstromTaskScanState *ptss)
 {
-	BrinIndexState *br_state = pts->br_state;
-	BrinIndexResults *br_results = __BrinIndexGetResults(pts);
-	uint32_t	index = pg_atomic_fetch_add_u32(&br_results->index, 1);
-	if (index < br_results->nitems)
+	pgstromSharedScanState *psss = ptss->dsm;
+	BrinIndexState *br_state = ptss->brin_state;
+	uint32_t	index;
+
+	/* reset index keys on the first call */
+	if (br_state->NumRuntimeKeys != 0 &&
+		!br_state->RuntimeKeysIsReady)
+		pgstromBrinIndexExecReset(pts, ptss);
+	__TryBrinIndexExecBuildResults(pts, ptss);
+
+	index = pg_atomic_fetch_add_u32(&psss->brin_index, 1);
+	if (index < psss->brin_nitems)
 	{
 		BlockNumber	pagesPerRange = br_state->pagesPerRange;
 
-		pts->curr_block_num  = br_results->chunks[index] * pagesPerRange;
-		pts->curr_block_tail = pts->curr_block_num + pagesPerRange;
-		if (pts->curr_block_num >= br_state->nblocks)
-			return false;
-		if (pts->curr_block_tail > br_state->nblocks)
-			pts->curr_block_tail = br_state->nblocks;
-		return true;
+		ptss->heap_block_pos = psss->brin_chunks[index] * pagesPerRange;
+		ptss->heap_block_end = ptss->heap_block_pos + pagesPerRange;
+		if (ptss->heap_block_end > psss->scan_block_nums)
+			ptss->heap_block_end = psss->scan_block_nums;
+		if (ptss->heap_block_pos < psss->scan_block_nums)
+			return true;
 	}
 	return false;
 }
 
 void
-pgstromBrinIndexExecEnd(pgstromTaskState *pts)
+pgstromBrinIndexExecEnd(pgstromTaskState *pts,
+						pgstromTaskScanState *ptss)
 {
-	BrinIndexState *br_state = pts->br_state;
+	BrinIndexState *brin_state = ptss->brin_state;
 
-	if (br_state->brinRevmap)
-		brinRevmapTerminate(br_state->brinRevmap);
-	if (br_state->brinDesc)
-		brin_free_desc(br_state->brinDesc);
-	if (br_state->index_rel)
-		index_close(br_state->index_rel, NoLock);
+	if (brin_state->brinRevmap)
+		brinRevmapTerminate(brin_state->brinRevmap);
+	if (brin_state->brinDesc)
+		brin_free_desc(brin_state->brinDesc);
+	if (brin_state->index_rel)
+		index_close(brin_state->index_rel, NoLock);
 }
 
 Size
-pgstromBrinIndexEstimateDSM(pgstromTaskState *pts)
+pgstromBrinIndexEstimateDSM(BrinIndexState *brin_state)
 {
-	BrinIndexState *br_state = pts->br_state;
-
-	return MAXALIGN(offsetof(BrinIndexResults, chunks[br_state->nchunks]));
+	return MAXALIGN(offsetof(pgstromSharedScanState,
+							 brin_chunks[brin_state->nchunks]));
 }
 
 Size
-pgstromBrinIndexInitDSM(pgstromTaskState *pts, char *dsm_addr)
+pgstromBrinIndexInitDSM(BrinIndexState *brin_state,
+						pgstromSharedScanState *psss)
 {
-	BrinIndexState *br_state = pts->br_state;
-	BrinIndexResults *br_results;
-	Size		dsm_len = 0;
-
-	dsm_len = MAXALIGN(offsetof(BrinIndexResults,
-								chunks[br_state->nchunks]));
-	if (dsm_addr)
-		br_results = (BrinIndexResults *)dsm_addr;
-	else
-	{
-		EState	   *estate = pts->css.ss.ps.state;
-
-		br_results = MemoryContextAlloc(estate->es_query_cxt, dsm_len);
-	}
-	memset(br_results, 0, offsetof(BrinIndexResults, chunks));
-	SpinLockInit(&br_results->lock);
-
-	br_state->brinResults = br_results;
-
-	return (dsm_addr ? dsm_len : 0);
+	brin_state->brin_num_fetched = &psss->brin_num_fetched;
+	brin_state->brin_num_skipped = &psss->brin_num_skipped;
+	pthreadMutexInitShared(&psss->brin_build_mutex);
+	return pgstromBrinIndexEstimateDSM(brin_state);
 }
 
 Size
-pgstromBrinIndexAttachDSM(pgstromTaskState *pts, char *dsm_addr)
+pgstromBrinIndexAttachDSM(BrinIndexState *brin_state,
+						  pgstromSharedScanState *psss)
 {
-	BrinIndexState *br_state = pts->br_state;
-
-	br_state->brinResults = (BrinIndexResults *)dsm_addr;
-	return MAXALIGN(offsetof(BrinIndexResults,
-							 chunks[br_state->nchunks]));
+	return pgstromBrinIndexInitDSM(brin_state, psss);
 }
 
-void
-pgstromBrinIndexShutdownDSM(pgstromTaskState *pts)
+Size
+pgstromBrinIndexShutdownDSM(BrinIndexState *brin_state)
 {
-	/* nothing to do */
+	uint32	temp;
+
+	temp = pg_atomic_read_u32(brin_state->brin_num_fetched);
+	pg_atomic_write_u32(&brin_state->__brin_num_fetched_local, temp);
+	brin_state->brin_num_fetched = &brin_state->__brin_num_fetched_local;
+
+	temp = pg_atomic_read_u32(brin_state->brin_num_skipped);
+	pg_atomic_write_u32(&brin_state->__brin_num_skipped_local, temp);
+	brin_state->brin_num_skipped = &brin_state->__brin_num_skipped_local;
+
+	return pgstromBrinIndexEstimateDSM(brin_state);
 }
 
 void
@@ -1007,7 +977,6 @@ pgstromBrinIndexExplain(pgstromTaskState *pts,
 						List *dcontext,
 						ExplainState *es)
 {
-	pgstromSharedState *ps_state = pts->ps_state;
 	BrinIndexState *brin_state = pts->br_state;
 	StringInfoData	buf;
 	ListCell	   *lc;
@@ -1032,16 +1001,16 @@ pgstromBrinIndexExplain(pgstromTaskState *pts,
 		{
 			resetStringInfo(&buf);
 			appendStringInfo(&buf, "fetched=%u, skipped=%u",
-							 pg_atomic_read_u32(&ps_state->brin_index_fetched),
-							 pg_atomic_read_u32(&ps_state->brin_index_skipped));
+							 pg_atomic_read_u32(brin_state->brin_num_fetched),
+							 pg_atomic_read_u32(brin_state->brin_num_skipped));
 			ExplainPropertyText("Brin Stats", buf.data, es);
 		}
 		else
 		{
-			count = pg_atomic_read_u32(&ps_state->brin_index_fetched);
+			count = pg_atomic_read_u32(brin_state->brin_num_fetched);
 			ExplainPropertyInteger("Brin Stats Fetched", NULL, count, es);
 
-			count = pg_atomic_read_u32(&ps_state->brin_index_skipped);
+			count = pg_atomic_read_u32(brin_state->brin_num_skipped);
 			ExplainPropertyInteger("Brin Stats Skipped", NULL, count, es);
 		}
 	}

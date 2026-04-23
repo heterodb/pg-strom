@@ -128,7 +128,7 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 	privs = lappend(privs, __makeFloat(pp_info->final_cost));
 	privs = lappend(privs, __makeFloat(pp_info->final_nrows));
 	/* bin-index support */
-	privs = lappend(privs, makeInteger(pp_info->brin_index_oid));
+	privs = lappend(privs, pp_info->brin_index_oids);
 	privs = lappend(privs, pp_info->brin_index_conds);
 	privs = lappend(privs, pp_info->brin_index_quals);
 	/* XPU code */
@@ -247,7 +247,7 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	pp_data.final_cost   = floatVal(list_nth(privs, pindex++));
 	pp_data.final_nrows  = floatVal(list_nth(privs, pindex++));
 	/* brin-index support */
-	pp_data.brin_index_oid = intVal(list_nth(privs, pindex++));
+	pp_data.brin_index_oids  = list_nth(privs, pindex++);
 	pp_data.brin_index_conds = list_nth(privs, pindex++);
 	pp_data.brin_index_quals = list_nth(privs, pindex++);
 	/* XPU code */
@@ -347,6 +347,7 @@ copy_pgstrom_plan_info(const pgstromPlanInfo *pp_orig)
 	pp_dest->used_params      = list_copy(pp_dest->used_params);
 	pp_dest->host_quals       = copyObject(pp_dest->host_quals);
 	pp_dest->scan_quals       = copyObject(pp_dest->scan_quals);
+	pp_dest->brin_index_oids  = copyObject(pp_dest->brin_index_oids);
 	pp_dest->brin_index_conds = copyObject(pp_dest->brin_index_conds);
 	pp_dest->brin_index_quals = copyObject(pp_dest->brin_index_quals);
 	foreach (lc, pp_orig->kvars_deflist)
