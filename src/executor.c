@@ -149,8 +149,7 @@ __xpuConnectSessionWorker(void *__priv)
 					 */
 					pg_usleep(2000L);
 				}
-				else if (__xpuConnectReceiveCommands(conn->sockfd,
-													 conn) < 0)
+				else if (__xpuConnectReceiveCommands(conn->sockfd, conn) < 0)
 				{
 					break;
 				}
@@ -936,58 +935,64 @@ pgstromTaskStateEndScan(pgstromTaskState *pts)
 static void
 __updateStatsXpuCommand(pgstromTaskState *pts, const XpuCommand *xcmd)
 {
-	if (xcmd->tag == XpuCommandTag__Success)
+	pgstromSharedState *ps_state = pts->ps_state;
+	int		num_inner_rels;
+
+	if (xcmd->tag != XpuCommandTag__Success)
+		return;
+	num_inner_rels = Min(pts->num_inner_rels,
+						 xcmd->u.results.num_rels);
+	if (xcmd->u.results.scan_relidx >= 0 &&
+		xcmd->u.results.scan_relidx < pts->num_scan_rels)
 	{
-		pgstromSharedState *ps_state = pts->ps_state;
-		int		num_inner_rels = Min(pts->num_inner_rels,
-									 xcmd->u.results.num_rels);
+		pgstromSharedScanState *psss = pts->scan_rels[xcmd->u.results.scan_relidx].dsm;
 
-		pg_atomic_fetch_add_u64(&ps_state->npages_direct_read,
+		pg_atomic_fetch_add_u64(&psss->npages_direct_read,
 								xcmd->u.results.npages_direct_read);
-		pg_atomic_fetch_add_u64(&ps_state->npages_vfs_read,
+		pg_atomic_fetch_add_u64(&psss->npages_vfs_read,
 								xcmd->u.results.npages_vfs_read);
-		pg_atomic_fetch_add_u64(&ps_state->source_ntuples_raw,
+		pg_atomic_fetch_add_u64(&psss->source_ntuples_raw,
 								xcmd->u.results.nitems_raw);
-		pg_atomic_fetch_add_u64(&ps_state->source_ntuples_in,
+		pg_atomic_fetch_add_u64(&psss->source_ntuples_in,
 								xcmd->u.results.nitems_in);
-		for (int i=0; i < num_inner_rels; i++)
-		{
-			pgstromSharedInnerState *psis = pts->inners[i].dsm;
-
-			pg_atomic_fetch_add_u64(&psis->stats_roj,
-									xcmd->u.results.stats[i].nitems_roj);
-			pg_atomic_fetch_add_u64(&psis->stats_gist,
-									xcmd->u.results.stats[i].nitems_gist);
-			pg_atomic_fetch_add_u64(&psis->stats_join,
-									xcmd->u.results.stats[i].nitems_out);
-		}
-		pg_atomic_fetch_add_u64(&ps_state->result_ntuples,
-								xcmd->u.results.nitems_out);
-		if (xcmd->u.results.final_nitems > 0)
-			pg_atomic_fetch_add_u64(&ps_state->final_nitems,
-									xcmd->u.results.final_nitems);
-		if (xcmd->u.results.final_usage > 0)
-			pg_atomic_fetch_add_u64(&ps_state->final_usage,
-									xcmd->u.results.final_usage);
-		if (xcmd->u.results.final_total > 0)
-			pg_atomic_fetch_add_u64(&ps_state->final_total,
-									xcmd->u.results.final_total);
-		if (xcmd->u.results.final_sorting_msec > 0)
-			pg_atomic_fetch_add_u32(&ps_state->final_sorting_msec,
-									xcmd->u.results.final_sorting_msec);
-		if (xcmd->u.results.final_reconstruction_msec > 0)
-			pg_atomic_fetch_add_u32(&ps_state->final_reconstruction_msec,
-									xcmd->u.results.final_reconstruction_msec);
-		if (xcmd->u.results.join_reconstruction_msec > 0)
-			pg_atomic_fetch_add_u32(&ps_state->join_reconstruction_msec,
-									xcmd->u.results.join_reconstruction_msec);
-		if (xcmd->u.results.select_into_nblocks > 0)
-			pg_atomic_fetch_add_u32(&ps_state->select_into_nblocks,
-									xcmd->u.results.select_into_nblocks);
-		/* stats related to arrow_fdw */
-		if (pts->arrow_state)
-			arrowFdwUpdateExecStats(pts->arrow_state, &xcmd->u.results);
 	}
+	for (int i=0; i < num_inner_rels; i++)
+	{
+		pgstromSharedInnerState *psis = pts->inners[i].dsm;
+
+		pg_atomic_fetch_add_u64(&psis->stats_roj,
+								xcmd->u.results.stats[i].nitems_roj);
+		pg_atomic_fetch_add_u64(&psis->stats_gist,
+								xcmd->u.results.stats[i].nitems_gist);
+		pg_atomic_fetch_add_u64(&psis->stats_join,
+								xcmd->u.results.stats[i].nitems_out);
+	}
+	pg_atomic_fetch_add_u64(&ps_state->result_ntuples,
+							xcmd->u.results.nitems_out);
+	if (xcmd->u.results.final_nitems > 0)
+		pg_atomic_fetch_add_u64(&ps_state->final_nitems,
+								xcmd->u.results.final_nitems);
+	if (xcmd->u.results.final_usage > 0)
+		pg_atomic_fetch_add_u64(&ps_state->final_usage,
+								xcmd->u.results.final_usage);
+	if (xcmd->u.results.final_total > 0)
+		pg_atomic_fetch_add_u64(&ps_state->final_total,
+								xcmd->u.results.final_total);
+	if (xcmd->u.results.final_sorting_msec > 0)
+		pg_atomic_fetch_add_u32(&ps_state->final_sorting_msec,
+								xcmd->u.results.final_sorting_msec);
+	if (xcmd->u.results.final_reconstruction_msec > 0)
+		pg_atomic_fetch_add_u32(&ps_state->final_reconstruction_msec,
+								xcmd->u.results.final_reconstruction_msec);
+	if (xcmd->u.results.join_reconstruction_msec > 0)
+		pg_atomic_fetch_add_u32(&ps_state->join_reconstruction_msec,
+								xcmd->u.results.join_reconstruction_msec);
+	if (xcmd->u.results.select_into_nblocks > 0)
+		pg_atomic_fetch_add_u32(&ps_state->select_into_nblocks,
+								xcmd->u.results.select_into_nblocks);
+	/* stats related to arrow_fdw */
+	if (pts->arrow_state)
+		arrowFdwUpdateExecStats(pts->arrow_state, &xcmd->u.results);
 }
 
 /*
@@ -1413,11 +1418,9 @@ pgstromCreateTaskState(CustomScan *cscan,
 {
 	pgstromPlanInfo *pp_info = deform_pgstrom_plan_info(cscan);
 	pgstromTaskState *pts;
-	int		num_inner_rels = list_length(cscan->custom_plans);
-	int		num_scan_rels = list_length(pp_info->scan_relids);
 
-	Assert(pp_info->num_inner_rels == num_inner_rels);
-	pts = palloc0(offsetof(pgstromTaskState, inners[num_inner_rels]));
+	Assert(pp_info->num_inner_rels == list_length(cscan->custom_plans));
+	pts = palloc0(offsetof(pgstromTaskState, inners[pp_info->num_inner_rels]));
 	NodeSetTag(pts, T_CustomScanState);
 	pts->css.flags = cscan->flags;
 	pts->css.methods = methods;
@@ -1426,9 +1429,9 @@ pgstromCreateTaskState(CustomScan *cscan,
 #endif
 	pts->xpu_task_flags = pp_info->xpu_task_flags;
 	pts->pp_info = pp_info;
-	pts->num_scan_rels = num_scan_rels;
-	pts->scan_rels = palloc0(sizeof(pgstromTaskScanState) * num_scan_rels);
-	pts->num_inner_rels = num_inner_rels;
+	pts->num_scan_rels = list_length(pp_info->scan_rels_list);
+	pts->scan_rels = palloc0(sizeof(pgstromTaskScanState) * pts->num_scan_rels);
+	pts->num_inner_rels = pp_info->num_inner_rels;
 
 	return (Node *)pts;
 }
@@ -1443,7 +1446,8 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 	pgstromPlanInfo	*pp_info = pts->pp_info;
 	CustomScan *cscan = (CustomScan *)pts->css.ss.ps.plan;
 	Relation	base_rel = pts->css.ss.ss_currentRelation;
-	ListCell   *lc1, *lc2, *lc3, *lc4;
+	gpumask_t	optimal_gpus = 0UL;
+	ListCell   *lc;
 	int			dindex;
 
 	/* sanity checks */
@@ -1456,13 +1460,11 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 	 * setup outer relations scan
 	 */
 	dindex = 0;
-	forfour (lc1, pp_info->scan_relids,
-			 lc2, pp_info->brin_index_oids,
-			 lc3, pp_info->brin_index_conds,
-			 lc4, pp_info->brin_index_quals)
+	foreach (lc, pp_info->scan_rels_list)
 	{
-		pgstromTaskScanState *ptss = &pts->scan_rels[dindex++];
-		Index		scan_relid = lfirst_int(lc1);
+		pgstromTaskScanState *ptss = &pts->scan_rels[dindex];
+		pgstromPlanScanInfo *pp_scan = lfirst(lc);
+		Index		scan_relid = pp_scan->scan_relid;
 		Relation	scan_rel;
 
 		if (scan_relid == cscan->scan.scanrelid)
@@ -1470,11 +1472,14 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 		else
 			scan_rel = ExecOpenScanRelation(estate, scan_relid, eflags);
 
+		ptss->scan_relidx = dindex;
 		ptss->scan_relid = scan_relid;
 		ptss->scan_rel = scan_rel;
-		ptss->brin_oid = lfirst_oid(lc2);
-		ptss->brin_conds = lfirst(lc3);
-		ptss->brin_quals = lfirst(lc4);
+		ptss->plan_ntuples_raw = pp_scan->plan_ntuples_raw;
+		ptss->plan_ntuples_in = pp_scan->plan_ntuples_in;
+		ptss->brin_oid = pp_scan->brin_oid;
+		ptss->brin_conds = pp_scan->brin_conds;
+		ptss->brin_quals = pp_scan->brin_quals;
 		ptss->heap_vm_buffer = InvalidBuffer;
 
 		if (RelationGetForm(scan_rel)->relkind == RELKIND_RELATION ||
@@ -1482,35 +1487,41 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 		{
 			SMgrRelation smgr = RelationGetSmgr(scan_rel);
 			Oid			am_oid = RelationGetForm(scan_rel)->relam;
-			const char *heap_pathname = smgr_relpath(smgr, MAIN_FORKNUM);
 
 			if (am_oid != HEAP_TABLE_AM_OID)
 				elog(ERROR, "PG-Strom does not support table access method: %s",
 					 get_am_name(am_oid));
+			ptss->optimal_gpus = GetOptimalGpuForRelation(scan_rel);
+			ptss->heap_pathname = smgr_relpath(smgr, MAIN_FORKNUM);
 			/* setup BRIN-index if any */
 			pgstromBrinIndexExecBegin(pts, ptss);
-			//FIXME: Per-file optimal_gpus are possible
-			pts->optimal_gpus = GetOptimalGpuForRelation(scan_rel);
-			if (pts->optimal_gpus != 0)
-				pts->xpu_task_flags |= DEVTASK__USED_GPUDIRECT;
-			else
-				pts->optimal_gpus = GetSystemAvailableGpus();
-			ptss->heap_pathname = heap_pathname;
 		}
-		else if (RelationGetForm(scan_rel)->relkind == RELKIND_FOREIGN_TABLE)
+		else if (RelationIsArrowFdw(scan_rel))
 		{
-			pgstromArrowFdwExecInit(pts,
+			pgstromArrowFdwExecInit(pts, ptss,
 									pp_info->scan_quals,
 									pp_info->outer_refs);
-			elog(ERROR, "Bug? only arrow_fdw is supported in PG-Strom");
 		}
 		else
 		{
 			elog(ERROR, "Bug? PG-Strom does not support relation type of '%s'",
 				 RelationGetRelationName(scan_rel));
 		}
+		/* update optimal-gpus */
+		if (dindex == 0)
+			optimal_gpus  = ptss->optimal_gpus;
+		else
+			optimal_gpus &= ptss->optimal_gpus;
+
+		dindex++;
 	}
 	Assert(dindex == pts->num_scan_rels);
+	/* optimal GPUs */
+	if (optimal_gpus != 0)
+		pts->xpu_task_flags |= DEVTASK__USED_GPUDIRECT;
+	else
+		optimal_gpus = GetSystemAvailableGpus();
+	pts->optimal_gpus = optimal_gpus;
 
 #if PG_VERSION_NUM < 160000
 	/*
@@ -1533,11 +1544,11 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 	 * init inner relations
 	 */
 	dindex = 0;
-	foreach (lc1, cscan->custom_plans)
+	foreach (lc, cscan->custom_plans)
 	{
 		pgstromTaskInnerState *istate = &pts->inners[dindex];
 		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[dindex];
-		Plan	   *plan = lfirst(lc1);
+		Plan	   *plan = lfirst(lc);
 		ListCell   *cell;
 
 		istate->ps = ExecInitNode(plan, estate, eflags);
@@ -1994,16 +2005,6 @@ pgstromExecResetTaskState(CustomScanState *node)
 			   !pts->final_done &&
 			   pts->curr_scan_rel == 0);
 	}
-	/* reset related stuff */
-	for (int k=0; k < pts->num_scan_rels; k++)
-	{
-		pgstromTaskScanState *ptss = &pts->scan_rels[k];
-
-		if (ptss->arrow_state)
-			pgstromArrowFdwExecReset(ptss->arrow_state);
-		if (ptss->brin_state)
-			pgstromBrinIndexExecReset(pts, ptss);
-	}
 	if (scan)
 	{
 		if (!scan->rs_parallel)
@@ -2013,11 +2014,21 @@ pgstromExecResetTaskState(CustomScanState *node)
 	}
 	if (ps_state)
 	{
-		pg_atomic_write_u64(&ps_state->scan_block_count, 0);
 		pg_atomic_write_u32(&ps_state->parallel_task_control, 0);
-		for (int i=0; i < pts->num_inner_rels; i++)
+
+		for (int k=0; k < pts->num_scan_rels; k++)
 		{
-			pgstromSharedInnerState *psis = pts->inners[i].dsm;
+			pgstromTaskScanState *ptss = &pts->scan_rels[k];
+
+			pg_atomic_write_u64(&ptss->dsm->scan_block_count, 0);
+			if (ptss->arrow_state)
+				pgstromArrowFdwExecReset(ptss->arrow_state);
+			if (ptss->brin_state)
+				pgstromBrinIndexExecReset(pts, ptss);
+		}
+		for (int k=0; k < pts->num_inner_rels; k++)
+		{
+			pgstromSharedInnerState *psis = pts->inners[k].dsm;
 
 			pg_atomic_write_u64(&psis->inner_nitems, 0);
 			pg_atomic_write_u64(&psis->inner_nitems, 0);
@@ -2260,17 +2271,75 @@ pgstromSharedStateShutdownDSM(CustomScanState *node)
 }
 
 /*
- * pgstromGpuDirectExplain
+ * pgstromExplainHeapScanRelation
  */
 static void
-pgstromGpuDirectExplain(pgstromTaskState *pts,
+pgstromExplainScanRelation(pgstromTaskState *pts,
+						   pgstromTaskScanState *ptss,
+						   ExplainState *es, List *dcontext)
+{
+	StringInfoData buf;
+	char	label[100];
+
+	initStringInfo(&buf);
+	snprintf(label, sizeof(label), "scan%d", ptss->scan_relidx);
+	appendStringInfo(&buf, "%s [plan: %.0f -> %.0f",
+					 RelationGetRelationName(ptss->scan_rel),
+					 ptss->plan_ntuples_raw,
+					 ptss->plan_ntuples_in);
+	if (es->analyze)
+	{
+		pgstromSharedScanState *psss = ptss->dsm;
+		uint64_t	source_ntuples_raw = pg_atomic_read_u64(&psss->source_ntuples_raw);
+		uint64_t	source_ntuples_in = pg_atomic_read_u64(&psss->source_ntuples_in);
+		uint32_t	nchunks_parquet_read = pg_atomic_read_u32(&psss->nchunks_parquet_read);
+		uint32_t	ncaches_parquet_load = pg_atomic_read_u32(&psss->ncaches_parquet_load);
+
+		appendStringInfo(&buf, ", exec: %lu -> %lu",
+						 source_ntuples_raw,
+						 source_ntuples_in);
+		/* parquet-cache stats */
+		if (!pgstrom_explain_developer_mode && nchunks_parquet_read > 0)
+		{
+			appendStringInfo(&buf, "cache-hit: %u of total %u chunks (cache ratio: %.2f%%)",
+							 ncaches_parquet_load,
+							 ncaches_parquet_load + nchunks_parquet_read,
+							 100.0 *
+							 (double)ncaches_parquet_load /
+							 (double)(ncaches_parquet_load + nchunks_parquet_read));
+		}
+	}
+	//TODO: add execution time for each
+	appendStringInfo(&buf, "]");
+	ExplainPropertyText(label, buf.data, es);
+
+	if (ptss->arrow_state)
+	{
+		pgstromExplainArrowFdwHint(&pts->css.ss,
+								   ptss->arrow_state,
+								   es, dcontext,
+								   ptss->scan_relidx);
+	}
+	else if (ptss->brin_state)
+	{
+		pgstromBrinIndexExplain(ptss->brin_state,
+								es, dcontext,
+								ptss->scan_relidx);
+	}
+	pfree(buf.data);
+}
+
+/*
+ * pgstromExplainGpuDirect
+ */
+static void
+pgstromExplainGpuDirect(pgstromTaskState *pts,
 						ExplainState *es, List *dcontext)
 {
 	pgstromSharedState *ps_state = pts->ps_state;
 	StringInfoData buf;
 	int			n_gpus;
 	int			base;
-	uint64		count;
 
 	initStringInfo(&buf);
 	if ((pts->xpu_task_flags & DEVTASK__USED_GPUDIRECT) == 0)
@@ -2303,27 +2372,36 @@ pgstromGpuDirectExplain(pgstromTaskState *pts,
 
 	if (es->analyze && ps_state)
 	{
-		base = buf.len;
+		uint64_t	npages_buffer_read = 0;
+		uint64_t	npages_vfs_read = 0;
+		uint64_t	npages_direct_read = 0;
+		uint64_t	source_ntuples_raw = 0;
 
-		count = pg_atomic_read_u64(&ps_state->npages_buffer_read);
-		if (count)
+		for (int k=0; k < pts->num_scan_rels; k++)
+		{
+			pgstromSharedScanState *psss = pts->scan_rels[k].dsm;
+
+			npages_buffer_read += pg_atomic_read_u64(&psss->npages_buffer_read);
+			npages_vfs_read    += pg_atomic_read_u64(&psss->npages_vfs_read);
+			npages_direct_read += pg_atomic_read_u64(&psss->npages_direct_read);
+			source_ntuples_raw += pg_atomic_read_u64(&psss->source_ntuples_raw);
+		}
+		base = buf.len;
+		if (npages_buffer_read)
 			appendStringInfo(&buf, "%sbuffer=%lu",
 							 (buf.len > base ? ", " : "; "),
-							 count / PAGES_PER_BLOCK);
-		count = pg_atomic_read_u64(&ps_state->npages_vfs_read);
-		if (count)
+							 npages_buffer_read / PAGES_PER_BLOCK);
+		if (npages_vfs_read)
 			appendStringInfo(&buf, "%svfs=%lu",
 							 (buf.len > base ? ", " : "; "),
-							 count / PAGES_PER_BLOCK);
-		count = pg_atomic_read_u64(&ps_state->npages_direct_read);
-		if (count)
+							 npages_vfs_read / PAGES_PER_BLOCK);
+		if (npages_direct_read)
 			appendStringInfo(&buf, "%sdirect=%lu",
 							 (buf.len > base ? ", " : "; "),
-							 count / PAGES_PER_BLOCK);
-		count = pg_atomic_read_u64(&ps_state->source_ntuples_raw);
+							 npages_direct_read / PAGES_PER_BLOCK);
 		appendStringInfo(&buf, "%sntuples=%lu",
 						 (buf.len > base ? ", " : "; "),
-						 count);
+						 source_ntuples_raw);
 	}
 	if (!pgstrom_regression_test_mode)
 		ExplainPropertyText("Scan-Engine", buf.data, es);
@@ -2535,8 +2613,10 @@ pgstromExplainTaskState(CustomScanState *node,
 	char			   *str;
 	char				label[100];
 	double				ntuples;
+	bool				simple_rel_scan = false;
 	uint64_t			stat_ntuples = 0;
 	uint64_t			prev_ntuples = 0;
+	List			   *arrow_state_list = NIL;
 
 	/* setup deparse context */
 	dcontext = set_deparse_context_plan(es->deparse_cxt,
@@ -2588,11 +2668,44 @@ pgstromExplainTaskState(CustomScanState *node,
 		}
 		ExplainPropertyText("GPU Pinned Buffer", buf.data, es);
 	}
+	/* Referenced columns if arrow_fdw is involved */
+	for (int k=0; k < pts->num_scan_rels; k++)
+	{
+		pgstromTaskScanState *ptss = &pts->scan_rels[k];
+		if (ptss->arrow_state)
+		{
+			if (arrow_state_list == NIL)
+				pgstromExplainRefColumns(pts->css.ss.ss_currentRelation,
+										 pp_info->outer_refs,
+										 es, dcontext);
+			arrow_state_list = lappend(arrow_state_list, ptss->arrow_state);
+		}
+	}
+	/* sub-relations if partitioned table */
+	if (pts->num_scan_rels == 1 &&
+		pts->scan_rels[0].scan_relid == cscan->scan.scanrelid)
+	{
+		simple_rel_scan = true;
+	}
+	else
+	{
+		for (int k=0; k < pts->num_scan_rels; k++)
+		{
+			pgstromTaskScanState *ptss = &pts->scan_rels[k];
+
+			pgstromExplainScanRelation(pts, ptss, es, dcontext);
+		}
+	}
 	/* GPU Scan Quals */
 	if (ps_state)
 	{
-		stat_ntuples = pg_atomic_read_u64(&ps_state->source_ntuples_in);
-		prev_ntuples = pg_atomic_read_u64(&ps_state->source_ntuples_raw);
+		for (int k=0; k < pts->num_scan_rels; k++)
+		{
+			pgstromSharedScanState *psss = pts->scan_rels[k].dsm;
+
+			stat_ntuples += pg_atomic_read_u64(&psss->source_ntuples_in);
+			prev_ntuples += pg_atomic_read_u64(&psss->source_ntuples_raw);
+		}
 	}
 	if (pp_info->scan_quals)
 	{
@@ -2626,25 +2739,6 @@ pgstromExplainTaskState(CustomScanState *node,
 		}
 		ExplainPropertyText("GPU Scan Quals", buf.data, es);
 	}
-	/* Sub-relations if partitioned table */
-	if (list_length(pp_info->scan_relids) > 1 ||
-		linitial_int(pp_info->scan_relids) != cscan->scan.scanrelid)
-	{
-		int		count = 0;
-		foreach (lc, pp_info->scan_relids)
-		{
-			Index		scan_relid = lfirst_int(lc);
-			RangeTblEntry *rte = rt_fetch(scan_relid, es->rtable);
-
-			snprintf(label, sizeof(label), "scan%d", count++);
-			resetStringInfo(&buf);
-			appendStringInfo(&buf, "%s", get_rel_name(rte->relid));
-			//brin, plan nrows, ...
-			//one line output for each scan rel / arrow-fdw
-			ExplainPropertyText(label, buf.data, es);
-		}
-	}
-
 	/* GPU JOIN */
 	ntuples = pp_info->scan_nrows;
 	for (int i=0; i < pp_info->num_inner_rels; i++)
@@ -2844,21 +2938,27 @@ pgstromExplainTaskState(CustomScanState *node,
 	/*
 	 * Storage related info
 	 */
-	if (pts->arrow_state)
+	if (simple_rel_scan)
 	{
-		pgstromArrowFdwExplain(&pts->css.ss,
-							   pts->arrow_state,
-							   es, dcontext);
-		pgstromGpuDirectExplain(pts, es, dcontext);
+		pgstromTaskScanState *ptss = &pts->scan_rels[0];
+
+		if (ptss->arrow_state)
+		{
+			pgstromExplainArrowFdwHint(&pts->css.ss,
+									   ptss->arrow_state,
+									   es, dcontext, -1);
+			//Parquet Cache
+		}
+		else if (ptss->brin_state)
+			pgstromBrinIndexExplain(ptss->brin_state, es, dcontext, -1);
 	}
-	else
-	{
-		/* GPU-Direct or VFS Heap Read */
-		pgstromGpuDirectExplain(pts, es, dcontext);
-	}
-	/* State of BRIN-index */
-	if (pts->br_state)
-		pgstromBrinIndexExplain(pts, dcontext, es);
+	/* list of arrow/parquet files */
+	if (arrow_state_list != NIL)
+		pgstromExplainArrowFdwFiles(&pts->css.ss,
+									arrow_state_list,
+									es, dcontext);
+	/* entire GPU-Direct SQL statistics */
+	pgstromExplainGpuDirect(pts, es, dcontext);
 
 	/*
 	 * GPU-Sorting

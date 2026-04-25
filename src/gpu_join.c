@@ -328,8 +328,8 @@ fixup_join_varnullingrels(RelOptInfo *joinrel, pgstromPlanInfo *pp_info)
 	__FIXUP_FIELD(pp_info->used_params);
 	__FIXUP_FIELD(pp_info->host_quals);
 	__FIXUP_FIELD(pp_info->scan_quals);
-	__FIXUP_FIELD(pp_info->brin_index_conds);
-	__FIXUP_FIELD(pp_info->brin_index_quals);
+//	__FIXUP_FIELD(pp_info->brin_index_conds);
+//	__FIXUP_FIELD(pp_info->brin_index_quals);
 	for (int i=0; i < pp_info->num_inner_rels; i++)
 	{
 		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[i];

@@ -973,14 +973,14 @@ pgstromBrinIndexShutdownDSM(BrinIndexState *brin_state)
 }
 
 void
-pgstromBrinIndexExplain(pgstromTaskState *pts,
+pgstromBrinIndexExplain(BrinIndexState *brin_state,
+						ExplainState *es,
 						List *dcontext,
-						ExplainState *es)
+						int32_t scan_relidx)
 {
-	BrinIndexState *brin_state = pts->br_state;
 	StringInfoData	buf;
 	ListCell	   *lc;
-	uint32_t		count;
+	char			label[100];
 
 	initStringInfo(&buf);
 	foreach (lc, brin_state->index_quals)
@@ -993,27 +993,18 @@ pgstromBrinIndexExplain(pgstromTaskState *pts,
 			appendStringInfoString(&buf, ", ");
 		appendStringInfoString(&buf, temp);
 	}
-	ExplainPropertyText("Brin Quals", buf.data, es);
-
 	if (es->analyze)
 	{
-		if (es->format == EXPLAIN_FORMAT_TEXT)
-		{
-			resetStringInfo(&buf);
-			appendStringInfo(&buf, "fetched=%u, skipped=%u",
-							 pg_atomic_read_u32(brin_state->brin_num_fetched),
-							 pg_atomic_read_u32(brin_state->brin_num_skipped));
-			ExplainPropertyText("Brin Stats", buf.data, es);
-		}
-		else
-		{
-			count = pg_atomic_read_u32(brin_state->brin_num_fetched);
-			ExplainPropertyInteger("Brin Stats Fetched", NULL, count, es);
-
-			count = pg_atomic_read_u32(brin_state->brin_num_skipped);
-			ExplainPropertyInteger("Brin Stats Skipped", NULL, count, es);
-		}
+		appendStringInfo(&buf, " [fetched=%u, skipped=%u]",
+						 pg_atomic_read_u32(brin_state->brin_num_fetched),
+						 pg_atomic_read_u32(brin_state->brin_num_skipped));
 	}
+	if (scan_relidx < 0)
+		strcpy(label, "Brin Quals");
+	else
+		snprintf(label, sizeof(label), "brin%d", scan_relidx);
+	ExplainPropertyText(label, buf.data, es);
+
 	pfree(buf.data);
 }
 

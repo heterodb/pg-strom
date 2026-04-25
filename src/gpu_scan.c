@@ -127,18 +127,16 @@ __gpuScanBuildPlanInfo(PlannerInfo *root,
 					   int parallel_nworkers)
 {
 	double		parallel_divisor = 1.0;
-	List	   *scan_relids = NIL;
-	List	   *brin_index_oids = NIL;
-	List	   *brin_index_conds = NIL;
-	List	   *brin_index_quals = NIL;
 	Cost		startup_cost = pgstrom_gpu_setup_cost;
 	Cost		run_cost = 0.0;
 	Cost		final_cost = 0.0;
 	double		total_ntuples = 0.0;
 	double		total_npages = 0.0;
 	double		curr_ntuples;
+	List	   *scan_rels_list = NIL;
 	ListCell   *lc;
 	pgstromPlanInfo *pp_info;
+
 
 	if (parallel_nworkers > 0)
 	{
@@ -158,6 +156,7 @@ __gpuScanBuildPlanInfo(PlannerInfo *root,
 	 */
 	foreach (lc, scan_rels)
 	{
+		pgstromPlanScanInfo *pp_scan = palloc0(sizeof(pgstromPlanScanInfo));
 		RelOptInfo *__rel = lfirst(lc);
 		double		__ntuples = __rel->tuples;
 		double		__npages = __rel->pages;
@@ -225,18 +224,6 @@ __gpuScanBuildPlanInfo(PlannerInfo *root,
 				indexOpt = NULL;
 			}
 		}
-		if (indexOpt)
-		{
-			brin_index_oids = lappend_oid(brin_index_oids, indexOpt->indexoid);
-			brin_index_conds = lappend(brin_index_conds, indexConds);
-			brin_index_quals = lappend(brin_index_quals, indexQuals);
-		}
-		else
-		{
-			brin_index_oids = lappend_oid(brin_index_oids, InvalidOid);
-			brin_index_conds = lappend(brin_index_conds, NIL);
-			brin_index_quals = lappend(brin_index_quals, NIL);
-		}
 		total_ntuples += __ntuples;
 		total_npages += __npages;
 		/* discount disk cost if parallel scan */
@@ -244,7 +231,16 @@ __gpuScanBuildPlanInfo(PlannerInfo *root,
 			disk_cost /= parallel_divisor;
 		run_cost += disk_cost;
 		/* RTI to be scanned */
-		scan_relids = lappend_int(scan_relids, __rel->relid);
+		pp_scan->scan_relid = __rel->relid;
+		pp_scan->plan_ntuples_raw = __ntuples;
+		pp_scan->plan_ntuples_in = __rel->rows;
+		if (indexOpt)
+		{
+			pp_scan->brin_oid = indexOpt->indexoid;
+			pp_scan->brin_conds = indexConds;
+			pp_scan->brin_quals = indexQuals;
+		}
+		scan_rels_list = lappend(scan_rels_list, pp_scan);
 	}
 	curr_ntuples = total_ntuples;
 
@@ -301,7 +297,6 @@ __gpuScanBuildPlanInfo(PlannerInfo *root,
 	pp_info->xpu_task_flags = DEVKIND__NVIDIA_GPU;
 	pp_info->host_quals = extract_actual_clauses(host_quals, false);
 	pp_info->base_relid = baserel->relid;
-	pp_info->scan_relids = scan_relids;
 	pp_info->scan_quals = extract_actual_clauses(dev_quals, false);
 	pp_info->scan_npages = total_npages;
 	pp_info->scan_tuples = total_ntuples;
@@ -312,10 +307,8 @@ __gpuScanBuildPlanInfo(PlannerInfo *root,
 	pp_info->run_cost = run_cost;
 	pp_info->final_cost = final_cost;
 	pp_info->final_nrows = baserel->rows;
-	pp_info->brin_index_oids = brin_index_oids;
-	pp_info->brin_index_conds = brin_index_conds;
-	pp_info->brin_index_quals = brin_index_quals;
 	pp_info->outer_refs = outer_refs;
+	pp_info->scan_rels_list = scan_rels_list;
 	pp_info->sibling_param_id = -1;		//to be deprecated
 	return pp_info;
 }

@@ -2922,6 +2922,7 @@ gpuClientWriteBackPartial(gpuClient  *gclient,
 	memset(&resp, 0, sizeof(resp));
 	resp.magic  = XpuCommandMagicNumber;
 	resp.tag    = XpuCommandTag__SuccessHalfWay;
+	resp.u.results.scan_relidx = -1;
 	resp.u.results.chunks_nitems = 1;
 	resp.u.results.chunks_offset = resp_sz;
 
@@ -3443,6 +3444,7 @@ gpuservHandleOpenSession(gpuClient *gclient, XpuCommand *xcmd)
 	resp.magic = XpuCommandMagicNumber;
 	resp.tag = XpuCommandTag__Success;
 	resp.length = offsetof(XpuCommand, u.results.stats);
+	resp.u.results.scan_relidx = -1;
 	resp.u.results.join_reconstruction_msec = join_reconstruction_msec;
 
 	iov.iov_base = &resp;
@@ -4237,6 +4239,7 @@ gpuservHandleGpuTaskExec(gpuContext *gcontext,
 	sz = offsetof(kern_exec_results, stats[num_inner_rels]);
 	kern_stats = alloca(sz);
 	memset(kern_stats, 0, sz);
+	kern_stats->scan_relidx = xcmd->u.task.scan_relidx;
 	kern_stats->num_rels = num_inner_rels;
 	kern_stats->npages_direct_read = npages_direct_read;
 	kern_stats->npages_vfs_read = npages_vfs_read;
@@ -5674,6 +5677,7 @@ gpuservHandleGpuTaskFinal(gpuContext *gcontext,
 	memset(resp, 0, resp_sz);
 	resp->magic = XpuCommandMagicNumber;
 	resp->tag   = XpuCommandTag__Success;
+	resp->u.results.scan_relidx = -1;
 	resp->u.results.chunks_nitems = 0;
 	resp->u.results.chunks_offset = resp_sz;
 	resp->u.results.num_rels = num_rels;

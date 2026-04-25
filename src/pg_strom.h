@@ -277,6 +277,16 @@ typedef struct
 
 typedef struct
 {
+	Index			scan_relid;
+	double			plan_ntuples_raw;
+	double			plan_ntuples_in;
+	Oid				brin_oid;
+	List		   *brin_conds;
+	List		   *brin_quals;
+} pgstromPlanScanInfo;
+
+typedef struct
+{
 	uint32_t	xpu_task_flags;		/* mask of device flags */
 	/* Plan information */
 	const Bitmapset *outer_refs;	/* referenced columns */
@@ -288,7 +298,6 @@ typedef struct
 									 * - for partitioned table, it should be the
 									 *   parent relation of the scan_relids.
 									 */
-	List	   *scan_relids;		/* relid of the outer relations to scan */
 	List	   *scan_quals;			/* device qualifiers to scan the outer */
 	double		scan_npages;		/* amount of i/o to be loaded from disk */
 	double		scan_tuples;		/* # of tuples to be fetched from disk */
@@ -300,10 +309,6 @@ typedef struct
 	Cost		run_cost;			/* run cost */
 	Cost		final_cost;			/* cost for sendback and host-side tasks */
 	double		final_nrows;		/* copy of result_rel->rows */
-	/* BRIN-index support */
-	List	   *brin_index_oids;	/* OID of BRIN-index, if any */
-	List	   *brin_index_conds;	/* BRIN-index key conditions */
-	List	   *brin_index_quals;	/* Original BRIN-index qualifier */
 	/* XPU code for JOIN */
 	bytea	   *kexp_load_vars_packed;	/* LoadVars[] */
 	bytea	   *kexp_move_vars_packed;	/* MoveVars[] */
@@ -342,8 +347,10 @@ typedef struct
 	/* select into direct mode */
 	Oid			select_into_relid;		/* SELECT INTO direct destination relation */
 	List	   *select_into_proj;		/* SELECT INTO direct projection if any */
+	/* scan relations */
+	List	   *scan_rels_list;			/* list of pgstromPlanScanInfo */
 	/* inner relations */
-	int			sibling_param_id;
+	int			sibling_param_id;		//deprecated
 	int			num_inner_rels;
 	pgstromPlanInnerInfo inners[FLEXIBLE_ARRAY_MEMBER];
 } pgstromPlanInfo;
@@ -417,19 +424,12 @@ typedef struct
 	/* xact */
 	TransactionId		pgsql_curr_xid;		/* xid of the query */
 	CommandId			pgsql_curr_cid;		/* cid of the query*/
-	/* scan */
-	pg_atomic_uint64	scan_block_count;	/* scan counter */
-	uint32_t			scan_block_nums;	/* = HeapScanDesc::rs_numblocks */
-	uint32_t			scan_block_start;	/* = HeapScanDesc::rs_startblock */
 	/* control variables to detect the last plan-node at parallel execution */
 	pg_atomic_uint32	parallel_task_control;
+	/* for parallel heap-scan */
+	uint32_t			parallel_scan_desc_offset;
 	/* statistics */
-	pg_atomic_uint64	npages_direct_read;	/* read by GPU-Direct Storage */
-	pg_atomic_uint64	npages_vfs_read;	/* read from VFS layer */
-	pg_atomic_uint64	npages_buffer_read;	/* read from PG buffer */
-	pg_atomic_uint64	source_ntuples_raw;	/* # of raw tuples in the base relation */
-	pg_atomic_uint64	source_ntuples_in;	/* # of tuples survived from WHERE-quals */
-	pg_atomic_uint64	result_ntuples;		/* # of tuples returned from xPU */
+	pg_atomic_uint64	result_ntuples;		/* # of tuples returned from GPU */
 	pg_atomic_uint64	fallback_nitems;	/* # of fallback tuples in depth==0 */
 	pg_atomic_uint64	final_nitems;		/* # of tuples in final buffer if any */
 	pg_atomic_uint64	final_usage;		/* usage bytes of final buffer if any */
@@ -439,19 +439,6 @@ typedef struct
 	pg_atomic_uint32	join_reconstruction_msec;	/* usec of inner buffer reconstruction */
 	pg_atomic_uint32	select_into_nblocks; /* # of blocks written by SELECT INTO direct */
 	pg_atomic_uint32	pinned_buffer_divisor; /* # of pinned-inner-buffer partitions */
-	/* for parallel-scan */
-	uint32_t			parallel_scan_desc_offset;
-	/* for arrow_fdw */
-	pg_atomic_uint32	arrow_rbatch_index;
-	pg_atomic_uint32	arrow_rbatch_nload;	/* # of loaded record-batches */
-	pg_atomic_uint32	arrow_rbatch_nskip;	/* # of skipped record-batches */
-	pg_atomic_uint32	nchunks_parquet_read; /* # of chunks in file read by arrow/parquet */
-	pg_atomic_uint32	ncaches_parquet_load; /* # of caches loaded by parquet */
-	/* for gpu-cache */
-	pg_atomic_uint32	__gcache_fetch_count_data;
-	/* for brin-index */
-	pg_atomic_uint32	brin_index_fetched;
-	pg_atomic_uint32	brin_index_skipped;
 	/* for join-inner-preload */
 	pthread_cond_t		preload_cond;		/* sync object */
 	pthread_mutex_t		preload_mutex;		/* mutex for inner-preloading */
@@ -505,8 +492,12 @@ typedef struct
 typedef struct
 {
 	pgstromSharedScanState *dsm;
+	gpumask_t		optimal_gpus;
+	int32_t			scan_relidx;
 	Index			scan_relid;
 	Relation		scan_rel;
+	double			plan_ntuples_raw;
+	double			plan_ntuples_in;
 	/* arrow/parquet */
 	ArrowFdwState  *arrow_state;
 	/* heap scan */
@@ -557,9 +548,6 @@ struct pgstromTaskState
 	List			   *fallback_load_dst;	/* dest resno of fallback-slot */
 	bytea			   *kern_fallback_desc;
 	/* request command buffer */
-//	Buffer				curr_vm_buffer;		/* for visibility-map */
-//	uint64_t			curr_block_num;		/* for KDS_FORMAT_BLOCK */
-//	uint64_t			curr_block_tail;	/* for KDS_FORMAT_BLOCK */
 	StringInfoData		xcmd_buf;
 	/* scan relations state (can be multiple) */
 	int					num_scan_rels;
@@ -698,9 +686,10 @@ extern Size		pgstromBrinIndexInitDSM(BrinIndexState *brin_state,
 extern Size		pgstromBrinIndexAttachDSM(BrinIndexState *brin_state,
 										  pgstromSharedScanState *ptss);
 extern Size		pgstromBrinIndexShutdownDSM(BrinIndexState *brin_state);
-extern void		pgstromBrinIndexExplain(pgstromTaskState *pts,
+extern void		pgstromBrinIndexExplain(BrinIndexState *brin_state,
+										ExplainState *es,
 										List *dcontext,
-										ExplainState *es);
+										int32_t scan_relidx);
 extern void		pgstrom_init_brin(void);
 
 /*
@@ -897,41 +886,6 @@ extern void		pgstrom_inc_perf_counter(int num);
 extern void		pgstrom_add_perf_counter(int num, const struct timeval *tv_base);
 extern void		pgstrom_print_perf_counter(void);
 
-#if 0
-/*
- * gpu_cache.c
- */
-extern void		pgstrom_init_gpu_cache(void);
-extern int		baseRelHasGpuCache(PlannerInfo *root,
-								   RelOptInfo *baserel);
-extern bool		RelationHasGpuCache(Relation rel);
-extern const GpuCacheIdent *getGpuCacheDescIdent(const GpuCacheDesc *gc_desc);
-extern GpuCacheDesc *pgstromGpuCacheExecInit(pgstromTaskState *pts);
-extern XpuCommand *pgstromScanChunkGpuCache(pgstromTaskState *pts,
-											struct iovec *xcmd_iov,
-											int *xcmd_iovcnt);
-extern void		pgstromGpuCacheExecEnd(pgstromTaskState *pts);
-extern void		pgstromGpuCacheExecReset(pgstromTaskState *pts);
-extern void		pgstromGpuCacheInitDSM(pgstromTaskState *pts,
-									   pgstromSharedState *ps_state);
-extern void		pgstromGpuCacheAttachDSM(pgstromTaskState *pts,
-										 pgstromSharedState *ps_state);
-extern void		pgstromGpuCacheShutdown(pgstromTaskState *pts);
-extern void		pgstromGpuCacheExplain(pgstromTaskState *pts,
-									   ExplainState *es,
-									   List *dcontext);
-extern void		gpucacheManagerEventLoop(int cuda_dindex,
-										 CUcontext cuda_context,
-										 CUfunction cufn_gpucache_apply_redo,
-										 CUfunction cufn_gpucache_compaction);
-extern void		gpucacheManagerWakeUp(int cuda_dindex);
-
-extern void	   *gpuCacheGetDeviceBuffer(const GpuCacheIdent *ident,
-										CUdeviceptr *p_gcache_main_devptr,
-										CUdeviceptr *p_gcache_extra_devptr,
-										char *errbuf, size_t errbuf_sz);
-extern void		gpuCachePutDeviceBuffer(void *gc_lmap);
-#endif
 /*
  * gpu_scan.c
  */
@@ -1025,7 +979,8 @@ extern gpumask_t GetOptimalGpusForArrowFdw(PlannerInfo *root,
 extern Cost		disk_cost_arrow_fdw(PlannerInfo *root,
 									RelOptInfo *base_rel,
 									double *p_setup_cost);
-extern bool		pgstromArrowFdwExecInit(pgstromTaskState *pts,
+extern void		pgstromArrowFdwExecInit(pgstromTaskState *pts,
+										pgstromTaskScanState *ptss,
 										List *outer_quals,
 										const Bitmapset *outer_refs);
 extern XpuCommand *pgstromScanChunkArrowFdw(pgstromTaskState *pts,
@@ -1040,10 +995,19 @@ extern Size		pgstromArrowFdwInitDSM(ArrowFdwState *arrow_state,
 extern Size		pgstromArrowFdwAttachDSM(ArrowFdwState *arrow_state,
 										 pgstromSharedScanState *psss);
 extern Size		pgstromArrowFdwShutdownDSM(ArrowFdwState *arrow_state);
-extern void		pgstromArrowFdwExplain(ScanState *ss,
-									   ArrowFdwState *arrow_state,
-									   ExplainState *es,
-									   List *dcontext);
+extern void		pgstromExplainRefColumns(Relation frel,
+										 const Bitmapset *referenced,
+										 ExplainState *es,
+										 List *dcontext);
+extern void		pgstromExplainArrowFdwHint(ScanState *ss,
+										   ArrowFdwState *arrow_state,
+										   ExplainState *es,
+										   List *dcontext,
+										   int32_t scan_relidx);
+extern void		pgstromExplainArrowFdwFiles(ScanState *ss,
+											List *arrow_state_list,
+											ExplainState *es,
+											List *dcontext);
 extern void		arrowFdwUpdateExecStats(ArrowFdwState *arrow_state,
 										const kern_exec_results *kresults);
 extern bool		kds_arrow_fetch_tuple(TupleTableSlot *slot,

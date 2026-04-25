@@ -538,7 +538,6 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 						  pgstromTaskScanState *ptss,
 						  struct iovec *xcmd_iov, int *xcmd_iovcnt)
 {
-	pgstromSharedState *ps_state = pts->ps_state;
 	Relation		relation = ptss->scan_rel;
 	SMgrRelation	smgr = RelationGetSmgr(relation);
 	XpuCommand	   *xcmd;
@@ -573,6 +572,7 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 	memset(xcmd, 0, offsetof(XpuCommand, u.task.data));
 	xcmd->magic = XpuCommandMagicNumber;
 	xcmd->tag   = XpuCommandTag__XpuTaskExec;
+	xcmd->u.task.scan_relidx = ptss->scan_relidx;
 	xcmd->u.task.kds_src_offset = offsetof(XpuCommand, u.task.data);
 	kds = __XCMD_GET_KDS_SRC(&pts->xcmd_buf);
 	memcpy(kds, ptss->kds_head, ptss->kds_head->length);
@@ -681,7 +681,7 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 	}
 out:
 	Assert(kds->nitems == kds->block_nloaded + strom_nblocks);
-	pg_atomic_fetch_add_u64(&ps_state->npages_buffer_read,
+	pg_atomic_fetch_add_u64(&ptss->dsm->npages_buffer_read,
 							kds->block_nloaded * PAGES_PER_BLOCK);
 	kds->length = kds->block_offset + BLCKSZ * kds->nitems;
 	if (kds->nitems == 0)

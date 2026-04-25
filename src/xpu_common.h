@@ -2764,6 +2764,7 @@ typedef struct kern_session_info
 } kern_session_info;
 
 typedef struct {
+	int32_t		scan_relidx;		/* index of the scan relation */
 	uint32_t	kds_src_pathname;	/* offset to const char *pathname */
 	uint32_t	kds_src_iovec;		/* offset to strom_io_vector */
 	uint32_t	kds_src_offset;		/* offset to kds_src */
@@ -2771,6 +2772,7 @@ typedef struct {
 } kern_exec_task;
 
 typedef struct {
+	int32_t		scan_relidx;		/* index of the scan relation */
 	uint32_t	chunks_offset;		/* offset of kds_dst array */
 	uint32_t	chunks_nitems;		/* number of kds_dst items */
 	uint32_t	ojmap_offset;		/* offset of outer-join-map */
