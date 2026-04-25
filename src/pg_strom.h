@@ -534,6 +534,7 @@ struct pgstromTaskState
 	/* base relation scan, if any */
 	TupleTableSlot	   *base_slot;
 	ExprState		   *base_quals;	/* equivalent to device quals */
+	BufferAccessStrategy hscan_strategy; /* used for heap buffer access */
 	/* CPU fallback support */
 	off_t			   *fallback_tuples;
 	size_t				fallback_index;

@@ -411,11 +411,14 @@ estimate_kern_data_store(TupleDesc tupdesc)
 	((kern_data_store *)((buf)->data + __XCMD_KDS_SRC_OFFSET(buf)))
 
 static void
-__relScanDirectCachedBlock(pgstromTaskState *pts, BlockNumber block_num)
+__relScanDirectCachedBlock(pgstromTaskState *pts,
+						   pgstromTaskScanState *ptss,
+						   BlockNumber block_num)
 {
-	Relation	relation = pts->css.ss.ss_currentRelation;
-	HeapScanDesc h_scan = (HeapScanDesc)pts->css.ss.ss_currentScanDesc;
-	Snapshot	snapshot = pts->css.ss.ps.state->es_snapshot;
+	Relation	relation = ptss->scan_rel;
+	EState	   *estate = pts->css.ss.ps.state;
+	Snapshot	snapshot = estate->es_snapshot;
+	BufferAccessStrategy hscan_strategy;
 	kern_data_store *kds;
 	Buffer		buffer;
 	Page		spage;
@@ -425,11 +428,19 @@ __relScanDirectCachedBlock(pgstromTaskState *pts, BlockNumber block_num)
 	/*
 	 * Load the source buffer with synchronous read
 	 */
+	if (!pts->hscan_strategy)
+	{
+		MemoryContext	oldcxt = MemoryContextSwitchTo(estate->es_query_cxt);
+		pts->hscan_strategy = GetAccessStrategy(BAS_BULKREAD);
+		MemoryContextSwitchTo(oldcxt);
+	}
+	hscan_strategy = pts->hscan_strategy;
+
 	buffer = ReadBufferExtended(relation,
 								MAIN_FORKNUM,
 								block_num,
 								RBM_NORMAL,
-								h_scan->rs_strategy);
+								hscan_strategy);
 	/* prune the old items, if any */
 	heap_page_prune_opt(relation, buffer);
 	/* let's check tuples visibility for each */
@@ -645,7 +656,7 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 			}
 			else
 			{
-				__relScanDirectCachedBlock(pts, block_num);
+				__relScanDirectCachedBlock(pts, ptss, block_num);
 			}
 			ptss->heap_block_pos++;
 		}

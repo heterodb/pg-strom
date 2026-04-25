@@ -1429,6 +1429,7 @@ pgstromCreateTaskState(CustomScan *cscan,
 #endif
 	pts->xpu_task_flags = pp_info->xpu_task_flags;
 	pts->pp_info = pp_info;
+	initStringInfo(&pts->xcmd_buf);
 	pts->num_scan_rels = list_length(pp_info->scan_rels_list);
 	pts->scan_rels = palloc0(sizeof(pgstromTaskScanState) * pts->num_scan_rels);
 	pts->num_inner_rels = pp_info->num_inner_rels;
@@ -2057,9 +2058,8 @@ pgstromSharedStateEstimateDSM(CustomScanState *node,
 							  ParallelContext *pcxt)
 {
 	pgstromTaskState *pts = (pgstromTaskState *)node;
-	Relation	base_rel = node->ss.ss_currentRelation;
 	EState	   *estate   = node->ss.ps.state;
-	bool		has_heapscan = false;
+	Relation	heap_rel = NULL;
 	Size		len = MAXALIGN(sizeof(pgstromSharedState));
 
 	/* space for base relations */
@@ -2071,18 +2071,20 @@ pgstromSharedStateEstimateDSM(CustomScanState *node,
 			len += pgstromArrowFdwEstimateDSM(ptss->arrow_state);
 		else
 		{
+			if (!heap_rel)
+				heap_rel = ptss->scan_rel;
 			if (ptss->brin_state)
 				len += pgstromBrinIndexEstimateDSM(ptss->brin_state);
 			else
 				len += MAXALIGN(sizeof(pgstromSharedScanState));
-			has_heapscan = true;
 		}
 	}
 	/* space for inner relations */
 	len += MAXALIGN(sizeof(pgstromSharedInnerState)) * pts->num_inner_rels;
-	/* space for base-scandesc */
-	if (has_heapscan)
-		len += table_parallelscan_estimate(base_rel, estate->es_snapshot);
+	/* space for parallel scan-desc */
+	if (heap_rel)
+		len += MAXALIGN(table_parallelscan_estimate(heap_rel, estate->es_snapshot));
+
 	return MAXALIGN(len);
 }
 
@@ -2098,7 +2100,7 @@ pgstromSharedStateInitDSM(CustomScanState *node,
 	EState	   *estate   = node->ss.ps.state;
 	size_t		dsm_length = pgstromSharedStateEstimateDSM(node, pcxt);
 	char	   *dsm_addr = coordinate;
-	bool		has_heapscan = false;
+	Relation	heap_rel = NULL;
 	pgstromSharedState *ps_state;
 
 	Assert(!AmBackgroundWorkerProcess());
@@ -2121,12 +2123,13 @@ pgstromSharedStateInitDSM(CustomScanState *node,
 			dsm_addr += pgstromArrowFdwInitDSM(ptss->arrow_state, psss);
 		else
 		{
+			if (!heap_rel)
+				heap_rel = ptss->scan_rel;
 			if (ptss->brin_state)
 				dsm_addr += pgstromBrinIndexInitDSM(ptss->brin_state, psss);
 			else
 				dsm_addr += MAXALIGN(sizeof(pgstromSharedScanState));
 			psss->scan_block_nums = RelationGetNumberOfBlocks(ptss->scan_rel);
-			has_heapscan = true;
 		}
 	}
 	/* inner-rel's shared state */
@@ -2138,22 +2141,21 @@ pgstromSharedStateInitDSM(CustomScanState *node,
 		dsm_addr += MAXALIGN(sizeof(pgstromSharedInnerState));
 	}
 	/* base relation's scan desc, if any */
-	if (has_heapscan)
+	if (heap_rel)
 	{
-		Relation	base_rel = pts->css.ss.ss_currentRelation;
 		TableScanDesc scan;
 
 		if (coordinate)
 		{
 			ParallelTableScanDesc pdesc = (ParallelTableScanDesc) dsm_addr;
 
-			table_parallelscan_initialize(base_rel, pdesc, estate->es_snapshot);
-			scan = table_beginscan_parallel(base_rel, pdesc);
+			table_parallelscan_initialize(heap_rel, pdesc, estate->es_snapshot);
+			scan = table_beginscan_parallel(heap_rel, pdesc);
 			ps_state->parallel_scan_desc_offset = ((char *)pdesc - (char *)ps_state);
 		}
 		else
 		{
-			scan = table_beginscan(base_rel, estate->es_snapshot, 0, NULL);
+			scan = table_beginscan(heap_rel, estate->es_snapshot, 0, NULL);
 		}
 		pts->css.ss.ss_currentScanDesc = scan;
 	}
@@ -2178,7 +2180,7 @@ pgstromSharedStateAttachDSM(CustomScanState *node,
 {
 	pgstromTaskState *pts = (pgstromTaskState *)node;
 	char	   *dsm_addr = coordinate;
-	bool		has_heapscan = false;
+	Relation	heap_rel = NULL;
 
 	pts->ps_state = (pgstromSharedState *)dsm_addr;
 	dsm_addr += MAXALIGN(sizeof(pgstromSharedScanState));
@@ -2191,11 +2193,12 @@ pgstromSharedStateAttachDSM(CustomScanState *node,
 			dsm_addr += pgstromArrowFdwAttachDSM(ptss->arrow_state, ptss->dsm);
 		else
 		{
+			if (!heap_rel)
+				heap_rel = ptss->scan_rel;
 			if (ptss->brin_state)
 				dsm_addr += pgstromBrinIndexAttachDSM(ptss->brin_state, ptss->dsm);
 			else
 				dsm_addr += MAXALIGN(sizeof(pgstromSharedScanState));
-			has_heapscan = true;
 		}
 	}
 	for (int k=0; k < pts->num_inner_rels; k++)
@@ -2205,12 +2208,11 @@ pgstromSharedStateAttachDSM(CustomScanState *node,
 		ptis->dsm = (pgstromSharedInnerState *)dsm_addr;
 		dsm_addr += MAXALIGN(sizeof(pgstromSharedInnerState));
 	}
-	if (has_heapscan)
+	if (heap_rel)
 	{
-		Relation	base_rel = pts->css.ss.ss_currentRelation;
 		ParallelTableScanDesc pdesc = (ParallelTableScanDesc) dsm_addr;
 
-		pts->css.ss.ss_currentScanDesc = table_beginscan_parallel(base_rel, pdesc);
+		pts->css.ss.ss_currentScanDesc = table_beginscan_parallel(heap_rel, pdesc);
 	}
 }
 
