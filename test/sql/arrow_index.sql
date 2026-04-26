@@ -173,7 +173,7 @@ SELECT count(*)
 RESET pg_strom.enabled;
 
 -- ORDER BY timestamp
-\! $PG2ARROW_CMD -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY timestamp_num' -o $ARROW_TEST_DATA_DIR/test_arrow_index.data --stat=timestamp_num
+\! $PG2ARROW_CMD -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY timestamp_num' -o $ARROW_TEST_DATA_DIR/test_arrow_index.data --stat=timestamp_num > /dev/null 2>&1
 EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF,BUFFERS OFF)
 SELECT * FROM regtest_arrow_index_temp.regtest_arrow
 WHERE timestamp_num=(SELECT timestamp_num FROM regtest_arrow_index_temp.target_num);
