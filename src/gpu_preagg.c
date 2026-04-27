@@ -2413,19 +2413,19 @@ consider_sorted_groupby_path(PlannerInfo *root,
 }
 
 /*
- * __try_add_xpupreagg_normal_path
+ * tryAddSimpleGpuPreAggPath
  */
 static void
-__try_add_xpupreagg_normal_path(PlannerInfo *root,
-								UpperRelationKind upper_stage,
-								RelOptInfo *input_rel,
-								RelOptInfo *group_rel,
-								GroupPathExtraData *gp_extra,
-								uint32_t xpu_task_flags,
-								bool be_parallel,
-								pgstromOuterPathLeafInfo *op_leaf)
+tryAddSimpleGpuPreAggPath(PlannerInfo *root,
+						  UpperRelationKind upper_stage,
+						  RelOptInfo *group_rel,
+						  RelOptInfo *input_rel,
+						  CustomPath *input_path,
+						  GroupPathExtraData *gp_extra,
+						  bool be_parallel)
 {
 	xpugroupby_build_path_context con;
+	pgstromPlanInfo *pp_input = linitial(input_path->custom_private);
 	Query	   *parse = root->parse;
 	List	   *inner_target_list = NIL;
 	ListCell   *lc;
@@ -2440,7 +2440,7 @@ __try_add_xpupreagg_normal_path(PlannerInfo *root,
 		groupExprs = get_sortgrouplist_exprs(parse->groupClause,
 											 gp_extra->targetList);
 		num_groups = estimate_num_groups(root, groupExprs,
-										 op_leaf->leaf_nrows,
+										 pp_input->final_nrows,
 										 NULL, NULL);
 	}
 	else if (parse->distinctClause)
@@ -2450,11 +2450,11 @@ __try_add_xpupreagg_normal_path(PlannerInfo *root,
 		distinctExprs = get_sortgrouplist_exprs(parse->distinctClause,
 												parse->targetList);
 		num_groups = estimate_num_groups(root, distinctExprs,
-										 op_leaf->leaf_nrows,
+										 pp_input->final_nrows,
 										 NULL, NULL);
 	}
 	/* setup inner_target_list */
-	foreach (lc, op_leaf->inner_paths_list)
+	foreach (lc, input_path->custom_paths)
 	{
 		Path	   *i_path = lfirst(lc);
 		inner_target_list = lappend(inner_target_list, i_path->pathtarget);
@@ -2466,16 +2466,16 @@ __try_add_xpupreagg_normal_path(PlannerInfo *root,
 	con.upper_stage    = upper_stage;
 	con.group_rel      = group_rel;
 	con.input_rel      = input_rel;
-	con.param_info     = op_leaf->leaf_param;
+	con.param_info     = input_path->path.param_info;
 	con.num_groups     = num_groups;
 	con.try_parallel   = be_parallel;
 	con.target_upper   = root->upper_targets[upper_stage];
 	con.target_partial = create_empty_pathtarget();
 	con.target_agg_final = create_empty_pathtarget();
 	con.target_proj_final = create_empty_pathtarget();
-	con.pp_info        = op_leaf->pp_info;
+	con.pp_info        = pp_input;
 	con.sibling_param_id = -1;
-	con.inner_paths_list = op_leaf->inner_paths_list;
+	con.inner_paths_list = input_path->custom_paths;
 	con.inner_target_list = inner_target_list;
 	/* construction of the target-list for each level */
 	if (!xpugroupby_build_path_target(&con))
@@ -2493,9 +2493,7 @@ __try_add_xpupreagg_normal_path(PlannerInfo *root,
 	 * can ignore this overhead.
 	 * Elsewhere, no CPU-based Agg-node is needed.
 	 */
-	if (pgstrom_cpu_fallback_elevel < ERROR ||
-		parse->groupClause == NIL ||
-		(xpu_task_flags & DEVKIND__ANY) != DEVKIND__NVIDIA_GPU)
+	if (pgstrom_cpu_fallback_elevel < ERROR || parse->groupClause == NIL)
 	{
 		Path   *__path = &cpath->path;
 
@@ -2594,137 +2592,6 @@ __try_add_xpupreagg_normal_path(PlannerInfo *root,
 	}
 }
 
-/*
- * __try_add_xpupreagg_partition_path
- */
-static void
-__try_add_xpupreagg_partition_path(PlannerInfo *root,
-								   UpperRelationKind upper_stage,
-								   RelOptInfo *input_rel,
-								   RelOptInfo *group_rel,
-								   GroupPathExtraData *gp_extra,
-								   uint32_t xpu_task_flags,
-								   bool try_parallel_path,
-								   int sibling_param_id,
-								   List *op_leaf_list)
-{
-	xpugroupby_build_path_context con;
-	Query	   *parse = root->parse;
-	List	   *preagg_cpath_list = NIL;
-	ListCell   *lc1, *lc2;
-	PathTarget *part_target = NULL;
-	Path	   *part_path;
-	int			parallel_nworkers = 0;
-	double		total_nrows = 0.0;
-
-	foreach (lc1, op_leaf_list)
-	{
-		pgstromOuterPathLeafInfo *op_leaf = lfirst(lc1);
-		double		num_groups = 1.0;
-		List	   *inner_target_list = NIL;
-		CustomPath *cpath;
-
-		/* estimate number of groups */
-		if (parse->groupClause)
-		{
-			List   *groupExprs;
-
-			groupExprs = get_sortgrouplist_exprs(parse->groupClause,
-												 gp_extra->targetList);
-			num_groups = estimate_num_groups(root, groupExprs,
-											 op_leaf->leaf_nrows,
-											 NULL, NULL);
-		}
-		else if (parse->distinctClause)
-		{
-			List   *distinctExprs;
-
-			distinctExprs = get_sortgrouplist_exprs(parse->groupClause,
-													parse->targetList);
-			num_groups = estimate_num_groups(root, distinctExprs,
-											 op_leaf->leaf_nrows,
-											 NULL, NULL);
-		}
-		/* setup inner_target_list */
-		foreach (lc2, op_leaf->inner_paths_list)
-		{
-			Path	   *i_path = lfirst(lc2);
-			inner_target_list = lappend(inner_target_list, i_path->pathtarget);
-		}
-		/* setup context */
-		memset(&con, 0, sizeof(con));
-		con.device_executable = true;
-		con.root           = root;
-		con.upper_stage    = upper_stage;
-		con.group_rel      = group_rel;
-		con.input_rel      = op_leaf->leaf_rel;
-		con.param_info     = op_leaf->leaf_param;
-		con.num_groups     = num_groups;
-		con.try_parallel   = try_parallel_path;
-		con.target_upper   = root->upper_targets[upper_stage];
-		con.target_partial = create_empty_pathtarget();
-		con.target_agg_final = create_empty_pathtarget();
-		con.target_proj_final = create_empty_pathtarget();
-		con.pp_info        = op_leaf->pp_info;
-		con.sibling_param_id = sibling_param_id;
-		con.inner_paths_list = op_leaf->inner_paths_list;
-		con.inner_target_list = inner_target_list;
-		/* construction of the target-list for each level */
-		if (!xpugroupby_build_path_target(&con))
-			return;
-		/* preserve */
-		if (!part_target)
-			part_target = copy_pathtarget(con.target_partial);
-		/* fixup references to the leaf relations */
-		con.target_partial->exprs =
-			fixup_expression_by_partition_leaf(root,
-											   op_leaf->leaf_rel->relids,
-											   con.target_partial->exprs);
-		cpath = __buildXpuPreAggCustomPath(&con);
-
-		parallel_nworkers += cpath->path.parallel_workers;
-		total_nrows       += cpath->path.rows;
-
-		preagg_cpath_list = lappend(preagg_cpath_list, cpath);
-	}
-
-	if (list_length(preagg_cpath_list) == 0)
-		return;
-	/* adjust number of workers */
-	if (try_parallel_path)
-	{
-		if (parallel_nworkers > max_parallel_workers_per_gather)
-			parallel_nworkers = max_parallel_workers_per_gather;
-		if (parallel_nworkers == 0)
-			return;
-	}
-	/* Append path to consolidate partition leafs */
-	part_path = (Path *)
-		create_append_path(root,
-						   input_rel,
-						   (try_parallel_path ? NIL : preagg_cpath_list),
-						   (try_parallel_path ? preagg_cpath_list : NIL),
-						   NIL,
-						   NULL,
-						   (try_parallel_path ? parallel_nworkers : 0),
-						   try_parallel_path,
-						   total_nrows);
-	part_path->pathtarget = part_target;
-
-	/* attach Gather path if parallel-aware */
-	if (try_parallel_path)
-	{
-		part_path = (Path *)
-			create_gather_path(root,
-							   group_rel,
-							   part_path,
-							   part_path->pathtarget,
-							   NULL,
-							   &total_nrows);
-	}
-	try_add_final_groupby_paths(&con, part_path);
-}
-
 static void
 tryGpuPreAggAddCustomPath(PlannerInfo *root,
 						  UpperRelationKind upper_stage,
@@ -2733,7 +2600,6 @@ tryGpuPreAggAddCustomPath(PlannerInfo *root,
 						  void *extra)
 {
 	Query	   *parse = root->parse;
-	uint32_t	xpu_task_flags = TASK_KIND__GPUPREAGG;
 
 	/* quick bailout if not supported */
 	if (parse->groupingSets != NIL)
@@ -2758,60 +2624,31 @@ tryGpuPreAggAddCustomPath(PlannerInfo *root,
 
 	for (int try_parallel=0; try_parallel < 2; try_parallel++)
 	{
-		pgstromOuterPathLeafInfo *op_leaf;
+		CustomPath *input_path;
 
+		input_path = pgstrom_find_custom_path(root,
+											  input_rel,
+											  try_parallel > 0);
+		if (!input_path)
+			continue;
 		/*
-		 * Try normal XpuPreAgg Path
+		 * unless pg_strom.enable_partitionwise_gpupreagg is enabled,
+		 * we don't make a path for partitioned outer relation.
 		 */
-		op_leaf = pgstrom_find_op_normal(root,
-										 input_rel,
-										 xpu_task_flags,
-										 (try_parallel > 0));
-		if (op_leaf)
+		if (!pgstrom_enable_partitionwise_gpupreagg)
 		{
-			__try_add_xpupreagg_normal_path(root,
-											upper_stage,
-											input_rel,
-											group_rel,
-											extra,
-											xpu_task_flags,
-											(try_parallel > 0),
-											op_leaf);
+			pgstromPlanInfo *pp_input = linitial(input_path->custom_paths);
+			if ((pp_input->xpu_task_flags & DEVTASK__IS_PARTITION_WISE) != 0)
+				continue;
 		}
-
-		/*
-		 * Try partition-wise XpuPreAgg Path
-		 */
-		if (pgstrom_enable_partitionwise_gpupreagg)
-		{
-			List   *op_leaf_list;
-			bool	identical_inners;
-			int		sibling_param_id = -1;
-
-			op_leaf_list = pgstrom_find_op_leafs(root,
-												 input_rel,
-												 xpu_task_flags,
-												 (try_parallel > 0),
-												 &identical_inners);
-			if (identical_inners)
-			{
-				PlannerGlobal  *glob = root->glob;
-
-				sibling_param_id = list_length(glob->paramExecTypes);
-				glob->paramExecTypes = lappend_oid(glob->paramExecTypes,
-												   INTERNALOID);
-			}
-			if (op_leaf_list != NIL)
-				__try_add_xpupreagg_partition_path(root,
-												   upper_stage,
-												   input_rel,
-												   group_rel,
-												   extra,
-												   xpu_task_flags,
-												   (try_parallel > 0),
-												   sibling_param_id,
-												   op_leaf_list);
-		}
+		/* try add GPU-PreAgg path */
+		tryAddSimpleGpuPreAggPath(root,
+								  upper_stage,
+								  group_rel,
+								  input_rel,
+								  input_path,
+								  extra,
+								  try_parallel > 0);
 	}
 }
 

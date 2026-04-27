@@ -361,20 +361,6 @@ typedef struct
 	 : (pp_info)->inners[(pp_info)->num_inner_rels - 1].join_nrows)
 
 /*
- * context for partition-wise xPU-Join/PreAgg pushdown per partition leaf
- */
-typedef struct
-{
-	pgstromPlanInfo	*pp_info;
-	RelOptInfo	   *outer_rel;	/* if normal relation, outer_rel == leaf_rel */
-	RelOptInfo	   *leaf_rel;
-	ParamPathInfo  *leaf_param;
-	Cardinality		leaf_nrows;
-	Cost			leaf_cost;
-	List		   *inner_paths_list;
-} pgstromOuterPathLeafInfo;
-
-/*
  * pgstromSharedState
  */
 typedef struct
@@ -1148,25 +1134,6 @@ extern void		pgstrom_remember_custom_path(PlannerInfo *root,
 extern CustomPath *pgstrom_find_custom_path(PlannerInfo *root,
 											RelOptInfo *outer_rel,
 											bool be_parallel);
-#if 1
-extern void		pgstrom_remember_op_normal(PlannerInfo *root,
-										   RelOptInfo *outer_rel,
-										   pgstromOuterPathLeafInfo *op_leaf,
-										   bool be_parallel);
-extern void		pgstrom_remember_op_leafs(PlannerInfo *root,
-										  RelOptInfo *parent_rel,
-										  List *op_leaf_list,
-										  bool be_parallel);
-extern pgstromOuterPathLeafInfo *pgstrom_find_op_normal(PlannerInfo *root,
-														RelOptInfo *outer_rel,
-														uint32_t xpu_task_flags,
-														bool be_parallel);
-extern List	   *pgstrom_find_op_leafs(PlannerInfo *root,
-									  RelOptInfo *outer_rel,
-									  uint32_t xpu_task_flags,
-									  bool be_parallel,
-									  bool *p_identical_inners);
-#endif
 extern bool		pgstrom_is_dummy_path(const Path *path);
 extern Path	   *pgstrom_create_dummy_path(PlannerInfo *root, Path *subpath);
 extern void		_PG_init(void);

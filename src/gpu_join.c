@@ -677,8 +677,10 @@ tryAddSimpleGpuJoinPath(PlannerInfo *root,
 	outer_path = pgstrom_find_custom_path(root, outer_rel, be_parallel);
 	if (!outer_path)
 		return;
-	/* unless pg_strom.enable_partitionwise_gpujoin is enabled, we don't make
-	 * a path for  */
+	/*
+	 * unless pg_strom.enable_partitionwise_gpujoin is enabled,
+	 * we don't make a path for partitioned outer relation.
+	 */
 	if (!pgstrom_enable_partitionwise_gpujoin)
 	{
 		pgstromPlanInfo *pp_outer = linitial(outer_path->custom_private);
