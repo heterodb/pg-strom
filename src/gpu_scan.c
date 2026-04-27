@@ -120,6 +120,8 @@ sort_device_qualifiers(List *dev_quals_list, List *dev_costs_list)
 static pgstromPlanInfo *
 __gpuScanBuildPlanInfo(PlannerInfo *root,
 					   RelOptInfo *baserel,
+					   RangeTblEntry *rte,
+					   ParamPathInfo *param_info,
 					   List *scan_rels,
 					   List *dev_quals,
 					   List *host_quals,
@@ -294,19 +296,21 @@ __gpuScanBuildPlanInfo(PlannerInfo *root,
 	 * Setup the result PlanInfo
 	 */
 	pp_info = palloc0(sizeof(pgstromPlanInfo));
-	pp_info->xpu_task_flags = DEVKIND__NVIDIA_GPU;
+	pp_info->xpu_task_flags = TASK_KIND__GPUSCAN;
+	if (rte->relkind == RELKIND_PARTITIONED_TABLE)
+		pp_info->xpu_task_flags |= DEVTASK__IS_PARTITION_WISE;
 	pp_info->host_quals = extract_actual_clauses(host_quals, false);
 	pp_info->base_relid = baserel->relid;
 	pp_info->scan_quals = extract_actual_clauses(dev_quals, false);
 	pp_info->scan_npages = total_npages;
 	pp_info->scan_tuples = total_ntuples;
-	pp_info->scan_nrows = baserel->rows;
+	pp_info->scan_nrows = (param_info ? param_info->ppi_rows : baserel->rows);
 	pp_info->parallel_nworkers = parallel_nworkers;
     pp_info->parallel_divisor = parallel_divisor;
 	pp_info->startup_cost = startup_cost;
 	pp_info->run_cost = run_cost;
 	pp_info->final_cost = final_cost;
-	pp_info->final_nrows = baserel->rows;
+	pp_info->final_nrows = pp_info->scan_nrows;
 	pp_info->outer_refs = outer_refs;
 	pp_info->scan_rels_list = scan_rels_list;
 	pp_info->sibling_param_id = -1;		//to be deprecated
@@ -319,6 +323,7 @@ __gpuScanBuildPlanInfo(PlannerInfo *root,
 static void
 __gpuScanAddCustomPathOne(PlannerInfo *root,
 						  RelOptInfo *baserel,
+						  RangeTblEntry *rte,
 						  ParamPathInfo *param_info,
 						  List *scan_rels,
 						  List *dev_quals,
@@ -326,12 +331,14 @@ __gpuScanAddCustomPathOne(PlannerInfo *root,
 						  Bitmapset *outer_refs,
 						  int *p_parallel_nworkers)
 {
-	int		parallel_nworkers = *p_parallel_nworkers;
+	int			parallel_nworkers = *p_parallel_nworkers;
+	CustomPath *cpath;
 	pgstromPlanInfo *pp_info;
-	pgstromOuterPathLeafInfo *op_leaf;
 
 	pp_info = __gpuScanBuildPlanInfo(root,
 									 baserel,
+									 rte,
+									 param_info,
 									 scan_rels,
 									 dev_quals,
 									 host_quals,
@@ -340,56 +347,47 @@ __gpuScanAddCustomPathOne(PlannerInfo *root,
 	assert(pp_info->parallel_nworkers == parallel_nworkers);
 
 	/*
-	 * build a CustomPath(GpuScan) if it has device executable quals
+	 * build a CustomPath(GpuScan)
 	 */
+	cpath = makeNode(CustomPath);
+	cpath->path.pathtype    = T_CustomScan;
+	cpath->path.parent      = baserel;
+	cpath->path.pathtarget  = baserel->reltarget;
+	cpath->path.param_info  = param_info;
+	cpath->path.parallel_aware = (parallel_nworkers > 0);
+	cpath->path.parallel_safe = baserel->consider_parallel;
+	cpath->path.parallel_workers = parallel_nworkers;
+	cpath->path.rows        = pp_info->final_nrows;
+	Assert(pp_info->inner_cost == 0.0);
+	cpath->path.startup_cost = pp_info->startup_cost;
+	cpath->path.total_cost  = (pp_info->startup_cost +
+							   pp_info->run_cost +
+							   pp_info->final_cost);
+	cpath->path.pathkeys    = NIL;  /* unsorted results */
+	cpath->flags            = CUSTOMPATH_SUPPORT_PROJECTION;
+	cpath->custom_paths     = NIL;
+	cpath->custom_private   = list_make1(pp_info);
+	cpath->methods          = &gpuscan_path_methods;
+	/* try attach GPU-Sorted version */
+	try_add_sorted_gpujoin_path(root, baserel, cpath, (parallel_nworkers > 0));
+
+	/*
+	 * GpuScan is executable on the device if it contains device-qualifiers
+	 * because it works to reduce number of rows, and makes sense.
+	 * On the other hands, it can be the source of upper GPU-Join or -PreAgg,
+	 * however, host-only qualifier prevents to pull up.
+	 *
+	 * Note that pgstrom_remember_custom_path() must be prior to add_path()
+	 * because optimizer may release CustomPath if it is lesser.
+	 */
+	if (pp_info->host_quals == NIL)
+		pgstrom_remember_custom_path(root, baserel, cpath, parallel_nworkers > 0);
 	if (pp_info->scan_quals != NIL)
 	{
-		CustomPath *cpath = makeNode(CustomPath);
-
-		cpath->path.pathtype    = T_CustomScan;
-		cpath->path.parent      = baserel;
-		cpath->path.pathtarget  = baserel->reltarget;
-		cpath->path.param_info  = param_info;
-		cpath->path.parallel_aware = (parallel_nworkers > 0);
-		cpath->path.parallel_safe = baserel->consider_parallel;
-		cpath->path.parallel_workers = parallel_nworkers;
-		cpath->path.rows        = pp_info->final_nrows;
-		Assert(pp_info->inner_cost == 0.0);
-		cpath->path.startup_cost = pp_info->startup_cost;
-		cpath->path.total_cost  = (pp_info->startup_cost +
-								   pp_info->run_cost +
-								   pp_info->final_cost);
-		cpath->path.pathkeys    = NIL;  /* unsorted results */
-		cpath->flags            = CUSTOMPATH_SUPPORT_PROJECTION;
-		cpath->custom_paths     = NIL;
-		cpath->custom_private   = list_make1(pp_info);
-		cpath->methods          = &gpuscan_path_methods;
-		/* try attach GPU-Sorted version */
-		try_add_sorted_gpujoin_path(root, baserel, cpath, (parallel_nworkers > 0));
 		if (parallel_nworkers == 0)
 			add_path(baserel, &cpath->path);
 		else
 			add_partial_path(baserel, &cpath->path);
-	}
-
-	/*
-	 * unable pullup the scan path with host-quals
-	 */
-	if (pp_info->host_quals == NIL)
-	{
-		op_leaf = palloc0(sizeof(pgstromOuterPathLeafInfo));
-		op_leaf->pp_info = pp_info;
-		op_leaf->leaf_rel = baserel;
-		op_leaf->leaf_param = param_info;
-		op_leaf->leaf_nrows = pp_info->scan_nrows;
-		op_leaf->leaf_cost = (pp_info->startup_cost +
-							  pp_info->run_cost +
-							  pp_info->final_cost);
-		op_leaf->inner_paths_list = NIL;
-		pgstrom_remember_op_normal(root,
-								   baserel,
-								   op_leaf,
-								   parallel_nworkers > 0);
 	}
 	/* suggest parallel_nworkers next time */
 	parallel_nworkers = compute_parallel_worker(baserel,
@@ -472,6 +470,7 @@ __gpuScanAddCustomPath(PlannerInfo *root,
 	 */
 	__gpuScanAddCustomPathOne(root,
 							  baserel,
+							  rte,
 							  param_info,
 							  scan_rels,
 							  dev_quals,
@@ -485,6 +484,7 @@ __gpuScanAddCustomPath(PlannerInfo *root,
 	{
 		__gpuScanAddCustomPathOne(root,
 								  baserel,
+								  rte,
 								  param_info,
 								  scan_rels,
 								  dev_quals,

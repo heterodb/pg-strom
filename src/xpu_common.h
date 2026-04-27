@@ -2162,7 +2162,7 @@ typedef struct
 #define DEVTASK__PINNED_HASH_RESULTS 0x00001000U/* Pinned results in HASH format */
 #define DEVTASK__PINNED_ROW_RESULTS	0x00002000U	/* Pinned results in ROW format */
 #define DEVTASK__USED_GPUDIRECT		0x00004000U	/* Task used GPU-Direct SQL */
-#define DEVTASK__USED_GPUCACHE		0x00008000U	/* Task used GPU-Cache */
+#define DEVTASK__IS_PARTITION_WISE	0x00008000U	/* Task runs across PostgreSQL partitions */
 #define DEVTASK__MERGE_FINAL_BUFFER	0x00010000U	/* Final buffer (GPU-PreAgg or pinned
 												 * inner buffer by GPU-Join/Scan) must
 												 * be merged to a single buffer, for

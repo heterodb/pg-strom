@@ -451,6 +451,162 @@ pgstrom_removal_dummy_plans(PlannedStmt *pstmt, Plan **p_plan)
 }
 
 /*
+ * pgstrom_plan_info_tracker
+ */
+static HTAB	   *pgstrom_ppinfo_htable = NULL;
+
+typedef struct
+{
+	PlannerInfo *root;
+	Relids		relids;
+} pgstromPlanInfoKey;
+
+typedef struct
+{
+	pgstromPlanInfoKey key;
+	CustomPath		cpath_single;
+	CustomPath		cpath_parallel;
+} pgstromPlanInfoEntry;
+
+static uint32
+pgstrom_plan_info_key_hash(const void *__key, Size keysize)
+{
+	const pgstromPlanInfoKey *key = __key;
+
+	Assert(keysize == sizeof(pgstromPlanInfoKey));
+	return (hash_bytes((const unsigned char *)&key->root,
+					   sizeof(PlannerInfo *)) ^
+			bms_hash_value(key->relids));
+}
+
+static int
+pgstrom_plan_info_key_match(const void *__key1,
+							const void *__key2, Size keysize)
+{
+	const pgstromPlanInfoKey *key1 = __key1;
+	const pgstromPlanInfoKey *key2 = __key2;
+
+	Assert(keysize == sizeof(pgstromPlanInfoKey));
+	return (key1->root == key2->root &&
+			bms_equal(key1->relids, key2->relids) ? 0 : -1);
+}
+
+void
+pgstrom_remember_custom_path(PlannerInfo *root,
+							 RelOptInfo *outer_rel,
+							 CustomPath *cpath,
+							 bool be_parallel)
+{
+	pgstromPlanInfoKey key;
+	pgstromPlanInfoEntry *entry;
+	bool		found;
+
+	Assert(IsA(cpath, CustomPath));
+	if (!pgstrom_ppinfo_htable)
+	{
+		HASHCTL		hctl;
+
+		memset(&hctl, 0, sizeof(HASHCTL));
+		hctl.hcxt = CurrentMemoryContext;
+		hctl.keysize = sizeof(pgstromPlanInfoKey);
+		hctl.entrysize = sizeof(pgstromPlanInfoEntry);
+		hctl.hash = pgstrom_plan_info_key_hash;
+		hctl.match = pgstrom_plan_info_key_match;
+		pgstrom_ppinfo_htable  = hash_create("PG-Strom PlanInfo Tracker",
+											 256L,
+											 &hctl,
+											 HASH_ELEM |
+											 HASH_FUNCTION |
+											 HASH_COMPARE |
+											 HASH_CONTEXT);
+	}
+	key.root   = root;
+	key.relids = outer_rel->relids;
+	entry = (pgstromPlanInfoEntry *)
+		hash_search(pgstrom_ppinfo_htable,
+					&key,
+					HASH_ENTER,
+					&found);
+	Assert(entry->key.root == root &&
+		   bms_equal(entry->key.relids, outer_rel->relids));
+	if (!found)
+	{
+		if (!be_parallel)
+		{
+			memcpy(&entry->cpath_single, cpath, sizeof(CustomPath));
+			memset(&entry->cpath_parallel, 0, sizeof(CustomPath));
+		}
+		else
+		{
+			memset(&entry->cpath_single, 0, sizeof(CustomPath));
+			memcpy(&entry->cpath_parallel, cpath, sizeof(CustomPath));
+		}
+	}
+	else if (!be_parallel)
+	{
+		if (!IsA(&entry->cpath_single, CustomPath))
+			memcpy(&entry->cpath_single, cpath, sizeof(CustomPath));
+		else
+		{
+			pgstromPlanInfo *pp_orig = linitial(entry->cpath_single.custom_private);
+			pgstromPlanInfo *pp_info = linitial(cpath->custom_private);
+
+			if ((pp_orig->startup_cost +
+				 pp_orig->inner_cost +
+				 pp_orig->run_cost) > (pp_info->startup_cost +
+									   pp_info->inner_cost +
+									   pp_info->run_cost))
+				memcpy(&entry->cpath_single, cpath, sizeof(CustomPath));
+		}
+	}
+	else
+	{
+		if (!IsA(&entry->cpath_parallel, CustomPath))
+			memcpy(&entry->cpath_parallel, cpath, sizeof(CustomPath));
+		else
+		{
+			pgstromPlanInfo *pp_orig = linitial(entry->cpath_parallel.custom_private);
+			pgstromPlanInfo *pp_info = linitial(cpath->custom_private);
+
+			if ((pp_orig->startup_cost +
+				 pp_orig->inner_cost +
+				 pp_orig->run_cost) > (pp_info->startup_cost +
+									   pp_info->inner_cost +
+									   pp_info->run_cost))
+				memcpy(&entry->cpath_parallel, cpath, sizeof(CustomPath));
+		}
+	}
+}
+
+CustomPath *
+pgstrom_find_custom_path(PlannerInfo *root,
+						 RelOptInfo *outer_rel,
+						 bool be_parallel)
+{
+	if (pgstrom_ppinfo_htable)
+	{
+		pgstromPlanInfoKey key;
+		pgstromPlanInfoEntry *entry;
+
+		key.root = root;
+		key.relids = outer_rel->relids;
+		entry = (pgstromPlanInfoEntry *)
+			hash_search(pgstrom_ppinfo_htable,
+						&key,
+						HASH_FIND,
+						NULL);
+		if (entry)
+		{
+			CustomPath *cpath = (!be_parallel
+								 ? &entry->cpath_single
+								 : &entry->cpath_parallel);
+			return IsA(cpath, CustomPath) ? cpath : NULL;
+		}
+	}
+	return NULL;
+}
+
+/*
  * pgstrom_path_tracker
  */
 static HTAB	   *pgstrom_paths_htable = NULL;
@@ -734,12 +890,14 @@ pgstrom_post_planner(Query *parse,
 					 int cursorOptions,
 					 ParamListInfo boundParams)
 {
+	HTAB	   *saved_ppinfo_htable = pgstrom_ppinfo_htable;
 	HTAB	   *saved_paths_htable = pgstrom_paths_htable;
 	PlannedStmt *pstmt;
 	ListCell   *lc;
 
 	PG_TRY();
 	{
+		pgstrom_ppinfo_htable = NULL;
 		pgstrom_paths_htable = NULL;
 
 		pstmt = planner_hook_next(parse,
@@ -753,11 +911,17 @@ pgstrom_post_planner(Query *parse,
 	}
 	PG_CATCH();
 	{
+		hash_destroy(pgstrom_ppinfo_htable);
+		pgstrom_ppinfo_htable = saved_ppinfo_htable;
+
 		hash_destroy(pgstrom_paths_htable);
 		pgstrom_paths_htable = saved_paths_htable;
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
+	hash_destroy(pgstrom_ppinfo_htable);
+	pgstrom_ppinfo_htable = saved_ppinfo_htable;
+
 	hash_destroy(pgstrom_paths_htable);
 	pgstrom_paths_htable = saved_paths_htable;
 	return pstmt;

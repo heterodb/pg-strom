@@ -1141,6 +1141,14 @@ extern bool		pgstrom_enabled(void);
 extern int		pgstrom_cpu_fallback_elevel;
 extern bool		pgstrom_regression_test_mode;
 extern bool		pgstrom_explain_developer_mode;
+extern void		pgstrom_remember_custom_path(PlannerInfo *root,
+											 RelOptInfo *outer_rel,
+											 CustomPath *cpath,
+											 bool be_parallel);
+extern CustomPath *pgstrom_find_custom_path(PlannerInfo *root,
+											RelOptInfo *outer_rel,
+											bool be_parallel);
+#if 1
 extern void		pgstrom_remember_op_normal(PlannerInfo *root,
 										   RelOptInfo *outer_rel,
 										   pgstromOuterPathLeafInfo *op_leaf,
@@ -1158,6 +1166,7 @@ extern List	   *pgstrom_find_op_leafs(PlannerInfo *root,
 									  uint32_t xpu_task_flags,
 									  bool be_parallel,
 									  bool *p_identical_inners);
+#endif
 extern bool		pgstrom_is_dummy_path(const Path *path);
 extern Path	   *pgstrom_create_dummy_path(PlannerInfo *root, Path *subpath);
 extern void		_PG_init(void);
