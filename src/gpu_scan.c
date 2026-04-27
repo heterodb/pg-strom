@@ -863,16 +863,15 @@ assign_custom_cscan_tlist(List *tlist_dev, pgstromPlanInfo *pp_info)
 }
 
 /*
- * planxpuscanpathcommon
+ * PlanGpuScanPathCommon
  */
 static CustomScan *
-PlanXpuScanPathCommon(PlannerInfo *root,
+PlanGpuScanPathCommon(PlannerInfo *root,
 					  RelOptInfo  *baserel,
 					  CustomPath  *best_path,
 					  List        *tlist,
 					  List        *clauses,
-					  pgstromPlanInfo *pp_info,
-					  const CustomScanMethods *xpuscan_plan_methods)
+					  pgstromPlanInfo *pp_info)
 {
 	codegen_context *context;
 	CustomScan *cscan;
@@ -909,7 +908,7 @@ PlanXpuScanPathCommon(PlannerInfo *root,
 	cscan->scan.plan.qual = pp_info->host_quals;
 	cscan->scan.scanrelid = baserel->relid;
 	cscan->flags = best_path->flags;
-	cscan->methods = xpuscan_plan_methods;
+	cscan->methods = &gpuscan_plan_methods;
 	cscan->custom_plans = NIL;
 	cscan->custom_scan_tlist = assign_custom_cscan_tlist(context->tlist_dev,
 														 pp_info);
@@ -934,13 +933,12 @@ PlanGpuScanPath(PlannerInfo *root,
 	Assert(baserel->relid > 0 &&
 		   baserel->rtekind == RTE_RELATION &&
 		   custom_children == NIL);
-	cscan = PlanXpuScanPathCommon(root,
+	cscan = PlanGpuScanPathCommon(root,
 								  baserel,
 								  best_path,
 								  tlist,
 								  clauses,
-								  pp_info,
-								  &gpuscan_plan_methods);
+								  pp_info);
 	form_pgstrom_plan_info(cscan, pp_info);
 	return &cscan->scan.plan;
 }

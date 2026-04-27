@@ -941,10 +941,10 @@ try_add_sorted_gpujoin_path(PlannerInfo *root,
 }
 
 /*
- * XpuJoinAddCustomPath
+ * GpuJoinAddCustomPath
  */
 static void
-XpuJoinAddCustomPath(PlannerInfo *root,
+GpuJoinAddCustomPath(PlannerInfo *root,
 					 RelOptInfo *joinrel,
 					 RelOptInfo *outerrel,
 					 RelOptInfo *innerrel,
@@ -1077,8 +1077,8 @@ found:
 	/*
 	 * NOTE: Even if the expression is not supported by the device,
 	 * Var-node must be added because it is a simple projection that
-	 * is never touched during xPU kernel execution.
-	 * All the xPU kernel doing is simple copy.
+	 * is never touched during GPU kernel execution.
+	 * All the GPU kernel doing is simple copy.
 	 */
 	if (IsA(node, Var) ||
 		pgstrom_xpu_expression((Expr *)node,
@@ -1316,7 +1316,7 @@ PlanGpuJoinPathCommon(PlannerInfo *root,
 					  List *tlist,
 					  List *custom_plans,
 					  pgstromPlanInfo *pp_info,
-					  const CustomScanMethods *__gpujoin_plan_methods)
+					  const CustomScanMethods *methods)
 {
 	codegen_context *context = create_codegen_context(root, cpath, pp_info);
 	CustomScan *cscan;
@@ -1437,7 +1437,7 @@ PlanGpuJoinPathCommon(PlannerInfo *root,
 	cscan->scan.plan.targetlist = tlist;
 	cscan->scan.scanrelid = pp_info->base_relid;
 	cscan->flags = cpath->flags;
-	cscan->methods = __gpujoin_plan_methods;
+	cscan->methods = methods;
 	cscan->custom_plans = custom_plans;
 	cscan->custom_scan_tlist = assign_custom_cscan_tlist(context->tlist_dev, pp_info);
 
@@ -2447,5 +2447,5 @@ pgstrom_init_gpu_join(void)
 	gpujoin_exec_methods.ExplainCustomScan		= pgstromExplainTaskState;
 	/* hook registration */
 	set_join_pathlist_next = set_join_pathlist_hook;
-	set_join_pathlist_hook = XpuJoinAddCustomPath;
+	set_join_pathlist_hook = GpuJoinAddCustomPath;
 }

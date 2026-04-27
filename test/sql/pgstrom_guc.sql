@@ -19,8 +19,6 @@ SHOW pg_strom.gpu_direct_seq_page_cost;
 SHOW arrow_fdw.enabled;
 SHOW arrow_fdw.stats_hint_enabled;
 SHOW arrow_fdw.metadata_cache_size;
-SHOW pg_strom.enable_gpucache;
-SHOW pg_strom.gpucache_auto_preload;
 SHOW pg_strom.gpu_mempool_segment_sz;
 SHOW pg_strom.gpu_mempool_max_ratio;
 SHOW pg_strom.gpu_mempool_min_ratio;

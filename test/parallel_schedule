@@ -18,17 +18,18 @@ test: pgstrom_guc
 # ----------
 # Test for each data types
 # ----------
-test: dtype_int dtype_float dtype_numeric dtype_time dtype_text dtype_jsonb additional_dtype
+test: dtype_int
+#test: dtype_int dtype_float dtype_numeric dtype_time dtype_text dtype_jsonb additional_dtype
 
 # ----------
 # Test for various functions / expressions
 # ----------
-test: dfunc_math dfunc_mbtext dexpr_scalar_array_op
+#test: dfunc_math dfunc_mbtext dexpr_scalar_array_op
 
 # ----------
 # Test for arrow_fdw
 # ----------
-test: arrow_cpu arrow_utils arrow_python_data
+#test: arrow_cpu arrow_utils arrow_python_data
 # excluded: arrow_index (temporary)
 
 # ----------

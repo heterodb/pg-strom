@@ -2110,7 +2110,7 @@ pgstromSharedStateInitDSM(CustomScanState *node,
 	ps_state = (pgstromSharedState *)dsm_addr;
 	ps_state->ss_handle = (pcxt ? dsm_segment_handle(pcxt->seg) : DSM_HANDLE_INVALID);
 	ps_state->ss_length = dsm_length;
-	dsm_addr += MAXALIGN(sizeof(pgstromSharedScanState));
+	dsm_addr += MAXALIGN(sizeof(pgstromSharedState));
 
 	/* scan-rel's shared state */
 	for (int k=0; k < pts->num_scan_rels; k++)

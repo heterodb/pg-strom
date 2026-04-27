@@ -2611,3 +2611,44 @@ __munmapShmem(void *mmap_addr)
 	elog(ERROR, "it looks addr=%p not memory-mapped", mmap_addr);
 	return false;
 }
+
+/* ----------------------------------------------------------------
+ *
+ * SQL functions exist in the previous release (not supported now)
+ *
+ * ----------------------------------------------------------------
+ */
+PG_FUNCTION_INFO_V1(pgstrom_gpucache_sync_trigger);
+PUBLIC_FUNCTION(Datum)
+pgstrom_gpucache_sync_trigger(PG_FUNCTION_ARGS)
+{
+	elog(ERROR, "pgstrom.gpucache_sync_trigger is no longer supported");
+}
+
+PG_FUNCTION_INFO_V1(pgstrom_gpucache_apply_redo);
+PUBLIC_FUNCTION(Datum)
+pgstrom_gpucache_apply_redo(PG_FUNCTION_ARGS)
+{
+	elog(ERROR, "pgstrom.gpucache_apply_redo is no longer supported");
+}
+
+PG_FUNCTION_INFO_V1(pgstrom_gpucache_compaction);
+PUBLIC_FUNCTION(Datum)
+pgstrom_gpucache_compaction(PG_FUNCTION_ARGS)
+{
+	elog(ERROR, "pgstrom.gpucache_compaction is no longer supported");
+}
+
+PG_FUNCTION_INFO_V1(pgstrom_gpucache_recovery);
+PUBLIC_FUNCTION(Datum)
+pgstrom_gpucache_recovery(PG_FUNCTION_ARGS)
+{
+	elog(ERROR, "pgstrom.gpucache_recovery is no longer supported");
+}
+
+PG_FUNCTION_INFO_V1(pgstrom_gpucache_info);
+PUBLIC_FUNCTION(Datum)
+pgstrom_gpucache_info(PG_FUNCTION_ARGS)
+{
+	elog(ERROR, "pgstrom.gpucache_info is no longer supported");
+}

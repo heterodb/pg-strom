@@ -3117,10 +3117,10 @@ tryGpuSortWithWindowRankPath(PlannerInfo *root,
 }
 
 /*
- * XpuPreAggAddCustomPath
+ * GpuPreAggAddCustomPath
  */
 static void
-XpuPreAggAddCustomPath(PlannerInfo *root,
+GpuPreAggAddCustomPath(PlannerInfo *root,
 					   UpperRelationKind upper_stage,
 					   RelOptInfo *input_rel,
 					   RelOptInfo *upper_rel,
@@ -3377,6 +3377,6 @@ pgstrom_init_gpu_preagg(void)
 
 	/* hook registration */
 	create_upper_paths_next = create_upper_paths_hook;
-	create_upper_paths_hook = XpuPreAggAddCustomPath;
+	create_upper_paths_hook = GpuPreAggAddCustomPath;
 	CacheRegisterSyscacheCallback(PROCOID, aggfunc_catalog_htable_invalidator, 0);
 }
