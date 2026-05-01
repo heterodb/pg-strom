@@ -527,8 +527,6 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 	XpuCommand	   *xcmd;
 	StringInfoData	buf;
 	bytea		   *xpucode;
-	TransactionId	session_curr_xid = InvalidTransactionId;	/* only if writable */
-	CommandId		session_curr_cid = InvalidCommandId;		/* only if writable */
 
 	initStringInfo(&buf);
 	session_sz = offsetof(kern_session_info, poffset[nparams]);
@@ -769,8 +767,6 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 			session->select_into_projdesc =
 				__appendBinaryStringInfo(&buf, af_proj, length);
 		}
-		session_curr_xid = ps_state->pgsql_curr_xid;
-		session_curr_cid = ps_state->pgsql_curr_cid;
 		relation_close(drel, NoLock);
 	}
 	/* other database session information */
@@ -782,9 +778,6 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 	session->kcxt_extra_bufsz = pp_info->extra_bufsz;
 	session->cuda_stack_size  = pp_info->cuda_stack_size;
 	session->hostEpochTimestamp = SetEpochTimestamp();
-	session->xactStartTimestamp = GetCurrentTransactionStartTimestamp();
-	session->session_curr_xid = session_curr_xid;
-	session->session_curr_cid = session_curr_cid;
 	session->session_xact_state = __build_session_xact_state(&buf);
 	session->session_timezone = __build_session_timezone(&buf);
 	session->session_encode = __build_session_encode(&buf);
@@ -2084,7 +2077,6 @@ pgstromSharedStateEstimateDSM(CustomScanState *node,
 	/* space for parallel scan-desc */
 	if (heap_rel)
 		len += MAXALIGN(table_parallelscan_estimate(heap_rel, estate->es_snapshot));
-
 	return MAXALIGN(len);
 }
 
@@ -2103,9 +2095,31 @@ pgstromSharedStateInitDSM(CustomScanState *node,
 	Relation	heap_rel = NULL;
 	pgstromSharedState *ps_state;
 
-	Assert(!AmBackgroundWorkerProcess());
-	if (!dsm_addr)
+	if (dsm_addr)
+	{
+		Assert(AmRegularBackendProcess());
+	}
+	else
+	{
+		/*
+		 * See issue #1027 for details.
+		 * Even a plan that is executed under a Gather node, in the context of
+		 * a background worker, may have Path::parallel_aware = false.
+		 * One example is a case where the hash table is not very large, and
+		 * the optimizer determines that building an independent hash table
+		 * in each process is better than coordinating it across processes.
+		 *
+		 * In this case, neither InitDSM in the main process nor AttachDSM
+		 * in the worker process is called for the DSM area.
+		 * Therefore, on the first call to ExecScan, pgstromSharedStateInitDSM()
+		 * is invoked to initialize the local memory.
+		 *
+		 * Please note that, in this case, the InitDSM logic for initializing
+		 * local memory may be executed on the worker process side.
+		 */
+		Assert(!node->ss.ps.plan->parallel_aware || AmBackgroundWorkerProcess());
 		dsm_addr = MemoryContextAlloc(estate->es_query_cxt, dsm_length);
+	}
 	memset(dsm_addr, 0, dsm_length);
 	ps_state = (pgstromSharedState *)dsm_addr;
 	ps_state->ss_handle = (pcxt ? dsm_segment_handle(pcxt->seg) : DSM_HANDLE_INVALID);
@@ -2151,7 +2165,6 @@ pgstromSharedStateInitDSM(CustomScanState *node,
 
 			table_parallelscan_initialize(heap_rel, pdesc, estate->es_snapshot);
 			scan = table_beginscan_parallel(heap_rel, pdesc);
-			ps_state->parallel_scan_desc_offset = ((char *)pdesc - (char *)ps_state);
 		}
 		else
 		{
@@ -2161,8 +2174,6 @@ pgstromSharedStateInitDSM(CustomScanState *node,
 	}
 	ps_state->query_plan_id = ((uint64_t)MyProcPid) << 32 |
 		(uint64_t)pts->css.ss.ps.plan->plan_node_id;
-	ps_state->pgsql_curr_xid = GetCurrentTransactionIdIfAny();
-	ps_state->pgsql_curr_cid = GetCurrentCommandId(true);
 	pthreadCondInitShared(&ps_state->preload_cond);
 	pthreadMutexInitShared(&ps_state->preload_mutex);
 	if (pts->num_inner_rels > 0)
@@ -2183,7 +2194,7 @@ pgstromSharedStateAttachDSM(CustomScanState *node,
 	Relation	heap_rel = NULL;
 
 	pts->ps_state = (pgstromSharedState *)dsm_addr;
-	dsm_addr += MAXALIGN(sizeof(pgstromSharedScanState));
+	dsm_addr += MAXALIGN(sizeof(pgstromSharedState));
 	for (int k=0; k < pts->num_scan_rels; k++)
 	{
 		pgstromTaskScanState *ptss = &pts->scan_rels[k];
@@ -2211,7 +2222,6 @@ pgstromSharedStateAttachDSM(CustomScanState *node,
 	if (heap_rel)
 	{
 		ParallelTableScanDesc pdesc = (ParallelTableScanDesc) dsm_addr;
-
 		pts->css.ss.ss_currentScanDesc = table_beginscan_parallel(heap_rel, pdesc);
 	}
 }
@@ -2228,6 +2238,14 @@ pgstromSharedStateShutdownDSM(CustomScanState *node)
 	EState			   *estate = node->ss.ps.state;
 	char			   *loc_addr;
 
+	/*
+	 * Even in a parallel worker, if parallel_aware is false and this plan
+	 * is never executed, pgstromSharedState may remain uninitialized and
+	 * thus be NULL.
+	 * See issue #1027 for details.
+	 */
+	if (!ps_state)
+		return;
 	/* make a local duplication */
 	loc_addr =  MemoryContextAlloc(estate->es_query_cxt, ps_state->ss_length);
 	memcpy(loc_addr, ps_state, ps_state->ss_length);

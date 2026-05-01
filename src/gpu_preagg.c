@@ -2637,7 +2637,7 @@ tryGpuPreAggAddCustomPath(PlannerInfo *root,
 		 */
 		if (!pgstrom_enable_partitionwise_gpupreagg)
 		{
-			pgstromPlanInfo *pp_input = linitial(input_path->custom_paths);
+			pgstromPlanInfo *pp_input = linitial(input_path->custom_private);
 			if ((pp_input->xpu_task_flags & DEVTASK__IS_PARTITION_WISE) != 0)
 				continue;
 		}

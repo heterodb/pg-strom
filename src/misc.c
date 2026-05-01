@@ -233,6 +233,7 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	List	   *exprs = cscan->custom_exprs;
 	int			pindex = 0;
 	int			eindex = 0;
+	int			rtoffset = 0;
 	List	   *kvars_deflist_privs;
 	List	   *kvars_deflist_exprs;
 	List	   *scan_rels_list;
@@ -246,6 +247,18 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	pp_data.used_params  = list_nth(exprs, eindex++);
 	pp_data.host_quals   = list_nth(privs, pindex++);
 	pp_data.base_relid   = intVal(list_nth(privs, pindex++));
+	/*
+	 * setrefs.c may rewrite scanrelid (which is originally the same value as
+	 * pp_info->base_relid) when finalizing plan references.
+	 * However, scan_relids cached in the private state is not adjusted by
+	 * setrefs.c, so we have to apply the same fixup here before using it.
+	 */
+	Assert(cscan->scan.scanrelid != 0);
+	if (pp_data.base_relid != cscan->scan.scanrelid)
+	{
+		Assert(pp_data.base_relid < cscan->scan.scanrelid);
+		rtoffset = (cscan->scan.scanrelid - pp_data.base_relid);
+	}
 	pp_data.scan_quals   = list_nth(exprs, eindex++);
 	pp_data.scan_npages  = floatVal(list_nth(privs, pindex++));
 	pp_data.scan_tuples  = floatVal(list_nth(privs, pindex++));
@@ -310,12 +323,12 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 		List   *__privs = lfirst(lc1);
 		int		__pindex = 0;
 
-		pp_scan->scan_relid       = intVal(list_nth(__privs, __pindex++));
-        pp_scan->plan_ntuples_raw = floatVal(list_nth(__privs, __pindex++));
-        pp_scan->plan_ntuples_in  = floatVal(list_nth(__privs, __pindex++));
-        pp_scan->brin_oid         = intVal(list_nth(__privs, __pindex++));
-        pp_scan->brin_conds       = list_nth(__privs, __pindex++);
-        pp_scan->brin_quals       = list_nth(__privs, __pindex++);
+		pp_scan->scan_relid       = intVal(list_nth(__privs, __pindex++)) + rtoffset;
+		pp_scan->plan_ntuples_raw = floatVal(list_nth(__privs, __pindex++));
+		pp_scan->plan_ntuples_in  = floatVal(list_nth(__privs, __pindex++));
+		pp_scan->brin_oid         = intVal(list_nth(__privs, __pindex++));
+		pp_scan->brin_conds       = list_nth(__privs, __pindex++);
+		pp_scan->brin_quals       = list_nth(__privs, __pindex++);
 
 		pp_data.scan_rels_list = lappend(pp_data.scan_rels_list, pp_scan);
 	}

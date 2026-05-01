@@ -1111,7 +1111,8 @@ __gpuMemAllocFromSegment(gpuMemoryPool *pool,
 			/* update the LRU ordered segment list and timestamp */
 			gettimeofday(&mseg->tval, NULL);
 			dlist_move_head(&pool->segment_list, &mseg->chain);
-
+			/* setup m_devptr for convenience */
+			chunk->m_devptr = chunk->__base + chunk->__offset;
 			return chunk;
 		}
 	}

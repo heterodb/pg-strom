@@ -4425,7 +4425,7 @@ ArrowGetForeignPaths(PlannerInfo *root,
 										baserel,
 										NULL,	/* default pathtarget */
 										-1.0,	/* dummy */
-										arrow_fdw_enabled ? 1 : 0,	/* disabled_nodes */
+										arrow_fdw_enabled ? 0 : 1,	/* disabled_nodes */
 										-1.0,	/* dummy */
 										-1.0,	/* dummy */
 										NIL,	/* no pathkeys */
@@ -5295,12 +5295,12 @@ pgstromScanChunkArrowFdw(pgstromTaskState *pts,
 	af_state = rb_state->af_state;
 
 	/* XpuCommand header */
+	kds_src_offset = offsetof(XpuCommand, u.task.data);
 	resetLargeStringInfo(chunk_buffer);
-	appendBinaryLargeStringInfo(chunk_buffer,
-								pts->xcmd_buf.data,
-								pts->xcmd_buf.len);
+	enlargeLargeStringInfo(chunk_buffer, kds_src_offset);
+	memset(chunk_buffer->data, 0, kds_src_offset);
+	chunk_buffer->len = kds_src_offset;
 	/* kds_src (arrow or parquet) */
-	kds_src_offset = chunk_buffer->len;
 	kds_src = __arrowFdwSetupKDSHead(ptss->scan_rel,
 									 arrow_state->referenced,
 									 rb_state,
@@ -5327,6 +5327,8 @@ pgstromScanChunkArrowFdw(pgstromTaskState *pts,
 	appendStringLargeStringInfo(chunk_buffer, af_state->filename);
 	/* assign offset of XpuCommand */
 	xcmd = (XpuCommand *)chunk_buffer->data;
+	xcmd->magic  = XpuCommandMagicNumber;
+	xcmd->tag    = XpuCommandTag__XpuTaskExec;
 	xcmd->length = chunk_buffer->len;
 	xcmd->u.task.scan_relidx      = ptss->scan_relidx;
 	xcmd->u.task.kds_src_pathname = kds_src_pathname;

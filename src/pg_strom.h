@@ -412,8 +412,6 @@ typedef struct
 	CommandId			pgsql_curr_cid;		/* cid of the query*/
 	/* control variables to detect the last plan-node at parallel execution */
 	pg_atomic_uint32	parallel_task_control;
-	/* for parallel heap-scan */
-	uint32_t			parallel_scan_desc_offset;
 	/* statistics */
 	pg_atomic_uint64	result_ntuples;		/* # of tuples returned from GPU */
 	pg_atomic_uint64	fallback_nitems;	/* # of fallback tuples in depth==0 */
