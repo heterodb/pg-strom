@@ -19,7 +19,7 @@ SET client_min_messages TO WARNING;
 SELECT pgstrom.regression_testdb_revision();
  regression_testdb_revision 
 ----------------------------
- 20240530
+ 20260430
 (1 row)
 
 \else
@@ -110,6 +110,108 @@ CREATE TABLE supplier (
 \copy lineorder FROM PROGRAM '$DBGEN_SSBM_CMD -s 1 -X -Tl' DELIMITER '|'
 \copy part      FROM PROGRAM '$DBGEN_SSBM_CMD -s 1 -X -Tp' DELIMITER '|'
 \copy supplier  FROM PROGRAM '$DBGEN_SSBM_CMD -s 1 -X -Ts' DELIMITER '|'
+---
+--- Partitioned lineorder
+---
+\set plineorder_p1992_rem1_path `echo -n $ARROW_TEST_DATA_DIR/plineorder_p1992_rem1.parquet`
+\set plineorder_p1993_rem1_path `echo -n $ARROW_TEST_DATA_DIR/plineorder_p1993_rem1.parquet`
+\set plineorder_p1994_rem1_path `echo -n $ARROW_TEST_DATA_DIR/plineorder_p1994_rem1.parquet`
+\set plineorder_p1995_rem1_path `echo -n $ARROW_TEST_DATA_DIR/plineorder_p1995_rem1.parquet`
+\set plineorder_p1996_rem1_path `echo -n $ARROW_TEST_DATA_DIR/plineorder_p1996_rem1.parquet`
+\set plineorder_p1997_rem1_path `echo -n $ARROW_TEST_DATA_DIR/plineorder_p1997_rem1.parquet`
+\set plineorder_p1998_rem1_path `echo -n $ARROW_TEST_DATA_DIR/plineorder_p1998_rem1.parquet`
+\set plineorder_p1992_rem2_path `echo -n $ARROW_TEST_DATA_DIR/plineorder_p1992_rem2.arrow`
+\set plineorder_p1993_rem2_path `echo -n $ARROW_TEST_DATA_DIR/plineorder_p1993_rem2.arrow`
+\set plineorder_p1994_rem2_path `echo -n $ARROW_TEST_DATA_DIR/plineorder_p1994_rem2.arrow`
+\set plineorder_p1995_rem2_path `echo -n $ARROW_TEST_DATA_DIR/plineorder_p1995_rem2.arrow`
+\set plineorder_p1996_rem2_path `echo -n $ARROW_TEST_DATA_DIR/plineorder_p1996_rem2.arrow`
+\set plineorder_p1997_rem2_path `echo -n $ARROW_TEST_DATA_DIR/plineorder_p1997_rem2.arrow`
+\set plineorder_p1998_rem2_path `echo -n $ARROW_TEST_DATA_DIR/plineorder_p1998_rem2.arrow`
+DROP TABLE IF EXISTS plineorder CASCADE;
+CREATE TABLE plineorder (
+  LIKE lineorder
+) PARTITION BY RANGE (lo_orderdate);
+CREATE TABLE plineorder_p1992
+PARTITION OF plineorder FOR VALUES FROM (19920000) TO (19930000)
+PARTITION BY HASH (lo_shipmode);
+CREATE TABLE plineorder_p1993
+PARTITION OF plineorder FOR VALUES FROM (19930000) TO (19940000)
+PARTITION BY HASH (lo_shipmode);
+CREATE TABLE plineorder_p1994
+PARTITION OF plineorder FOR VALUES FROM (19940000) TO (19950000)
+PARTITION BY HASH (lo_shipmode);
+CREATE TABLE plineorder_p1995
+PARTITION OF plineorder FOR VALUES FROM (19950000) TO (19960000)
+PARTITION BY HASH (lo_shipmode);
+CREATE TABLE plineorder_p1996
+PARTITION OF plineorder FOR VALUES FROM (19960000) TO (19970000)
+PARTITION BY HASH (lo_shipmode);
+CREATE TABLE plineorder_p1997
+PARTITION OF plineorder FOR VALUES FROM (19970000) TO (19980000)
+PARTITION BY HASH (lo_shipmode);
+CREATE TABLE plineorder_p1998
+PARTITION OF plineorder FOR VALUES FROM (19980000) TO (19990000)
+PARTITION BY HASH (lo_shipmode);
+CREATE TABLE plineorder_p1992_heap
+PARTITION OF plineorder_p1992 FOR VALUES WITH (modulus 3, remainder 0);
+CREATE FOREIGN TABLE plineorder_p1992_parquet
+PARTITION OF plineorder_p1992 FOR VALUES WITH (modulus 3, remainder 1)
+SERVER arrow_fdw OPTIONS (file :'plineorder_p1992_rem1_path');
+CREATE FOREIGN TABLE plineorder_p1992_arrow
+PARTITION OF plineorder_p1992 FOR VALUES WITH (modulus 3, remainder 2)
+SERVER arrow_fdw OPTIONS (file :'plineorder_p1992_rem2_path');
+CREATE TABLE plineorder_p1993_heap
+PARTITION OF plineorder_p1993 FOR VALUES WITH (modulus 3, remainder 0);
+CREATE FOREIGN TABLE plineorder_p1993_parquet
+PARTITION OF plineorder_p1993 FOR VALUES WITH (modulus 3, remainder 1)
+SERVER arrow_fdw OPTIONS (file :'plineorder_p1993_rem1_path');
+CREATE FOREIGN TABLE plineorder_p1993_arrow
+PARTITION OF plineorder_p1993 FOR VALUES WITH (modulus 3, remainder 2)
+SERVER arrow_fdw OPTIONS (file :'plineorder_p1993_rem2_path');
+CREATE TABLE plineorder_p1994_heap
+PARTITION OF plineorder_p1994 FOR VALUES WITH (modulus 3, remainder 0);
+CREATE FOREIGN TABLE plineorder_p1994_parquet
+PARTITION OF plineorder_p1994 FOR VALUES WITH (modulus 3, remainder 1)
+SERVER arrow_fdw OPTIONS (file :'plineorder_p1994_rem1_path');
+CREATE FOREIGN TABLE plineorder_p1994_arrow
+PARTITION OF plineorder_p1994 FOR VALUES WITH (modulus 3, remainder 2)
+SERVER arrow_fdw OPTIONS (file :'plineorder_p1994_rem2_path');
+CREATE TABLE plineorder_p1995_heap
+PARTITION OF plineorder_p1995 FOR VALUES WITH (modulus 3, remainder 0);
+CREATE FOREIGN TABLE plineorder_p1995_parquet
+PARTITION OF plineorder_p1995 FOR VALUES WITH (modulus 3, remainder 1)
+SERVER arrow_fdw OPTIONS (file :'plineorder_p1995_rem1_path');
+CREATE FOREIGN TABLE plineorder_p1995_arrow
+PARTITION OF plineorder_p1995 FOR VALUES WITH (modulus 3, remainder 2)
+SERVER arrow_fdw OPTIONS (file :'plineorder_p1995_rem2_path');
+CREATE TABLE plineorder_p1996_heap
+PARTITION OF plineorder_p1996 FOR VALUES WITH (modulus 3, remainder 0);
+CREATE FOREIGN TABLE plineorder_p1996_parquet
+PARTITION OF plineorder_p1996 FOR VALUES WITH (modulus 3, remainder 1)
+SERVER arrow_fdw OPTIONS (file :'plineorder_p1996_rem1_path');
+CREATE FOREIGN TABLE plineorder_p1996_arrow
+PARTITION OF plineorder_p1996 FOR VALUES WITH (modulus 3, remainder 2)
+SERVER arrow_fdw OPTIONS (file :'plineorder_p1996_rem2_path');
+CREATE TABLE plineorder_p1997_heap
+PARTITION OF plineorder_p1997 FOR VALUES WITH (modulus 3, remainder 0);
+CREATE FOREIGN TABLE plineorder_p1997_parquet
+PARTITION OF plineorder_p1997 FOR VALUES WITH (modulus 3, remainder 1)
+SERVER arrow_fdw OPTIONS (file :'plineorder_p1997_rem1_path');
+CREATE FOREIGN TABLE plineorder_p1997_arrow
+PARTITION OF plineorder_p1997 FOR VALUES WITH (modulus 3, remainder 2)
+SERVER arrow_fdw OPTIONS (file :'plineorder_p1997_rem2_path');
+CREATE TABLE plineorder_p1998_heap
+PARTITION OF plineorder_p1998 FOR VALUES WITH (modulus 3, remainder 0);
+CREATE FOREIGN TABLE plineorder_p1998_parquet
+PARTITION OF plineorder_p1998 FOR VALUES WITH (modulus 3, remainder 1)
+SERVER arrow_fdw OPTIONS (file :'plineorder_p1998_rem1_path');
+CREATE FOREIGN TABLE plineorder_p1998_arrow
+PARTITION OF plineorder_p1998 FOR VALUES WITH (modulus 3, remainder 2)
+SERVER arrow_fdw OPTIONS (file :'plineorder_p1998_rem2_path');
+INSERT INTO plineorder (SELECT * FROM lineorder
+                         WHERE lo_shipmode IN ('TRUCK','RAIL','MAIN')
+						 ORDER BY lo_orderdate);
+CREATE INDEX ON plineorder USING brin (lo_orderdate);
 \set revision_checker_body 'SELECT CAST(':regress_dataset_revision' as text)'
 CREATE OR REPLACE FUNCTION
 pgstrom.regression_testdb_revision()

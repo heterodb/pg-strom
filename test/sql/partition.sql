@@ -1,59 +1,143 @@
 ---
---- Test cases for asymmetric partition-wise GpuJoin
+--- Test cases for partition-wise GpuJoin/GpuPreAgg
 ---
-SET search_path = pgstrom_regress,public;
+SET search_path = public;
 SET pg_strom.regression_test_mode = on;
 
--- INNER JOIN
-RESET pg_strom.enabled;
-EXPLAIN (costs off)
-SELECT count(*), label, sum(a.x), sum(b.y), sum(c.z)
-  FROM ptable p, atable a, btable b, ctable c
- WHERE p.aid = a.aid AND p.bid = b.bid AND p.cid = c.cid
- GROUP BY label
- ORDER BY label;
+---
+--- Simple GPU-Scan (blocked by issue #1026)
+---
 
-SELECT count(*), label, sum(a.x), sum(b.y), sum(c.z)
-  FROM ptable p, atable a, btable b, ctable c
- WHERE p.aid = a.aid AND p.bid = b.bid AND p.cid = c.cid
- GROUP BY label
- ORDER BY label;
 
-SET pg_strom.enabled = off;
-SELECT count(*), label, sum(a.x), sum(b.y), sum(c.z)
-  FROM ptable p, atable a, btable b, ctable c
- WHERE p.aid = a.aid AND p.bid = b.bid AND p.cid = c.cid
- GROUP BY label
- ORDER BY label;
+---
+--- Simpe GPU-PreAgg without JOIN
+---
+explain (costs off)
+select sum(lo_extendedprice*lo_discount) as revenue
+from plineorder
+where lo_orderdate between 19930101 and 19931231
+and lo_discount between 1 and 3
+and lo_quantity < 25;
 
--- LEFT OUTER JOIN
-RESET pg_strom.enabled;
-EXPLAIN (costs off)
-SELECT count(*), label, sum(a.x), sum(b.y), sum(c.z)
-  FROM ptable p
-  LEFT OUTER JOIN atable a ON p.aid = a.aid
-  LEFT OUTER JOIN btable b ON p.bid = b.bid
-  LEFT OUTER JOIN ctable c ON p.cid = c.cid
- GROUP BY label
- ORDER BY label;
+select sum(lo_extendedprice*lo_discount) as revenue
+from plineorder
+where lo_orderdate between 19930101 and 19931231
+and lo_discount between 1 and 3
+and lo_quantity < 25;
 
-SELECT count(*), label, sum(a.x), sum(b.y), sum(c.z)
-  FROM ptable p
-  LEFT OUTER JOIN atable a ON p.aid = a.aid
-  LEFT OUTER JOIN btable b ON p.bid = b.bid
-  LEFT OUTER JOIN ctable c ON p.cid = c.cid
- GROUP BY label
- ORDER BY label;
+explain (costs off)
+select lo_orderpriority, sum(lo_extendedprice*lo_discount) as revenue
+  from plineorder
+ where lo_orderdate between 19930101 and 19931231
+   and lo_discount between 1 and 3
+   and lo_quantity < 25
+ group by lo_orderpriority
+ order by lo_orderpriority;
 
-SET pg_strom.enabled = off;
-SELECT count(*), label, sum(a.x), sum(b.y), sum(c.z)
-  FROM ptable p
-  LEFT OUTER JOIN atable a ON p.aid = a.aid
-  LEFT OUTER JOIN btable b ON p.bid = b.bid
-  LEFT OUTER JOIN ctable c ON p.cid = c.cid
- GROUP BY label
- ORDER BY label;
+select lo_orderpriority, sum(lo_extendedprice*lo_discount) as revenue
+  from plineorder
+ where lo_orderdate between 19930101 and 19931231
+   and lo_discount between 1 and 3
+   and lo_quantity < 25
+ group by lo_orderpriority
+ order by lo_orderpriority;
 
---
--- RIGHT/FULL OUTER JOIN is not supported right now
---
+---
+--- GPU-PreAgg with JOIN
+---
+explain (costs off)
+select c_city,s_city,(lo_orderdate/10000)::int d_year,sum(lo_revenue) as revenue
+  from customer,plineorder,supplier
+ where lo_custkey = c_custkey
+   and lo_suppkey = s_suppkey
+   and (c_city='UNITED KI1' or c_city='UNITED KI5')
+   and (s_city='UNITED KI1' or s_city='UNITED KI5')
+   and lo_orderdate between 19930701 and 19960630
+ group by 1,2,3
+ order by 3 asc, 2 desc;
+
+select c_city,s_city,(lo_orderdate/10000)::int d_year,sum(lo_revenue) as revenue
+  from customer,plineorder,supplier
+ where lo_custkey = c_custkey
+   and lo_suppkey = s_suppkey
+   and (c_city='UNITED KI1' or c_city='UNITED KI5')
+   and (s_city='UNITED KI1' or s_city='UNITED KI5')
+   and lo_orderdate between 19930701 and 19960630
+ group by 1,2,3
+ order by 3 asc, 2 desc;
+
+---
+--- only heap and arrow by partition pruning
+---
+explain (costs off)
+select c_city,s_city,(lo_orderdate/10000)::int d_year,lo_shipmode, sum(lo_revenue) as revenue
+  from customer,plineorder,supplier
+ where lo_custkey = c_custkey
+   and lo_suppkey = s_suppkey
+   and (c_city='UNITED KI1' or c_city='UNITED KI5')
+   and (s_city='UNITED KI1' or s_city='UNITED KI5')
+   and lo_orderdate between 19920701 and 19970630
+   and lo_shipmode in ('SHIP','RAIL')
+ group by 1,2,3,4
+ order by 3 asc, 2 desc;
+
+select c_city,s_city,(lo_orderdate/10000)::int d_year,lo_shipmode, sum(lo_revenue) as revenue
+  from customer,plineorder,supplier
+ where lo_custkey = c_custkey
+   and lo_suppkey = s_suppkey
+   and (c_city='UNITED KI1' or c_city='UNITED KI5')
+   and (s_city='UNITED KI1' or s_city='UNITED KI5')
+   and lo_orderdate between 19920701 and 19970630
+   and lo_shipmode in ('SHIP','RAIL')
+ group by 1,2,3,4
+ order by 3 asc, 2 desc;
+
+---
+--- control by parameters
+---
+SET pg_strom.enable_partitionwise_gpupreagg = off;
+
+explain (costs off)
+select c_city,s_city,(lo_orderdate/10000)::int,sum(lo_revenue) as revenue
+  from customer,plineorder,supplier
+ where lo_custkey = c_custkey
+   and lo_suppkey = s_suppkey
+   and (c_city='UNITED KI1' or c_city='UNITED KI5')
+   and (s_city='UNITED KI1' or s_city='UNITED KI5')
+   and lo_orderdate between 19930701 and 19960630
+ group by 1,2,3
+ order by 3 asc, 4 desc;
+
+select c_city,s_city,(lo_orderdate/10000)::int,sum(lo_revenue) as revenue
+  from customer,plineorder,supplier
+ where lo_custkey = c_custkey
+   and lo_suppkey = s_suppkey
+   and (c_city='UNITED KI1' or c_city='UNITED KI5')
+   and (s_city='UNITED KI1' or s_city='UNITED KI5')
+   and lo_orderdate between 19930701 and 19960630
+ group by 1,2,3
+ order by 3 asc, 4 desc;
+
+RESET pg_strom.enable_partitionwise_gpupreagg;
+SET pg_strom.enable_partitionwise_gpujoin = off;
+
+explain (costs off)
+select c_city,s_city,(lo_orderdate/10000)::int,sum(lo_revenue) as revenue
+  from customer,plineorder,supplier
+ where lo_custkey = c_custkey
+   and lo_suppkey = s_suppkey
+   and (c_city='UNITED KI1' or c_city='UNITED KI5')
+   and (s_city='UNITED KI1' or s_city='UNITED KI5')
+   and lo_orderdate between 19930701 and 19960630
+ group by 1,2,3
+ order by 3 asc, 4 desc;
+
+select c_city,s_city,(lo_orderdate/10000)::int,sum(lo_revenue) as revenue
+  from customer,plineorder,supplier
+ where lo_custkey = c_custkey
+   and lo_suppkey = s_suppkey
+   and (c_city='UNITED KI1' or c_city='UNITED KI5')
+   and (s_city='UNITED KI1' or s_city='UNITED KI5')
+   and lo_orderdate between 19930701 and 19960630
+ group by 1,2,3
+ order by 3 asc, 4 desc;

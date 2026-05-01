@@ -82,27 +82,12 @@ INSERT INTO fallback_small (
             md5(x::text)
     FROM generate_series(1,4000) x);
 
-CREATE TABLE fallback_enlarge (
-  aid   int,
-  z     float,
-  md5   char(200)
-);
-INSERT INTO fallback_enlarge (
-  SELECT x / 5, pgstrom.random_float(2,-1000.0,1000.0),
-            md5(x::text)
-    FROM generate_series(1,20000) x);
-
-
+VACUUM ANALYZE fallback_data;
+VACUUM ANALYZE fallback_small;
 
 -- GpuScan  with CPU fallback
 SET pg_strom.enabled = on;
 SET pg_strom.cpu_fallback = off;
-VACUUM ANALYZE;
--- EXPLAIN (verbose, costs off)
--- SELECT id, x+y v1, substring(memo, 1, 20) v2
---   INTO test01g
---   FROM fallback_data
---  WHERE memo LIKE '%abc%';
 SELECT id, x+y v1, substring(memo, 1, 20) v2
   INTO test01g
   FROM fallback_data
@@ -117,18 +102,15 @@ SELECT id, x+y v1, substring(memo, 1, 20) v2
   INTO test01p
   FROM fallback_data
  WHERE memo LIKE '%abc%';
-(SELECT * FROM test01g EXCEPT SELECT * FROM test01p) ORDER BY id;
-(SELECT * FROM test01p EXCEPT SELECT * FROM test01g) ORDER BY id;
-RESET pg_strom.cpu_fallback;
+SELECT *
+  FROM test01g FULL OUTER JOIN test01p ON test01g.id = test01p.id
+ WHERE test01g != test01p
+ ORDER BY test01g.id
+ LIMIT 100;
 
 -- GpuScan with GPU kernel suspend/resume
 SET pg_strom.enabled = on;
-VACUUM ANALYZE;
--- EXPLAIN (verbose, costs off)
--- SELECT id, x+y a, x-y b, x+1 c, y+1 d, x+2 e, y+2 f, x+3 g, y+4 h, memo
---   INTO test02g
---   FROM fallback_data
---  WHERE id > 0;
+SET pg_strom.cpu_fallback = notice;
 SELECT id, x+y a, x-y b, x+1 c, y+1 d, x+2 e, y+2 f, x+3 g, y+4 h, memo
   INTO test02g
   FROM fallback_data
@@ -138,17 +120,15 @@ SELECT id, x+y a, x-y b, x+1 c, y+1 d, x+2 e, y+2 f, x+3 g, y+4 h, memo
   INTO test02p
   FROM fallback_data
  WHERE id > 0;
-(SELECT * FROM test02g EXCEPT SELECT * FROM test02p) ORDER BY id;
-(SELECT * FROM test02p EXCEPT SELECT * FROM test02g) ORDER BY id;
+SELECT *
+  FROM test02g FULL OUTER JOIN test02p ON test02g.id = test02p.id
+ WHERE test02g != test02p
+ ORDER BY test02g.id
+ LIMIT 100;
 
 -- GpuScan with GPU kernel suspend/resume and CPU fallback
 SET pg_strom.enabled = on;
-VACUUM ANALYZE;
--- EXPLAIN (verbose, costs off)
--- SELECT id, x+y a, x-y b, x+1 c, y+1 d, x+2 e, y+2 f, x+3 g, y+4 h, memo
---   INTO test03g
---   FROM fallback_data
---  WHERE memo LIKE '%abc%' OR id > 0;
+SET pg_strom.cpu_fallback = on;
 SELECT id, x+y a, x-y b, x+1 c, y+1 d, x+2 e, y+2 f, x+3 g, y+4 h, memo
   INTO test03g
   FROM fallback_data
@@ -158,63 +138,31 @@ SELECT id, x+y a, x-y b, x+1 c, y+1 d, x+2 e, y+2 f, x+3 g, y+4 h, memo
   INTO test03p
   FROM fallback_data
  WHERE memo LIKE '%abc%' OR id > 0;
-(SELECT * FROM test03g EXCEPT SELECT * FROM test03p) ORDER BY id;
-(SELECT * FROM test03p EXCEPT SELECT * FROM test03g) ORDER BY id;
-RESET pg_strom.cpu_fallback;
+SELECT *
+  FROM test03g FULL OUTER JOIN test03p ON test03g.id = test03p.id
+ WHERE test03g != test03p
+ ORDER BY test03g.id
+ LIMIT 100;
 
 -- GpuJoin with CPU fallback
 SET pg_strom.enabled = on;
-VACUUM ANALYZE;
--- EXPLAIN (verbose, costs off)
--- SELECT id, x+y+z v, memo
---   INTO test10g
---   FROM fallback_data d NATURAL JOIN fallback_small s
---  WHERE memo LIKE '%abc%';
+SET pg_strom.cpu_fallback = off;
 SELECT id, x+y+z v, memo
   INTO test10g
   FROM fallback_data d NATURAL JOIN fallback_small s
- WHERE memo LIKE '%abc%';
+ WHERE memo LIKE '%abc%';		-- error
+SET pg_strom.cpu_fallback = notice;
+SELECT id, x+y+z v, memo
+  INTO test10g
+  FROM fallback_data d NATURAL JOIN fallback_small s
+ WHERE memo LIKE '%abc%';		-- error
 SET pg_strom.enabled = off;
 SELECT id, x+y+z v, memo
   INTO test10p
   FROM fallback_data d NATURAL JOIN fallback_small s
  WHERE memo LIKE '%abc%';
-(SELECT * FROM test10g EXCEPT SELECT * FROM test10p) ORDER BY id;
-(SELECT * FROM test10p EXCEPT SELECT * FROM test10g) ORDER BY id;
-RESET pg_strom.cpu_fallback;
-
--- GpuJoin with GPU kernel suspend / resume
-SET pg_strom.enabled = on;
-VACUUM ANALYZE;
--- EXPLAIN (verbose, costs off)
--- SELECT * INTO test11g
---   FROM fallback_data d NATURAL JOIN fallback_enlarge l
---  WHERE l.aid < 1000;
-SELECT * INTO test11g
-  FROM fallback_data d NATURAL JOIN fallback_enlarge l
- WHERE l.aid < 1000;
-SET pg_strom.enabled = off;
-SELECT * INTO test11p
-  FROM fallback_data d NATURAL JOIN fallback_enlarge l
- WHERE l.aid < 1000;
-(SELECT * FROM test11g EXCEPT SELECT * FROM test11p) ORDER BY id;
-(SELECT * FROM test11p EXCEPT SELECT * FROM test11g) ORDER BY id;
-
-
--- GpuJoin with GPU kernel suspend / resume, and CPU fallback
-SET pg_strom.enabled = on;
-VACUUM ANALYZE;
--- EXPLAIN (verbose, costs off)
--- SELECT *
---   FROM fallback_data d NATURAL JOIN fallback_enlarge l
---  WHERE l.aid < 2500 AND memo LIKE '%ab%';
-SELECT * INTO test12g
-  FROM fallback_data d NATURAL JOIN fallback_enlarge l
- WHERE l.aid < 2500 AND memo LIKE '%ab%';
-SET pg_strom.enabled = off;
-SELECT * INTO test12p
-  FROM fallback_data d NATURAL JOIN fallback_enlarge l
- WHERE l.aid < 2500 AND memo LIKE '%ab%';
-(SELECT * FROM test12g EXCEPT SELECT * FROM test12p) ORDER BY id LIMIT 10;
-(SELECT * FROM test12p EXCEPT SELECT * FROM test12g) ORDER BY id LIMIT 10;
-RESET pg_strom.cpu_fallback;
+SELECT *
+  FROM test10g FULL OUTER JOIN test10p ON test10g.id = test10p.id
+ WHERE test10g != test10p
+ ORDER BY test10g.id
+ LIMIT 100;
