@@ -1051,7 +1051,6 @@ __parquetReadOneRowGroupNormal(std::shared_ptr<arrow::io::ReadableFile> parquet_
 		std::shared_ptr<arrow::Table> table;
 		std::vector<int>	referenced;
 		std::vector<int>	revmap;
-		arrow::Status		status;
 
 		setupParquetFileReferenced(kds_head,
 								   arrow_file_reader->manifest(),
@@ -1059,11 +1058,28 @@ __parquetReadOneRowGroupNormal(std::shared_ptr<arrow::io::ReadableFile> parquet_
 								   parquet_cached_chunks,
 								   referenced,
 								   revmap);
-		status = arrow_file_reader->ReadRowGroup(row_group_id, referenced, &table);
-		if (!status.ok())
-			__Elog("failed on parquet::arrow::FileReader::ReadRowGroup('%s', %d): %s",
-				   filename, row_group_id,
-				   status.ToString().c_str());
+#if ARROW_VERSION_MAJOR >= 24
+		{
+			auto	rv = arrow_file_reader->ReadRowGroup(row_group_id,
+														 referenced);
+			if (!rv.ok())
+				__Elog("failed on parquet::arrow::FileReader::ReadRowGroup('%s', %d): %s",
+					   filename, row_group_id,
+					   rv.status().ToString().c_str());
+			table = rv.ValueOrDie();
+		}
+#else
+		{
+			arrow::Status	status
+				= arrow_file_reader->ReadRowGroup(row_group_id,
+												  referenced,
+												  &table);
+			if (!status.ok())
+				__Elog("failed on parquet::arrow::FileReader::ReadRowGroup('%s', %d): %s",
+					   filename, row_group_id,
+					   status.ToString().c_str());
+		}
+#endif
 		/*
 		 * In case when the table contains multiple arrays in chunked-array, 
 		 * it should be combined to single buffer for simplification, even if

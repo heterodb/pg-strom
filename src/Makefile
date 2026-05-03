@@ -143,7 +143,9 @@ gpu_devattrs.h: $(CUDA_IPATH)/cuda.h
         -e 's| =.*$$|, NULL)|g' > $@
 
 githash.c:
-	echo "const char *pgstrom_githash_cstring = \"$(PGSTROM_GITHASH)\";" > githash.c
+	(echo "extern const char *pgstrom_githash_cstring;"; \
+	 echo ""; \
+	 echo "const char *pgstrom_githash_cstring = \"$(PGSTROM_GITHASH)\";") > githash.c
 
 #
 # GPU Device Code
