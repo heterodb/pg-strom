@@ -4213,6 +4213,7 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 	size_t			vfs_length = 0;
 	size_t			gds_length = 0;
 	double			ntuples = 0.0;
+	double			allvisfrac = 0.0;
 	int				parallel_nworkers;
 	int				parquet_cache;
 
@@ -4292,11 +4293,14 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 	table_close(frel, NoLock);
 
 	/* setup baserel */
+	if (vfs_length + gds_length > 0)
+		allvisfrac = (double)gds_length / (double)(vfs_length + gds_length);
+
 	baserel->rel_parallel_workers = parallel_nworkers;
 	baserel->fdw_private = list_make2(results, referenced);
 	baserel->pages = (vfs_length + gds_length + BLCKSZ - 1) / BLCKSZ;
 	baserel->tuples = ntuples;
-	baserel->allvisfrac = (double)(gds_length) / (double)(vfs_length + gds_length);
+	baserel->allvisfrac = allvisfrac;
 	baserel->rows = ntuples *
 		clauselist_selectivity(root,
 							   baserel->baserestrictinfo,
