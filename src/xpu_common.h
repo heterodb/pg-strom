@@ -2162,7 +2162,7 @@ typedef struct
 #define DEVTASK__PINNED_HASH_RESULTS 0x00001000U/* Pinned results in HASH format */
 #define DEVTASK__PINNED_ROW_RESULTS	0x00002000U	/* Pinned results in ROW format */
 #define DEVTASK__USED_GPUDIRECT		0x00004000U	/* Task used GPU-Direct SQL */
-#define DEVTASK__USED_GPUCACHE		0x00008000U	/* Task used GPU-Cache */
+#define DEVTASK__IS_PARTITION_WISE	0x00008000U	/* Task runs across PostgreSQL partitions */
 #define DEVTASK__MERGE_FINAL_BUFFER	0x00010000U	/* Final buffer (GPU-PreAgg or pinned
 												 * inner buffer by GPU-Join/Scan) must
 												 * be merged to a single buffer, for
@@ -2689,7 +2689,6 @@ typedef struct
 #define XpuCommandTag__SuccessHalfWay		2
 #define XpuCommandTag__OpenSession			100
 #define XpuCommandTag__XpuTaskExec			110
-#define XpuCommandTag__XpuTaskExecGpuCache	111
 #define XpuCommandTag__XpuTaskFinal			119
 #define XpuCommandMagicNumber				0xdeadbeafU
 
@@ -2704,7 +2703,7 @@ typedef struct kern_session_info
 	uint32_t	kcxt_kvars_nslots;	/* number of kvars slot */
 	uint32_t	kcxt_kvars_defs;	/* offset of kvars_slot_desc[] array */
 	uint32_t	kcxt_kvecs_bufsz;	/* length of kvecs buffer */
-	uint32_t	kcxt_kvecs_ndims;	/* =(num_rels + 2) */
+	uint32_t	kcxt_kvecs_ndims;	/* =(num_inner_rels + 2) */
 	uint32_t	kcxt_extra_bufsz;	/* length of vlbuf[] */
 	uint32_t	cuda_stack_size;	/* estimated stack size */
 	uint32_t	xpu_task_flags;		/* mask of device flags */
@@ -2725,9 +2724,6 @@ typedef struct kern_session_info
 
 	/* database session info */
 	int64_t		hostEpochTimestamp;		/* = SetEpochTimestamp() */
-	uint64_t	xactStartTimestamp;		/* timestamp when transaction start */
-	uint32_t	session_curr_xid;		/* GetCurrentTransactionId() */
-	uint32_t	session_curr_cid;		/* GetCurrentCommandId() */
 	uint32_t	session_xact_state;		/* offset to SerializedTransactionState */
 	uint32_t	session_timezone;		/* offset to pg_tz */
 	uint32_t	session_encode;			/* offset to xpu_encode_info;
@@ -2765,6 +2761,7 @@ typedef struct kern_session_info
 } kern_session_info;
 
 typedef struct {
+	int32_t		scan_relidx;		/* index of the scan relation */
 	uint32_t	kds_src_pathname;	/* offset to const char *pathname */
 	uint32_t	kds_src_iovec;		/* offset to strom_io_vector */
 	uint32_t	kds_src_offset;		/* offset to kds_src */
@@ -2772,6 +2769,7 @@ typedef struct {
 } kern_exec_task;
 
 typedef struct {
+	int32_t		scan_relidx;		/* index of the scan relation */
 	uint32_t	chunks_offset;		/* offset of kds_dst array */
 	uint32_t	chunks_nitems;		/* number of kds_dst items */
 	uint32_t	ojmap_offset;		/* offset of outer-join-map */
@@ -3412,7 +3410,7 @@ struct kern_multirels
 	size_t		length;				/* total length of kern_multirels */
 	size_t		ojmap_sz;			/* length of outer-join map */
 	uint64_t	kbuf_part_offset;	/* offset to kern_buffer_partitions, if any */
-	uint32_t	num_rels;
+	uint32_t	num_inner_rels;
 	struct
 	{
 		kern_data_store *kds_in;	/* pointer to KDS-inner (if non-partitioned) */
@@ -3437,7 +3435,7 @@ KERN_MULTIRELS_INNER_KDS(kern_multirels *kmrels, int depth)
 #ifdef __CUDACC__
 	kern_data_store *kds_in;
 
-	assert(depth > 0 && depth <= kmrels->num_rels);
+	assert(depth > 0 && depth <= kmrels->num_inner_rels);
 	kds_in = kmrels->chunks[depth-1].kds_in;
 	if (!kds_in)
 	{
@@ -3455,7 +3453,7 @@ KERN_MULTIRELS_INNER_KDS(kern_multirels *kmrels, int depth)
 #else
 	uint64_t	pos;
 
-	assert(depth > 0 && depth <= kmrels->num_rels);
+	assert(depth > 0 && depth <= kmrels->num_inner_rels);
 	pos = kmrels->chunks[depth-1].kds_offset;
 	return (kern_data_store *)(pos == 0 ? NULL : ((char *)kmrels + pos));
 #endif
@@ -3466,7 +3464,7 @@ KERN_MULTIRELS_OUTER_JOIN_MAP(kern_multirels *kmrels, int depth)
 {
 	uint64_t	offset;
 
-	assert(depth > 0 && depth <= kmrels->num_rels);
+	assert(depth > 0 && depth <= kmrels->num_inner_rels);
 	offset = kmrels->chunks[depth-1].ojmap_offset;
 	return (bool *)(offset == 0 ? NULL : ((char *)kmrels + offset));
 }
@@ -3477,7 +3475,7 @@ KERN_MULTIRELS_GPU_OUTER_JOIN_MAP(kern_multirels *kmrels, int depth,
 {
 	uint64_t	offset;
 
-	assert(depth > 0 && depth <= kmrels->num_rels);
+	assert(depth > 0 && depth <= kmrels->num_inner_rels);
 	offset = kmrels->chunks[depth-1].ojmap_offset;
 	if (offset == 0)
 		return NULL;
@@ -3490,7 +3488,7 @@ KERN_MULTIRELS_GIST_INDEX(kern_multirels *kmrels, int depth)
 {
 	uint64_t	offset;
 
-	assert(depth > 0 && depth <= kmrels->num_rels);
+	assert(depth > 0 && depth <= kmrels->num_inner_rels);
 	offset = kmrels->chunks[depth-1].gist_offset;
 	return (kern_data_store *)(offset == 0 ? NULL : ((char *)kmrels + offset));
 }
@@ -3500,7 +3498,7 @@ KERN_MULTIRELS_PARTITION_DESC(kern_multirels *kmrels, int depth)
 {
 	uint64_t	offset = kmrels->kbuf_part_offset;
 
-	assert(depth < 0 || (depth > 0 && depth <= kmrels->num_rels));
+	assert(depth < 0 || (depth > 0 && depth <= kmrels->num_inner_rels));
 	if (offset > 0)
 	{
 		kern_buffer_partitions *kbuf_parts

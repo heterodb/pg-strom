@@ -19,82 +19,125 @@
  */
 Bitmapset *
 pickup_outer_referenced(PlannerInfo *root,
-						RelOptInfo *base_rel,
-						Bitmapset *referenced)
+						RelOptInfo *base_rel)
 {
+	Bitmapset  *referenced = NULL;
 	ListCell   *lc;
 	int			j, k;
 
 	if (base_rel->reloptkind == RELOPT_BASEREL)
 	{
-		for (j=base_rel->min_attr; j <= base_rel->max_attr; j++)
+		for (j=Max(base_rel->min_attr,0); j <= base_rel->max_attr; j++)
 		{
-			if (j <= 0 || !base_rel->attr_needed[j - base_rel->min_attr])
-				continue;
-			k = j - FirstLowInvalidHeapAttributeNumber;
-			referenced = bms_add_member(referenced, k);
+			Bitmapset  *needed = base_rel->attr_needed[j - base_rel->min_attr];
+
+			if (!bms_is_empty(needed))
+			{
+				k = j - FirstLowInvalidHeapAttributeNumber;
+				referenced = bms_add_member(referenced, k);
+			}
 		}
 	}
 	else if (base_rel->reloptkind == RELOPT_OTHER_MEMBER_REL)
 	{
-		foreach (lc, root->append_rel_list)
+		AppendRelInfo *apinfo = root->append_rel_array[base_rel->relid];
+		RelOptInfo *parent_rel = root->simple_rel_array[apinfo->parent_relid];
+		Bitmapset  *parent_refs = pickup_outer_referenced(root, parent_rel);
+
+		for (k = bms_next_member(parent_refs, -1);
+			 k >= 0;
+			 k = bms_next_member(parent_refs, k))
 		{
-			AppendRelInfo  *apinfo = lfirst(lc);
-			RelOptInfo	   *parent_rel;
-			Bitmapset	   *parent_refs;
-
-			if (apinfo->child_relid != base_rel->relid)
-				continue;
-			Assert(apinfo->parent_relid < root->simple_rel_array_size);
-			parent_rel = root->simple_rel_array[apinfo->parent_relid];
-			parent_refs = pickup_outer_referenced(root, parent_rel, NULL);
-
-			for (k = bms_next_member(parent_refs, -1);
-				 k >= 0;
-				 k = bms_next_member(parent_refs, k))
+			j = k + FirstLowInvalidHeapAttributeNumber;
+			if (j <= 0)
+				referenced = bms_add_member(referenced, k);
+			else if (j > list_length(apinfo->translated_vars))
+			   elog(ERROR, "Bug? column reference out of range");
+			else
 			{
-				j = k + FirstLowInvalidHeapAttributeNumber;
-				if (j <= 0)
-					bms_add_member(referenced, k);
-				else if (j > list_length(apinfo->translated_vars))
-					elog(ERROR, "Bug? column reference out of range");
+				Expr   *expr = list_nth(apinfo->translated_vars, j-1);
+
+				if (IsA(expr, Var))
+				{
+					Var	   *var = (Var *)expr;
+
+					j = var->varattno - FirstLowInvalidHeapAttributeNumber;
+					referenced = bms_add_member(referenced, j);
+				}
 				else
 				{
-					Expr   *expr = list_nth(apinfo->translated_vars, j-1);
+					/*
+					 * translated_vars is not always a simple Var-to-Var mapping.
+					 * In particular, appendrel children coming from pulled-up
+					 * subqueries (e.g., UNION ALL) may have arbitrary
+					 * expressions here.
+					 *
+					 * Since we need a direct child attribute reference, treat
+					 * non-Var entries as incompatible and skip them.
+					 */
+					List   *varsList = pull_vars_of_level((Node *)expr, 0);
 
-					if (IsA(expr, Var))
+					foreach (lc, varsList)
 					{
-						Var	   *var = (Var *)expr;
+						Var	   *var = lfirst(lc);
 
 						j = var->varattno - FirstLowInvalidHeapAttributeNumber;
 						referenced = bms_add_member(referenced, j);
 					}
-					else
-					{
-						List   *varsList = pull_vars_of_level((Node *)expr, 0);
-						ListCell *cell;
-
-						foreach (cell, varsList)
-						{
-							Var	   *var = lfirst(cell);
-
-							j = var->varattno - FirstLowInvalidHeapAttributeNumber;
-							referenced = bms_add_member(referenced, j);
-						}
-					}
 				}
 			}
-			break;
 		}
-		if (!lc)
-			elog(ERROR, "Bug? AppendRelInfo not found (relid=%u)",
-				 base_rel->relid);
 	}
 	else
 	{
 		elog(ERROR, "Bug? outer relation is not a simple relation");
 	}
 	return referenced;
+}
+
+Cost
+disk_cost_postgresql_heap(PlannerInfo *root,
+						  RelOptInfo *baserel,
+						  double *p_setup_cost)
+{
+	double		num_pages = (double)baserel->pages;
+	double		spc_seq_page_cost;
+	double		spc_rand_page_cost;
+	double		avg_seq_page_cost;
+	IndexOptInfo *brin_opt;
+	List	   *brin_conds = NIL;
+	List	   *brin_quals = NIL;
+	int64_t		brin_npages = 0;
+
+	get_tablespace_page_costs(baserel->reltablespace,
+							  &spc_rand_page_cost,
+							  &spc_seq_page_cost);
+	if (GetOptimalGpuForBaseRel(root, baserel) != 0UL)
+	{
+		/* assume GPU-Direct SQL is available */
+		avg_seq_page_cost = spc_seq_page_cost * (1.0 - baserel->allvisfrac) +
+			pgstrom_gpu_direct_seq_page_cost * baserel->allvisfrac;
+	}
+	else
+	{
+		/* elsewhere, use PostgreSQL's storage layer */
+		avg_seq_page_cost = spc_seq_page_cost;
+	}
+	/* discount number of pages if BRIN-index available */
+	brin_opt = pgstromTryFindBrinIndex(root,
+									   baserel,
+									   &brin_conds,
+									   &brin_quals,
+									   &brin_npages);
+	if (brin_opt)
+	{
+		num_pages = Min(num_pages, brin_npages);
+		*p_setup_cost += cost_brin_bitmap_build(root,
+												baserel,
+												brin_opt,
+												brin_quals);
+	}
+	return avg_seq_page_cost * num_pages;
 }
 
 /* ----------------------------------------------------------------
@@ -330,24 +373,6 @@ setup_kern_data_store(kern_data_store *kds,
 							 attr->atttypmod,
 							 &attcacheoff);
 	}
-	/* internal system attribute */
-	if (format == KDS_FORMAT_COLUMN)
-	{
-		kern_colmeta *cmeta = &kds->colmeta[kds->nr_colmeta++];
-
-		memset(cmeta, 0, sizeof(kern_colmeta));
-		cmeta->attbyval = false;
-		cmeta->attalign = sizeof(int32_t);
-		cmeta->attlen = sizeof(GpuCacheSysattr);
-		cmeta->attnum = -1;
-		cmeta->attcacheoff = -1;
-		cmeta->atttypid = InvalidOid;
-		cmeta->atttypmod = -1;
-		cmeta->atttypkind = TYPE_KIND__BASE;
-		cmeta->kds_format = kds->format;
-		cmeta->kds_offset = (uint32_t)((char *)cmeta - (char *)kds);
-		strcpy(cmeta->attname, "__gcache_sysattr__");
-	}
 	return MAXALIGN(offsetof(kern_data_store, colmeta[kds->nr_colmeta]));
 }
 
@@ -371,8 +396,6 @@ estimate_kern_data_store(TupleDesc tupdesc)
 			continue;
 		nr_colmeta += count_num_of_subfields(attr->atttypid);
 	}
-	/* internal system attribute if KDS_FORMAT_COLUMN */
-	nr_colmeta++;
 	return MAXALIGN(offsetof(kern_data_store, colmeta[nr_colmeta]));
 }
 
@@ -388,11 +411,14 @@ estimate_kern_data_store(TupleDesc tupdesc)
 	((kern_data_store *)((buf)->data + __XCMD_KDS_SRC_OFFSET(buf)))
 
 static void
-__relScanDirectCachedBlock(pgstromTaskState *pts, BlockNumber block_num)
+__relScanDirectCachedBlock(pgstromTaskState *pts,
+						   pgstromTaskScanState *ptss,
+						   BlockNumber block_num)
 {
-	Relation	relation = pts->css.ss.ss_currentRelation;
-	HeapScanDesc h_scan = (HeapScanDesc)pts->css.ss.ss_currentScanDesc;
-	Snapshot	snapshot = pts->css.ss.ps.state->es_snapshot;
+	Relation	relation = ptss->scan_rel;
+	EState	   *estate = pts->css.ss.ps.state;
+	Snapshot	snapshot = estate->es_snapshot;
+	BufferAccessStrategy hscan_strategy;
 	kern_data_store *kds;
 	Buffer		buffer;
 	Page		spage;
@@ -402,11 +428,19 @@ __relScanDirectCachedBlock(pgstromTaskState *pts, BlockNumber block_num)
 	/*
 	 * Load the source buffer with synchronous read
 	 */
+	if (!pts->hscan_strategy)
+	{
+		MemoryContext	oldcxt = MemoryContextSwitchTo(estate->es_query_cxt);
+		pts->hscan_strategy = GetAccessStrategy(BAS_BULKREAD);
+		MemoryContextSwitchTo(oldcxt);
+	}
+	hscan_strategy = pts->hscan_strategy;
+
 	buffer = ReadBufferExtended(relation,
 								MAIN_FORKNUM,
 								block_num,
 								RBM_NORMAL,
-								h_scan->rs_strategy);
+								hscan_strategy);
 	/* prune the old items, if any */
 	heap_page_prune_opt(relation, buffer);
 	/* let's check tuples visibility for each */
@@ -512,10 +546,10 @@ __relScanDirectCheckBufferClean(SMgrRelation smgr, BlockNumber block_num)
 
 XpuCommand *
 pgstromRelScanChunkDirect(pgstromTaskState *pts,
+						  pgstromTaskScanState *ptss,
 						  struct iovec *xcmd_iov, int *xcmd_iovcnt)
 {
-	pgstromSharedState *ps_state = pts->ps_state;
-	Relation		relation = pts->css.ss.ss_currentRelation;
+	Relation		relation = ptss->scan_rel;
 	SMgrRelation	smgr = RelationGetSmgr(relation);
 	XpuCommand	   *xcmd;
 	kern_data_store *kds;
@@ -528,9 +562,32 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 	uint32_t		kds_src_pathname = 0;
 	uint32_t		kds_src_iovec = 0;
 	uint32_t		kds_nrooms;
-	uint32_t		scan_block_start = ps_state->scan_block_start;
+	size_t			sz;
 
+	/* setup kds_head on the first call */
+	if (!ptss->kds_head)
+	{
+		EState	   *estate = pts->css.ss.ps.state;
+		TupleDesc	tupdesc = RelationGetDescr(relation);
+		size_t		head_sz = estimate_kern_data_store(tupdesc);
+
+		kds = MemoryContextAllocZero(estate->es_query_cxt, head_sz);
+		setup_kern_data_store(kds, tupdesc, head_sz, KDS_FORMAT_BLOCK);
+		ptss->kds_head = kds;
+	}
+	/* setup XPU command */
+	sz = offsetof(XpuCommand, u.task.data) + ptss->kds_head->length;
+	resetStringInfo(&pts->xcmd_buf);
+	enlargeStringInfo(&pts->xcmd_buf, sz);
+	xcmd = (XpuCommand *)pts->xcmd_buf.data;
+	memset(xcmd, 0, offsetof(XpuCommand, u.task.data));
+	xcmd->magic = XpuCommandMagicNumber;
+	xcmd->tag   = XpuCommandTag__XpuTaskExec;
+	xcmd->u.task.scan_relidx = ptss->scan_relidx;
+	xcmd->u.task.kds_src_offset = offsetof(XpuCommand, u.task.data);
 	kds = __XCMD_GET_KDS_SRC(&pts->xcmd_buf);
+	memcpy(kds, ptss->kds_head, ptss->kds_head->length);
+	pts->xcmd_buf.len = sz;
 	kds_nrooms = (PGSTROM_CHUNK_SIZE -
 				  KDS_HEAD_LENGTH(kds)) / (sizeof(BlockNumber) + BLCKSZ);
 	kds->nitems = 0;
@@ -546,27 +603,13 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 	strom_iovec = alloca(offsetof(strom_io_vector, ioc[kds_nrooms]));
 	strom_iovec->nr_chunks = 0;
 	strom_blknums = alloca(sizeof(BlockNumber) * kds_nrooms);
-	strom_nblocks = 0;
 
-	/*
-	 * PostgreSQL may adjust the scan start position for concurrent sequential
-	 * scans to improve buffer hit rates, and PG-Strom honors this behavior.
-	 * In contrast, when a BRIN index is in use, the scan start position must
-	 * not be shifted, because the BRIN index precisely specifies which blocks
-	 * should be scanned. Otherwise, incorrect results could be produced.
-	 * Hence, scan_block_start is cleared so that the table is scanned exactly
-	 * according to the BRIN index.
-	 */
-	if (pts->br_state)
-		scan_block_start = 0;
-
-	while (!pts->scan_done)
+	for (;;)
 	{
-		while (pts->curr_block_num < pts->curr_block_tail &&
+		while (ptss->heap_block_pos < ptss->heap_block_end &&
 			   kds->nitems < kds_nrooms)
 		{
-			BlockNumber		block_num = (pts->curr_block_num +
-										 scan_block_start) % ps_state->scan_block_nums;
+			BlockNumber		block_num = ptss->heap_block_pos;
 			/*
 			 * MEMO: right now, we allow GPU Direct SQL for the all-visible
 			 * pages only, due to the restrictions about MVCC checks.
@@ -576,11 +619,11 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 			 * HEAP_XMIN_* or HEAP_XMAX_* flags correctly, we can have MVCC
 			 * logic in the device code.
 			 */
-			if (VM_ALL_VISIBLE(relation, block_num, &pts->curr_vm_buffer) &&
+			if (VM_ALL_VISIBLE(relation, block_num, &ptss->heap_vm_buffer) &&
 				__relScanDirectCheckBufferClean(smgr, block_num))
 			{
 				/*
-				 * We don't allow xPU Direct SQL across multiple heap
+				 * We don't allow GPU Direct SQL across multiple heap
 				 * segments (for the code simplification). So, once
 				 * relation scan is broken out, then restart with new
 				 * KDS buffer.
@@ -613,11 +656,10 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 			}
 			else
 			{
-				__relScanDirectCachedBlock(pts, block_num);
+				__relScanDirectCachedBlock(pts, ptss, block_num);
 			}
-			pts->curr_block_num++;
+			ptss->heap_block_pos++;
 		}
-
 		if (kds->nitems >= kds_nrooms)
 		{
 			/* ok, we cannot load more pages in this chunk */
@@ -625,26 +667,32 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 		}
 		else if (pts->br_state)
 		{
-			if (!pgstromBrinIndexNextChunk(pts))
-				pts->scan_done = true;
+			if (!pgstromBrinIndexNextChunk(pts, ptss))
+			{
+				pts->curr_scan_rel++;
+				break;
+			}
 		}
 		else
 		{
 			/* full table scan */
-			uint32_t	num_blocks = kds_nrooms - kds->nitems;
+			uint32_t	required = kds_nrooms - kds->nitems;
 
-			pts->curr_block_num  = pg_atomic_fetch_add_u64(&ps_state->scan_block_count,
-														   num_blocks);
-			pts->curr_block_tail = pts->curr_block_num + num_blocks;
-			if (pts->curr_block_num >= ps_state->scan_block_nums)
-				pts->scan_done = true;
-			if (pts->curr_block_tail > ps_state->scan_block_nums)
-				pts->curr_block_tail = ps_state->scan_block_nums;
+			ptss->heap_block_pos = pg_atomic_fetch_add_u64(&ptss->dsm->scan_block_count,
+														   required);
+			ptss->heap_block_end = ptss->heap_block_pos + required;
+			if (ptss->heap_block_end > ptss->dsm->scan_block_nums)
+				ptss->heap_block_end = ptss->dsm->scan_block_nums;
+			if (ptss->heap_block_pos >= ptss->dsm->scan_block_nums)
+			{
+				pts->curr_scan_rel++;
+				break;
+			}
 		}
 	}
 out:
 	Assert(kds->nitems == kds->block_nloaded + strom_nblocks);
-	pg_atomic_fetch_add_u64(&ps_state->npages_buffer_read,
+	pg_atomic_fetch_add_u64(&ptss->dsm->npages_buffer_read,
 							kds->block_nloaded * PAGES_PER_BLOCK);
 	kds->length = kds->block_offset + BLCKSZ * kds->nitems;
 	if (kds->nitems == 0)
@@ -660,10 +708,8 @@ out:
 
 	if (strom_iovec->nr_chunks > 0)
 	{
-		size_t		sz;
-
 		kds_src_pathname = pts->xcmd_buf.len;
-		appendStringInfoString(&pts->xcmd_buf, pts->kds_pathname);
+		appendStringInfoString(&pts->xcmd_buf, ptss->heap_pathname);
 		if (segment_id > 0)
 			appendStringInfo(&pts->xcmd_buf, ".%u", segment_id);
 		appendStringInfoChar(&pts->xcmd_buf, '\0');

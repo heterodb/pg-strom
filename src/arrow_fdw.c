@@ -4165,6 +4165,36 @@ parquetFillupRowGroup(Relation relation,
 }
 
 /*
+ * disk_cost_arrow_fdw
+ */
+Cost
+disk_cost_arrow_fdw(PlannerInfo *root,
+					RelOptInfo *baserel,
+					double *p_setup_cost)
+{
+	/*
+	 * Arrow- and Parquet-style columnar formats reduce disk I/O by loading only
+	 * the columns actually referenced by a query. Nevertheless, when generating
+	 * query execution plans, there is currently no case in which one candidate
+	 * plan would load a referenced column X while another candidate plan would
+	 * avoid loading that same column. Therefore, adjusting disk_cost based
+	 * on the set or number of referenced columns is not meaningful in the current
+	 * implementation.
+	 * For this reason, arrow_fdw does not make disk_cost depend on the number of
+	 * referenced columns.
+	 * This may change in a future revision of the design.
+	 */
+	double	spc_seq_page_cost;
+
+	get_tablespace_page_costs(baserel->reltablespace,
+							  NULL,
+							  &spc_seq_page_cost);
+	return (double)baserel->pages *
+		(spc_seq_page_cost * (1.0 - baserel->allvisfrac) +
+		 pgstrom_gpu_direct_seq_page_cost * baserel->allvisfrac);
+}
+
+/*
  * ArrowGetForeignRelSize
  */
 static void
@@ -4178,21 +4208,23 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 	List		   *sourceFields;
 	List		   *virtualColumnsList;
 	List		   *results = NIL;
-	Bitmapset	   *referenced = NULL;
+	Bitmapset	   *referenced;
 	ListCell	   *lc1, *lc2;
-	size_t			totalLen = 0;
+	size_t			vfs_length = 0;
+	size_t			gds_length = 0;
 	double			ntuples = 0.0;
+	double			allvisfrac = 0.0;
 	int				parallel_nworkers;
 	int				parquet_cache;
 
 	/* columns to be referenced */
+	referenced = pickup_outer_referenced(root, baserel);
 	foreach (lc1, baserel->baserestrictinfo)
 	{
 		RestrictInfo   *rinfo = lfirst(lc1);
 
 		pull_varattnos((Node *)rinfo->clause, baserel->relid, &referenced);
 	}
-	referenced = pickup_outer_referenced(root, baserel, referenced);
 
 	/* read arrow-file metadta */
 	filesList = arrowFdwExtractFilesList(ft->options,
@@ -4222,13 +4254,15 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 		foreach (cell, af_state->rb_list)
 		{
 			RecordBatchState *rb_state = lfirst(cell);
+			gpumask_t		__optimal_gpus;
+			size_t			__length = 0;
 
 			//XXX - fix to support column-field mapping
 
 			/* whole-row reference? */
 			if (bms_is_member(-FirstLowInvalidHeapAttributeNumber, referenced))
 			{
-				totalLen += rb_state->rb_length;
+				__length += rb_state->rb_length;
 			}
 			else
 			{
@@ -4243,20 +4277,30 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 						continue;
 					i = af_state->attrs[j-1].field_index;
 					if (i >= 0 && i < rb_state->nfields)
-						totalLen += rb_state->fields[i].disk_length;
+						__length += rb_state->fields[i].disk_length;
 				}
 			}
 			ntuples += rb_state->rb_nitems;
+			/* Is GPU-Direct SQL supported? */
+			__optimal_gpus = GetOptimalGpuForFile(af_state->filename);
+			if (__optimal_gpus == 0 || __optimal_gpus == INVALID_GPUMASK)
+				vfs_length += __length;
+			else
+				gds_length += __length;
 		}
 		results = lappend(results, af_state);
 	}
 	table_close(frel, NoLock);
 
 	/* setup baserel */
+	if (vfs_length + gds_length > 0)
+		allvisfrac = (double)gds_length / (double)(vfs_length + gds_length);
+
 	baserel->rel_parallel_workers = parallel_nworkers;
 	baserel->fdw_private = list_make2(results, referenced);
-	baserel->pages = totalLen / BLCKSZ;
+	baserel->pages = (vfs_length + gds_length + BLCKSZ - 1) / BLCKSZ;
 	baserel->tuples = ntuples;
+	baserel->allvisfrac = allvisfrac;
 	baserel->rows = ntuples *
 		clauselist_selectivity(root,
 							   baserel->baserestrictinfo,
@@ -4385,7 +4429,7 @@ ArrowGetForeignPaths(PlannerInfo *root,
 										baserel,
 										NULL,	/* default pathtarget */
 										-1.0,	/* dummy */
-										arrow_fdw_enabled ? 1 : 0,	/* disabled_nodes */
+										arrow_fdw_enabled ? 0 : 1,	/* disabled_nodes */
 										-1.0,	/* dummy */
 										-1.0,	/* dummy */
 										NIL,	/* no pathkeys */
@@ -5051,11 +5095,11 @@ kds_arrow_fetch_tuple(TupleTableSlot *slot,
  */
 static ArrowFdwState *
 __arrowFdwExecInit(ScanState *ss,
+				   Relation frel,
 				   List *outer_quals,
 				   const Bitmapset *outer_refs,
-				   pgstromTaskState *pts)
+				   pgstromTaskScanState *ptss)
 {
-	Relation		frel = ss->ss_currentRelation;
 	TupleDesc		tupdesc = RelationGetDescr(frel);
 	ForeignTable   *ft = GetForeignTable(RelationGetRelid(frel));
 	Bitmapset	   *referenced = NULL;
@@ -5105,27 +5149,24 @@ __arrowFdwExecInit(ScanState *ss,
 		if (af_state)
 		{
 			rb_nrooms += list_length(af_state->rb_list);
-			if (pts)
+			if (ptss)
 			{
-				if ((pts->xpu_task_flags & DEVKIND__NVIDIA_GPU) != 0)
-				{
-					gpumask_t	__optimal_gpus = GetOptimalGpuForFile(fname);
+				gpumask_t	__optimal_gpus = GetOptimalGpuForFile(fname);
 
-					if (__optimal_gpus == INVALID_GPUMASK)
-						optimal_gpus = 0;
-					if (af_states_list == NIL)
-					{
-						optimal_gpus = __optimal_gpus;
-						if (optimal_gpus == 0)
-							__Debug("foreign-table='%s' arrow-file='%s' has no schedulable GPUs", RelationGetRelationName(frel), fname);
-					}
-					else
-					{
-						__optimal_gpus &= optimal_gpus;
-						if (optimal_gpus != __optimal_gpus)
-							__Debug("foreign-table='%s' arrow-file='%s' reduced GPUs-Set %08lx -> %08lx", RelationGetRelationName(frel), fname, optimal_gpus, __optimal_gpus);
-						optimal_gpus = __optimal_gpus;
-					}
+				if (__optimal_gpus == INVALID_GPUMASK)
+					__optimal_gpus = 0;
+				if (af_states_list == NIL)
+				{
+					optimal_gpus = __optimal_gpus;
+					if (optimal_gpus == 0)
+						__Debug("foreign-table='%s' arrow-file='%s' has no schedulable GPUs", RelationGetRelationName(frel), fname);
+				}
+				else
+				{
+					__optimal_gpus &= optimal_gpus;
+					if (optimal_gpus != __optimal_gpus)
+						__Debug("foreign-table='%s' arrow-file='%s' reduced GPUs-Set %08lx -> %08lx", RelationGetRelationName(frel), fname, optimal_gpus, __optimal_gpus);
+					optimal_gpus = __optimal_gpus;
 				}
 			}
 			af_states_list = lappend(af_states_list, af_state);
@@ -5160,43 +5201,26 @@ __arrowFdwExecInit(ScanState *ss,
 	}
 	Assert(rb_nrooms == rb_nitems);
 	arrow_state->rb_nitems = rb_nitems;
-
-	if (pts)
-	{
-		Assert((pts->xpu_task_flags & DEVKIND__NVIDIA_GPU) != 0);
-		if (optimal_gpus != 0)
-		{
-			pts->xpu_task_flags |= DEVTASK__USED_GPUDIRECT;
-			pts->optimal_gpus = optimal_gpus;
-		}
-		else
-		{
-			pts->optimal_gpus = GetSystemAvailableGpus();
-		}
-	}
+	if (ptss)
+		ptss->optimal_gpus = optimal_gpus;
 	return arrow_state;
 }
 
 /*
  * pgstromArrowFdwExecInit
  */
-bool
+void
 pgstromArrowFdwExecInit(pgstromTaskState *pts,
+						pgstromTaskScanState *ptss,
 						List *outer_quals,
 						const Bitmapset *outer_refs)
 {
-	Relation		frel = pts->css.ss.ss_currentRelation;
-	ArrowFdwState  *arrow_state = NULL;
-
-	if (RelationIsArrowFdw(frel))
-	{
-		arrow_state = __arrowFdwExecInit(&pts->css.ss,
-										 outer_quals,
-										 outer_refs,
-										 pts);
-	}
-	pts->arrow_state = arrow_state;
-	return (pts->arrow_state != NULL);
+	Assert(RelationIsArrowFdw(ptss->scan_rel));
+	ptss->arrow_state = __arrowFdwExecInit(&pts->css.ss,
+										   ptss->scan_rel,
+										   outer_quals,
+										   outer_refs,
+										   ptss);
 }
 
 /*
@@ -5216,6 +5240,7 @@ ArrowBeginForeignScan(ForeignScanState *node, int eflags)
 		referenced = bms_add_member(referenced, k);
 	}
 	node->fdw_state = __arrowFdwExecInit(&node->ss,
+										 node->ss.ss_currentRelation,
 										 fscan->scan.plan.qual,
 										 referenced,
 										 NULL);
@@ -5252,9 +5277,10 @@ retry:
  */
 XpuCommand *
 pgstromScanChunkArrowFdw(pgstromTaskState *pts,
+						 pgstromTaskScanState *ptss,
 						 struct iovec *xcmd_iov, int *xcmd_iovcnt)
 {
-	ArrowFdwState  *arrow_state = pts->arrow_state;
+	ArrowFdwState  *arrow_state = ptss->arrow_state;
 	LargeStringInfo	chunk_buffer = &arrow_state->chunk_buffer;
 	RecordBatchState *rb_state;
 	ArrowFileState *af_state;
@@ -5267,29 +5293,32 @@ pgstromScanChunkArrowFdw(pgstromTaskState *pts,
 	rb_state = __arrowFdwNextRecordBatch(arrow_state);
 	if (!rb_state)
 	{
-		pts->scan_done = true;
+		pts->curr_scan_rel++;
 		return NULL;
 	}
 	af_state = rb_state->af_state;
 
 	/* XpuCommand header */
+	kds_src_offset = offsetof(XpuCommand, u.task.data);
 	resetLargeStringInfo(chunk_buffer);
-	appendBinaryLargeStringInfo(chunk_buffer,
-								pts->xcmd_buf.data,
-								pts->xcmd_buf.len);
+	enlargeLargeStringInfo(chunk_buffer, kds_src_offset);
+	memset(chunk_buffer->data, 0, kds_src_offset);
+	chunk_buffer->len = kds_src_offset;
 	/* kds_src (arrow or parquet) */
-	kds_src_offset = chunk_buffer->len;
-	kds_src = __arrowFdwSetupKDSHead(pts->css.ss.ss_currentRelation,
+	kds_src = __arrowFdwSetupKDSHead(ptss->scan_rel,
 									 arrow_state->referenced,
 									 rb_state,
 									 chunk_buffer);
 	if (kds_src->format == KDS_FORMAT_ARROW)
 	{
 		/* related i/o vector */
-		strom_io_vector *iovec = arrowFdwSetupIOvector(rb_state,
-													   arrow_state->referenced,
-													   kds_src);
-		size_t		iovec_sz = offsetof(strom_io_vector, ioc[iovec->nr_chunks]);
+		strom_io_vector *iovec;
+		size_t		iovec_sz;
+
+		iovec = arrowFdwSetupIOvector(rb_state,
+									  arrow_state->referenced,
+									  kds_src);
+		iovec_sz = offsetof(strom_io_vector, ioc[iovec->nr_chunks]);
 		kds_src_iovec = appendBinaryLargeStringInfo(chunk_buffer,
 													iovec, iovec_sz);
 	}
@@ -5302,7 +5331,10 @@ pgstromScanChunkArrowFdw(pgstromTaskState *pts,
 	appendStringLargeStringInfo(chunk_buffer, af_state->filename);
 	/* assign offset of XpuCommand */
 	xcmd = (XpuCommand *)chunk_buffer->data;
+	xcmd->magic  = XpuCommandMagicNumber;
+	xcmd->tag    = XpuCommandTag__XpuTaskExec;
 	xcmd->length = chunk_buffer->len;
+	xcmd->u.task.scan_relidx      = ptss->scan_relidx;
 	xcmd->u.task.kds_src_pathname = kds_src_pathname;
 	xcmd->u.task.kds_src_iovec    = kds_src_iovec;
 	xcmd->u.task.kds_src_offset   = kds_src_offset;
@@ -5422,25 +5454,32 @@ ArrowIsForeignScanParallelSafe(PlannerInfo *root,
 /*
  * ArrowEstimateDSMForeignScan
  */
+Size
+pgstromArrowFdwEstimateDSM(ArrowFdwState *arrow_state)
+{
+	return MAXALIGN(sizeof(pgstromSharedScanState));
+}
+
 static Size
 ArrowEstimateDSMForeignScan(ForeignScanState *node,
 							ParallelContext *pcxt)
 {
-	return offsetof(pgstromSharedState, inners);
+	return pgstromArrowFdwEstimateDSM(node->fdw_state);
 }
 
 /*
  * ArrowInitializeDSMForeignScan
  */
-void
+Size
 pgstromArrowFdwInitDSM(ArrowFdwState *arrow_state,
-					   pgstromSharedState *ps_state)
+					   pgstromSharedScanState *psss)
 {
-	arrow_state->rbatch_index = &ps_state->arrow_rbatch_index;
-	arrow_state->rbatch_nload = &ps_state->arrow_rbatch_nload;
-	arrow_state->rbatch_nskip = &ps_state->arrow_rbatch_nskip;
-	arrow_state->nchunks_parquet_read = &ps_state->nchunks_parquet_read;
-	arrow_state->ncaches_parquet_load = &ps_state->ncaches_parquet_load;
+	arrow_state->rbatch_index = &psss->arrow_rbatch_index;
+	arrow_state->rbatch_nload = &psss->arrow_rbatch_nload;
+	arrow_state->rbatch_nskip = &psss->arrow_rbatch_nskip;
+	arrow_state->nchunks_parquet_read = &psss->nchunks_parquet_read;
+	arrow_state->ncaches_parquet_load = &psss->ncaches_parquet_load;
+	return pgstromArrowFdwEstimateDSM(arrow_state);
 }
 
 static void
@@ -5448,24 +5487,20 @@ ArrowInitializeDSMForeignScan(ForeignScanState *node,
                               ParallelContext *pcxt,
                               void *coordinate)
 {
-	pgstromSharedState *ps_state = (pgstromSharedState *)coordinate;
+	pgstromSharedScanState *psss = (pgstromSharedScanState *)coordinate;
 
-	memset(ps_state, 0, offsetof(pgstromSharedState, inners));
-	pgstromArrowFdwInitDSM(node->fdw_state, ps_state);
+	memset(psss, 0, sizeof(pgstromSharedScanState));
+	pgstromArrowFdwInitDSM(node->fdw_state, psss);
 }
 
 /*
  * ArrowInitializeWorkerForeignScan
  */
-void
+Size
 pgstromArrowFdwAttachDSM(ArrowFdwState *arrow_state,
-						 pgstromSharedState *ps_state)
+						 pgstromSharedScanState *psss)
 {
-	arrow_state->rbatch_index = &ps_state->arrow_rbatch_index;
-	arrow_state->rbatch_nload = &ps_state->arrow_rbatch_nload;
-	arrow_state->rbatch_nskip = &ps_state->arrow_rbatch_nskip;
-	arrow_state->nchunks_parquet_read = &ps_state->nchunks_parquet_read;
-	arrow_state->ncaches_parquet_load = &ps_state->ncaches_parquet_load;
+	return pgstromArrowFdwInitDSM(arrow_state, psss);
 }
 
 static void
@@ -5473,16 +5508,16 @@ ArrowInitializeWorkerForeignScan(ForeignScanState *node,
 								 shm_toc *toc,
 								 void *coordinate)
 {
-	pgstromSharedState *ps_state = (pgstromSharedState *)coordinate;
+	pgstromSharedScanState *psss = (pgstromSharedScanState *)coordinate;
 
-	pgstromArrowFdwAttachDSM(node->fdw_state, ps_state);
+	pgstromArrowFdwAttachDSM(node->fdw_state, psss);
 }
 
 /*
  * ArrowShutdownForeignScan
  */
-void
-pgstromArrowFdwShutdown(ArrowFdwState *arrow_state)
+Size
+pgstromArrowFdwShutdownDSM(ArrowFdwState *arrow_state)
 {
 	uint32		temp;
 
@@ -5505,12 +5540,14 @@ pgstromArrowFdwShutdown(ArrowFdwState *arrow_state)
 	temp = pg_atomic_read_u32(arrow_state->ncaches_parquet_load);
 	pg_atomic_write_u32(&arrow_state->__ncaches_parquet_load, temp);
 	arrow_state->ncaches_parquet_load = &arrow_state->__ncaches_parquet_load;
+
+	return pgstromArrowFdwEstimateDSM(arrow_state);
 }
 
 static void
 ArrowShutdownForeignScan(ForeignScanState *node)
 {
-	pgstromArrowFdwShutdown(node->fdw_state);
+	pgstromArrowFdwShutdownDSM(node->fdw_state);
 }
 
 #if 1
@@ -5556,199 +5593,203 @@ fixup_danger_expression_for_explain(Node *node, void *data)
 #endif
 
 /*
- * ArrowExplainForeignScan
+ * pgstromExplainRefColumns
  */
 void
-pgstromArrowFdwExplain(ScanState *ss,	/* Foreign or Custom */
-					   ArrowFdwState *arrow_state,
-					   ExplainState *es,
-					   List *dcontext)
+pgstromExplainRefColumns(Relation frel,
+						 const Bitmapset *outer_refs,
+						 ExplainState *es,
+						 List *dcontext)
 {
-	Relation	frel = ss->ss_currentRelation;
 	TupleDesc	tupdesc = RelationGetDescr(frel);
-	size_t	   *chunk_sz;
-	ListCell   *lc1, *lc2;
-	int			nfiles = 0;
-	int			fcount = 0;
-	int			i, j, k;
-	char		label[100];
-	StringInfoData	buf;
+	bool		wholerow;
+	StringInfoData buf;
 
 	initStringInfo(&buf);
-	/* shows referenced columns */
-	for (k = bms_next_member(arrow_state->referenced, -1);
-		 k >= 0;
-		 k = bms_next_member(arrow_state->referenced, k))
+	for (int j=0; j < tupdesc->natts; j++)
 	{
-		j = k + FirstLowInvalidHeapAttributeNumber;
+		int		k = j - FirstLowInvalidHeapAttributeNumber;
 
-		if (j > 0)
+		if (j == 0)
+			wholerow = bms_is_member(k, outer_refs);
+		else if (wholerow || bms_is_member(k, outer_refs))
 		{
 			Form_pg_attribute attr = TupleDescAttr(tupdesc, j-1);
-			const char	   *attname = NameStr(attr->attname);
+			const char *attname = NameStr(attr->attname);
 
+			if (attr->attisdropped)
+				continue;	/* should not happen */
 			if (buf.len > 0)
 				appendStringInfoString(&buf, ", ");
 			appendStringInfoString(&buf, quote_identifier(attname));
 		}
 	}
 	ExplainPropertyText("referenced", buf.data, es);
-
-	/* shows stats hint if any */
-	if (arrow_state->stats_hint)
-	{
-		arrowStatsHint *stats_hint = arrow_state->stats_hint;
-
-		resetStringInfo(&buf);
-		foreach (lc1, stats_hint->orig_quals)
-		{
-			Node   *qual = lfirst(lc1);
-			char   *temp;
-
-			/*
-			 * FIXME: deparse_context by ForeignScanState does not carry
-			 * 'ancestors' (probably, wrong API design...), so we cannot
-			 * deparse expressions for human readable form.
-			 * So, we replace Param expression for safety.
-			 */
-			if (IsA(ss, ForeignScanState))
-				qual = fixup_danger_expression_for_explain(qual, ss);
-			temp = deparse_expression(qual, dcontext, es->verbose, false);
-			if (buf.len > 0)
-				appendStringInfoString(&buf, ", ");
-			appendStringInfoString(&buf, temp);
-			pfree(temp);
-		}
-		if (es->analyze)
-			appendStringInfo(&buf, "  [loaded: %u, skipped: %u]",
-							 pg_atomic_read_u32(arrow_state->rbatch_nload),
-							 pg_atomic_read_u32(arrow_state->rbatch_nskip));
-		ExplainPropertyText("Stats-Hint", buf.data, es);
-	}
-
-	/* shows files on behalf of the foreign table */
-	chunk_sz = alloca(sizeof(size_t) * tupdesc->natts);
-	memset(chunk_sz, 0, sizeof(size_t) * tupdesc->natts);
-	nfiles = list_length(arrow_state->af_states_list);
-	foreach (lc1, arrow_state->af_states_list)
-	{
-		ArrowFileState *af_state = lfirst(lc1);
-		const char *filename = af_state->filename;
-		size_t		total_sz = af_state->stat_buf.st_size;
-		size_t		read_sz = 0;
-
-		foreach (lc2, af_state->rb_list)
-		{
-			RecordBatchState *rb_state = lfirst(lc2);
-
-			if (bms_is_member(-FirstLowInvalidHeapAttributeNumber,
-							  arrow_state->referenced))
-			{
-				/* whole-row reference */
-				read_sz += rb_state->rb_length;
-				continue;
-			}
-
-			for (k = bms_next_member(arrow_state->referenced, -1);
-				 k >= 0;
-				 k = bms_next_member(arrow_state->referenced, k))
-			{
-				j = k + FirstLowInvalidHeapAttributeNumber;
-				if (j <= 0 || j > af_state->ncols)
-					continue;
-				i = af_state->attrs[j-1].field_index;
-				if (i >= 0 && i < rb_state->nfields)
-				{
-					size_t	sz = rb_state->fields[i].disk_length;
-					read_sz += sz;
-					chunk_sz[j] += sz;
-				}
-			}
-		}
-
-		/* displays only basename if regression test mode */
-		if (pgstrom_regression_test_mode)
-			filename = basename(pstrdup(filename));
-
-		/* file size and read size */
-		if (!pgstrom_explain_developer_mode &&
-			nfiles >= 6 && fcount >= 2 && fcount < nfiles-2)
-		{
-			if (es->format == EXPLAIN_FORMAT_TEXT && fcount == 2)
-				ExplainPropertyText("    :\t\t\t", "\t\t\t:", es);
-		}
-		else if (es->format == EXPLAIN_FORMAT_TEXT)
-		{
-			resetStringInfo(&buf);
-			appendStringInfo(&buf, "%s (read: %s, size: %s)",
-							 filename,
-							 format_bytesz(read_sz),
-							 format_bytesz(total_sz));
-			snprintf(label, sizeof(label), "file%d", fcount);
-			ExplainPropertyText(label, buf.data, es);
-		}
-		else
-		{
-			snprintf(label, sizeof(label), "file%d", fcount);
-			ExplainPropertyText(label, filename, es);
-
-			snprintf(label, sizeof(label), "file%d-read", fcount);
-			ExplainPropertyText(label, format_bytesz(read_sz), es);
-
-			snprintf(label, sizeof(label), "file%d-size", fcount);
-			ExplainPropertyText(label, format_bytesz(total_sz), es);
-		}
-		fcount++;
-	}
-
-	/* read-size per column (only verbose mode) */
-	if (es->verbose && arrow_state->rb_nitems > 0 &&
-		!bms_is_member(-FirstLowInvalidHeapAttributeNumber,
-					   arrow_state->referenced))
-	{
-		resetStringInfo(&buf);
-		for (k = bms_next_member(arrow_state->referenced, -1);
-			 k >= 0;
-			 k = bms_next_member(arrow_state->referenced, k))
-		{
-			Form_pg_attribute attr;
-
-			j = k + FirstLowInvalidHeapAttributeNumber;
-			if (j < 0 || j >= tupdesc->natts)
-				continue;
-			attr = TupleDescAttr(tupdesc, j);
-			snprintf(label, sizeof(label), "  %s", NameStr(attr->attname));
-			ExplainPropertyText(label, format_bytesz(chunk_sz[j]), es);
-		}
-	}
-
-	/* parquet cache statistics */
-	if (es->analyze && !pgstrom_explain_developer_mode)
-	{
-		uint32_t	nchunks = pg_atomic_read_u32(arrow_state->nchunks_parquet_read);
-		uint32_t	ncaches = pg_atomic_read_u32(arrow_state->ncaches_parquet_load);
-
-		if (ncaches > 0)
-		{
-			resetStringInfo(&buf);
-			appendStringInfo(&buf, "cache-hit: %u of total %u chunks (cache ratio: %.2f%%)",
-							 ncaches, ncaches + nchunks,
-							 100.0 * (double)ncaches / (double)(ncaches + nchunks));
-			ExplainPropertyText("Parquet cache", buf.data, es);
-		}
-	}
 	pfree(buf.data);
 }
 
+/*
+ * pgstromArrowFdwExplainHint
+ */
+void
+pgstromExplainArrowFdwHint(ScanState *ss,	/* Foreign or Custom */
+						   ArrowFdwState *arrow_state,
+						   ExplainState *es,
+						   List *dcontext,
+						   int32_t scan_relidx)
+{
+	arrowStatsHint *stats_hint = arrow_state->stats_hint;
+	StringInfoData	buf;
+	char			label[100];
+	ListCell	   *lc;
+
+	if (!stats_hint)
+		return;
+	initStringInfo(&buf);
+	foreach (lc, stats_hint->orig_quals)
+	{
+		Node   *qual = lfirst(lc);
+		char   *temp;
+
+		/*
+		 * FIXME: deparse_context by ForeignScanState does not carry
+		 * 'ancestors' (probably, wrong API design...), so we cannot
+		 * deparse expressions for human readable form.
+		 * So, we replace Param expression for safety.
+		 */
+		if (IsA(ss, ForeignScanState))
+			qual = fixup_danger_expression_for_explain(qual, ss);
+		temp = deparse_expression(qual, dcontext, es->verbose, false);
+		if (buf.len > 0)
+			appendStringInfoString(&buf, ", ");
+		appendStringInfoString(&buf, temp);
+		pfree(temp);
+	}
+	if (es->analyze)
+		appendStringInfo(&buf, "  [loaded: %u, skipped: %u]",
+						 pg_atomic_read_u32(arrow_state->rbatch_nload),
+						 pg_atomic_read_u32(arrow_state->rbatch_nskip));
+	if (scan_relidx < 0)
+		strcpy(label, "Stats-Hint");
+	else
+		snprintf(label, sizeof(label), "stats-hint%d", scan_relidx);
+
+	ExplainPropertyText(label, buf.data, es);
+	pfree(buf.data);
+}
+
+/*
+ * pgstromExplainArrowFdwFiles
+ */
+void
+pgstromExplainArrowFdwFiles(ScanState *ss,
+							List *arrow_state_list,
+							ExplainState *es,
+							List *dcontext)
+{
+	Relation	base_rel = ss->ss_currentRelation;
+	TupleDesc	tupdesc = RelationGetDescr(base_rel);
+	int			total_nfiles = 0;
+	int			files_count = 0;
+	size_t	   *chunk_sz;
+	ListCell   *lc1, *lc2, *lc3;
+	char		label[100];
+	StringInfoData buf;
+
+	initStringInfo(&buf);
+	chunk_sz = alloca(sizeof(size_t) * tupdesc->natts);
+	memset(chunk_sz, 0, sizeof(size_t) * tupdesc->natts);
+	foreach (lc1, arrow_state_list)
+	{
+		ArrowFdwState *arrow_state = lfirst(lc1);
+
+		total_nfiles += list_length(arrow_state->af_states_list);
+	}
+	foreach (lc1, arrow_state_list)
+	{
+		ArrowFdwState *arrow_state = lfirst(lc1);
+
+		foreach (lc2, arrow_state->af_states_list)
+		{
+			ArrowFileState *af_state = lfirst(lc2);
+			const char *filename = af_state->filename;
+			size_t	total_sz = af_state->stat_buf.st_size;
+			size_t	read_sz = 0;
+
+			foreach (lc3, af_state->rb_list)
+			{
+				RecordBatchState *rb_state = lfirst(lc3);
+				bool	wholeref = false;
+
+				for (int j=0; j <= tupdesc->natts; j++)
+				{
+					int	k = j - FirstLowInvalidHeapAttributeNumber;
+
+					if (j==0 && bms_is_member(k, arrow_state->referenced))
+						wholeref = true;
+					else if (wholeref || bms_is_member(k, arrow_state->referenced))
+					{
+						int		f_index = af_state->attrs[j-1].field_index;
+						if (f_index >= 0 && f_index < rb_state->nfields)
+						{
+							size_t	sz = rb_state->fields[f_index].disk_length;
+							read_sz += sz;
+							chunk_sz[j] += sz;
+						}
+					}
+				}
+			}
+			/* displays only basename if regression test mode */
+			if (pgstrom_regression_test_mode)
+				filename = basename(pstrdup(filename));
+			/* file size and read size */
+			if (!pgstrom_explain_developer_mode &&
+				total_nfiles >= 6 &&
+				files_count >= 2 && files_count < total_nfiles-2)
+			{
+				if (es->format == EXPLAIN_FORMAT_TEXT && files_count == 2)
+					ExplainPropertyText("    :\t\t\t", "\t\t\t:", es);
+			}
+			else if (es->format == EXPLAIN_FORMAT_TEXT)
+			{
+				resetStringInfo(&buf);
+				appendStringInfo(&buf, "%s (read: %s, size: %s)",
+								 filename,
+								 format_bytesz(read_sz),
+								 format_bytesz(total_sz));
+				snprintf(label, sizeof(label), "file%d", files_count);
+				ExplainPropertyText(label, buf.data, es);
+			}
+			else
+			{
+				snprintf(label, sizeof(label), "file%d", files_count);
+				ExplainPropertyText(label, filename, es);
+				snprintf(label, sizeof(label), "file%d-read", files_count);
+				ExplainPropertyText(label, format_bytesz(read_sz), es);
+				snprintf(label, sizeof(label), "file%d-size", files_count);
+				ExplainPropertyText(label, format_bytesz(total_sz), es);
+			}
+			files_count++;
+		}
+	}
+}
+
+/*
+ * ArrowExplainForeignScan
+ */
 static void
 ArrowExplainForeignScan(ForeignScanState *node, ExplainState *es)
 {
-	List		   *dcontext;
+	Relation	frel = node->ss.ss_currentRelation;
+	ArrowFdwState *arrow_state = node->fdw_state;
+	List	   *dcontext;
 
 	dcontext = set_deparse_context_plan(es->deparse_cxt,
 										node->ss.ps.plan,
 										NULL);
-	pgstromArrowFdwExplain(&node->ss, node->fdw_state, es, dcontext);
+	pgstromExplainRefColumns(frel, arrow_state->referenced, es, dcontext);
+	pgstromExplainArrowFdwHint(&node->ss, arrow_state, es, dcontext, -1);
+	pgstromExplainArrowFdwFiles(&node->ss, list_make1(arrow_state), es, dcontext);
 }
 
 /*

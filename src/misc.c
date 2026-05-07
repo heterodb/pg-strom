@@ -107,6 +107,7 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 	List	   *exprs = NIL;
 	List	   *kvars_deflist_privs = NIL;
 	List	   *kvars_deflist_exprs = NIL;
+	List	   *scan_rels_list = NIL;
 	ListCell   *lc;
 
 	privs = lappend(privs, makeInteger(pp_info->xpu_task_flags));
@@ -114,8 +115,9 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 	privs = lappend(privs, bms_to_pglist(pp_info->outer_refs));
 	exprs = lappend(exprs, pp_info->used_params);
 	privs = lappend(privs, pp_info->host_quals);
-	privs = lappend(privs, makeInteger(pp_info->scan_relid));
+	privs = lappend(privs, makeInteger(pp_info->base_relid));
 	exprs = lappend(exprs, pp_info->scan_quals);
+	privs = lappend(privs, __makeFloat(pp_info->scan_npages));
 	privs = lappend(privs, __makeFloat(pp_info->scan_tuples));
 	privs = lappend(privs, __makeFloat(pp_info->scan_nrows));
 	privs = lappend(privs, makeInteger(pp_info->parallel_nworkers));
@@ -125,10 +127,6 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 	privs = lappend(privs, __makeFloat(pp_info->run_cost));
 	privs = lappend(privs, __makeFloat(pp_info->final_cost));
 	privs = lappend(privs, __makeFloat(pp_info->final_nrows));
-	/* bin-index support */
-	privs = lappend(privs, makeInteger(pp_info->brin_index_oid));
-	privs = lappend(privs, pp_info->brin_index_conds);
-	privs = lappend(privs, pp_info->brin_index_quals);
 	/* XPU code */
 	privs = lappend(privs, __makeByteaConst(pp_info->kexp_load_vars_packed));
 	privs = lappend(privs, __makeByteaConst(pp_info->kexp_move_vars_packed));
@@ -175,10 +173,24 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 	exprs = lappend(exprs, pp_info->projection_hashkeys);
 	privs = lappend(privs, makeInteger(pp_info->select_into_relid));
 	privs = lappend(privs, pp_info->select_into_proj);
+	/* scan relations */
+	foreach (lc, pp_info->scan_rels_list)
+	{
+		pgstromPlanScanInfo *pp_scan = lfirst(lc);
+		List   *__privs = NIL;
+
+		__privs = lappend(__privs, makeInteger(pp_scan->scan_relid));
+		__privs = lappend(__privs, __makeFloat(pp_scan->plan_ntuples_raw));
+		__privs = lappend(__privs, __makeFloat(pp_scan->plan_ntuples_in));
+		__privs = lappend(__privs, makeInteger(pp_scan->brin_oid));
+		__privs = lappend(__privs, pp_scan->brin_conds);
+		__privs = lappend(__privs, pp_scan->brin_quals);
+		scan_rels_list = lappend(scan_rels_list, __privs);
+	}
+	privs = lappend(privs, scan_rels_list);
 	/* inner relations */
-	privs = lappend(privs, makeInteger(pp_info->sibling_param_id));
-	privs = lappend(privs, makeInteger(pp_info->num_rels));
-	for (int i=0; i < pp_info->num_rels; i++)
+	privs = lappend(privs, makeInteger(pp_info->num_inner_rels));
+	for (int i=0; i < pp_info->num_inner_rels; i++)
 	{
 		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[i];
 		List   *__exprs = NIL;
@@ -220,8 +232,10 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	List	   *exprs = cscan->custom_exprs;
 	int			pindex = 0;
 	int			eindex = 0;
+	int			rtoffset = 0;
 	List	   *kvars_deflist_privs;
 	List	   *kvars_deflist_exprs;
+	List	   *scan_rels_list;
 	ListCell   *lc1, *lc2;
 
 	memset(&pp_data, 0, sizeof(pgstromPlanInfo));
@@ -231,8 +245,21 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	pp_data.outer_refs   = bms_from_pglist(list_nth(privs, pindex++));
 	pp_data.used_params  = list_nth(exprs, eindex++);
 	pp_data.host_quals   = list_nth(privs, pindex++);
-	pp_data.scan_relid   = intVal(list_nth(privs, pindex++));
+	pp_data.base_relid   = intVal(list_nth(privs, pindex++));
+	/*
+	 * setrefs.c may rewrite scanrelid (which is originally the same value as
+	 * pp_info->base_relid) when finalizing plan references.
+	 * However, scan_relids cached in the private state is not adjusted by
+	 * setrefs.c, so we have to apply the same fixup here before using it.
+	 */
+	Assert(cscan->scan.scanrelid != 0);
+	if (pp_data.base_relid != cscan->scan.scanrelid)
+	{
+		Assert(pp_data.base_relid < cscan->scan.scanrelid);
+		rtoffset = (cscan->scan.scanrelid - pp_data.base_relid);
+	}
 	pp_data.scan_quals   = list_nth(exprs, eindex++);
+	pp_data.scan_npages  = floatVal(list_nth(privs, pindex++));
 	pp_data.scan_tuples  = floatVal(list_nth(privs, pindex++));
 	pp_data.scan_nrows   = floatVal(list_nth(privs, pindex++));
 	pp_data.parallel_nworkers = intVal(list_nth(privs, pindex++));
@@ -242,10 +269,6 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	pp_data.run_cost     = floatVal(list_nth(privs, pindex++));
 	pp_data.final_cost   = floatVal(list_nth(privs, pindex++));
 	pp_data.final_nrows  = floatVal(list_nth(privs, pindex++));
-	/* brin-index support */
-	pp_data.brin_index_oid = intVal(list_nth(privs, pindex++));
-	pp_data.brin_index_conds = list_nth(privs, pindex++);
-	pp_data.brin_index_quals = list_nth(privs, pindex++);
 	/* XPU code */
 	pp_data.kexp_load_vars_packed  = __getByteaConst(list_nth(privs, pindex++));
 	pp_data.kexp_move_vars_packed  = __getByteaConst(list_nth(privs, pindex++));
@@ -291,12 +314,28 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	pp_data.projection_hashkeys = list_nth(exprs, eindex++);
 	pp_data.select_into_relid = intVal(list_nth(privs, pindex++));
 	pp_data.select_into_proj = list_nth(privs, pindex++);
+	/* scan relations */
+	scan_rels_list = list_nth(privs, pindex++);
+	foreach (lc1, scan_rels_list)
+	{
+		pgstromPlanScanInfo *pp_scan = palloc0(sizeof(pgstromPlanScanInfo));
+		List   *__privs = lfirst(lc1);
+		int		__pindex = 0;
+
+		pp_scan->scan_relid       = intVal(list_nth(__privs, __pindex++)) + rtoffset;
+		pp_scan->plan_ntuples_raw = floatVal(list_nth(__privs, __pindex++));
+		pp_scan->plan_ntuples_in  = floatVal(list_nth(__privs, __pindex++));
+		pp_scan->brin_oid         = intVal(list_nth(__privs, __pindex++));
+		pp_scan->brin_conds       = list_nth(__privs, __pindex++);
+		pp_scan->brin_quals       = list_nth(__privs, __pindex++);
+
+		pp_data.scan_rels_list = lappend(pp_data.scan_rels_list, pp_scan);
+	}
 	/* inner relations */
-	pp_data.sibling_param_id = intVal(list_nth(privs, pindex++));
-	pp_data.num_rels = intVal(list_nth(privs, pindex++));
-	pp_info = palloc0(offsetof(pgstromPlanInfo, inners[pp_data.num_rels]));
+	pp_data.num_inner_rels = intVal(list_nth(privs, pindex++));
+	pp_info = palloc0(offsetof(pgstromPlanInfo, inners[pp_data.num_inner_rels]));
 	memcpy(pp_info, &pp_data, offsetof(pgstromPlanInfo, inners));
-	for (int i=0; i < pp_info->num_rels; i++)
+	for (int i=0; i < pp_info->num_inner_rels; i++)
 	{
 		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[i];
 		List   *__exprs = list_nth(exprs, eindex++);
@@ -332,19 +371,18 @@ copy_pgstrom_plan_info(const pgstromPlanInfo *pp_orig)
 {
 	pgstromPlanInfo *pp_dest;
 	List	   *kvars_deflist = NIL;
+	List	   *scan_rels_list = NIL;
 	ListCell   *lc;
 
 	/*
 	 * NOTE: we add one pgstromPlanInnerInfo margin to be used for GpuJoin.
 	 */
-	pp_dest = palloc0(offsetof(pgstromPlanInfo, inners[pp_orig->num_rels+1]));
+	pp_dest = palloc0(offsetof(pgstromPlanInfo, inners[pp_orig->num_inner_rels+1]));
 	memcpy(pp_dest, pp_orig, offsetof(pgstromPlanInfo,
-									  inners[pp_orig->num_rels]));
+									  inners[pp_orig->num_inner_rels]));
 	pp_dest->used_params      = list_copy(pp_dest->used_params);
 	pp_dest->host_quals       = copyObject(pp_dest->host_quals);
 	pp_dest->scan_quals       = copyObject(pp_dest->scan_quals);
-	pp_dest->brin_index_conds = copyObject(pp_dest->brin_index_conds);
-	pp_dest->brin_index_quals = copyObject(pp_dest->brin_index_quals);
 	foreach (lc, pp_orig->kvars_deflist)
 	{
 		codegen_kvar_defitem *kvdef_orig = lfirst(lc);
@@ -358,7 +396,15 @@ copy_pgstrom_plan_info(const pgstromPlanInfo *pp_orig)
 	pp_dest->groupby_actions  = list_copy(pp_dest->groupby_actions);
 	pp_dest->groupby_typmods  = list_copy(pp_dest->groupby_typmods);
 	pp_dest->projection_hashkeys = copyObject(pp_dest->projection_hashkeys);
-	for (int j=0; j < pp_orig->num_rels; j++)
+	foreach (lc, pp_orig->scan_rels_list)
+	{
+		pgstromPlanScanInfo *pp_scan;
+		pp_scan = pmemdup(lfirst(lc), sizeof(pgstromPlanScanInfo));
+		scan_rels_list = lappend(scan_rels_list, pp_scan);
+	}
+	pp_dest->scan_rels_list = scan_rels_list;
+
+	for (int j=0; j < pp_orig->num_inner_rels; j++)
 	{
 		pgstromPlanInnerInfo *pp_inner = &pp_dest->inners[j];
 
@@ -426,83 +472,6 @@ fixup_scanstate_quals(ScanState *ss, List *quals)
 		return (List *)__fixup_customscan_expressions_walker((Node *)quals,
 															 ss->ps.plan);
 	return quals;
-}
-
-/*
- * fixup_expression_by_partition_leaf
- */
-List *
-fixup_expression_by_partition_leaf(PlannerInfo *root,
-								   Relids leaf_relids,
-								   List *clauses)
-{
-	AppendRelInfo **appinfos;
-	Relids		next_relids = NULL;
-	int			i, nitems = 0;
-
-	if (!root->append_rel_array)
-		return clauses;		/* shortcut */
-
-	appinfos = alloca(sizeof(AppendRelInfo *) * root->simple_rel_array_size);
-	for (i = bms_next_member(leaf_relids, -1);
-		 i >= 0;
-		 i = bms_next_member(leaf_relids, i))
-	{
-		AppendRelInfo *appinfo = root->append_rel_array[i];
-
-		if (appinfo)
-		{
-			Assert(appinfo->child_relid == i);
-			appinfos[nitems++] = appinfo;
-			next_relids = bms_add_member(next_relids, appinfo->parent_relid);
-		}
-	}
-
-	if (nitems > 0)
-	{
-		clauses = fixup_expression_by_partition_leaf(root,
-													 next_relids,
-													 clauses);
-		clauses = (List *)adjust_appendrel_attrs(root,
-												 (Node *)clauses,
-												 nitems,
-												 appinfos);
-	}
-	return clauses;
-}
-
-/*
- * fixup_relids_by_partition_leaf
- */
-Relids
-fixup_relids_by_partition_leaf(PlannerInfo *root,
-							   const Relids leaf_relids,
-							   const Relids parent_relids)
-{
-	Relids	results = NULL;
-	int		curr;
-
-	for (curr = bms_next_member(leaf_relids, -1);
-		 curr >= 0;
-		 curr = bms_next_member(leaf_relids, curr))
-	{
-		int		relid = curr;
-	again:
-		for (int k=0; k < root->simple_rel_array_size; k++)
-		{
-			AppendRelInfo *ap_info = root->append_rel_array[k];
-
-			if (ap_info && ap_info->child_relid == relid)
-			{
-				if (ap_info->parent_relid == relid)
-					break;
-				relid = ap_info->parent_relid;
-				goto again;
-			}
-		}
-		results = bms_add_member(results, relid);
-	}
-	return results;
 }
 
 /*
@@ -2575,4 +2544,45 @@ __munmapShmem(void *mmap_addr)
 	}
 	elog(ERROR, "it looks addr=%p not memory-mapped", mmap_addr);
 	return false;
+}
+
+/* ----------------------------------------------------------------
+ *
+ * SQL functions exist in the previous release (not supported now)
+ *
+ * ----------------------------------------------------------------
+ */
+PG_FUNCTION_INFO_V1(pgstrom_gpucache_sync_trigger);
+PUBLIC_FUNCTION(Datum)
+pgstrom_gpucache_sync_trigger(PG_FUNCTION_ARGS)
+{
+	elog(ERROR, "pgstrom.gpucache_sync_trigger is no longer supported");
+}
+
+PG_FUNCTION_INFO_V1(pgstrom_gpucache_apply_redo);
+PUBLIC_FUNCTION(Datum)
+pgstrom_gpucache_apply_redo(PG_FUNCTION_ARGS)
+{
+	elog(ERROR, "pgstrom.gpucache_apply_redo is no longer supported");
+}
+
+PG_FUNCTION_INFO_V1(pgstrom_gpucache_compaction);
+PUBLIC_FUNCTION(Datum)
+pgstrom_gpucache_compaction(PG_FUNCTION_ARGS)
+{
+	elog(ERROR, "pgstrom.gpucache_compaction is no longer supported");
+}
+
+PG_FUNCTION_INFO_V1(pgstrom_gpucache_recovery);
+PUBLIC_FUNCTION(Datum)
+pgstrom_gpucache_recovery(PG_FUNCTION_ARGS)
+{
+	elog(ERROR, "pgstrom.gpucache_recovery is no longer supported");
+}
+
+PG_FUNCTION_INFO_V1(pgstrom_gpucache_info);
+PUBLIC_FUNCTION(Datum)
+pgstrom_gpucache_info(PG_FUNCTION_ARGS)
+{
+	elog(ERROR, "pgstrom.gpucache_info is no longer supported");
 }

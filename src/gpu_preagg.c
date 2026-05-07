@@ -1496,7 +1496,6 @@ typedef struct
 	AggClauseCosts	final_agg_clause_costs;
 	QualCost		final_proj_clause_costs;
 	pgstromPlanInfo *pp_info;
-	int				sibling_param_id;
 	List		   *inner_paths_list;
 	List		   *inner_target_list;
 	List		   *groupby_keys;
@@ -1637,7 +1636,7 @@ make_alternative_aggref(xpugroupby_build_path_context *con,
 			expr = make_expr_typecast(expr, dest_oid);
 		if (!pgstrom_xpu_expression(expr,
 									pp_info->xpu_task_flags,
-									pp_info->scan_relid,
+									pp_info->base_relid,
 									con->inner_target_list,
 									NULL))
 		{
@@ -1655,7 +1654,7 @@ make_alternative_aggref(xpugroupby_build_path_context *con,
 	{
 		if (!pgstrom_xpu_expression(aggref->aggfilter,
 									pp_info->xpu_task_flags,
-									pp_info->scan_relid,
+									pp_info->base_relid,
 									con->inner_target_list,
 									NULL))
 		{
@@ -1962,7 +1961,7 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 			/* grouping-key must be device executable. */
 			if (!pgstrom_xpu_expression(expr,
 										pp_info->xpu_task_flags,
-										pp_info->scan_relid,
+										pp_info->base_relid,
 										con->inner_target_list,
 										NULL))
 			{
@@ -1980,7 +1979,7 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 			if (!IsA(expr, Var) &&
 				!pgstrom_xpu_expression(expr,
 										pp_info->xpu_task_flags,
-										pp_info->scan_relid,
+										pp_info->base_relid,
 										con->inner_target_list,
 										NULL))
 			{
@@ -2155,7 +2154,6 @@ __buildXpuPreAggCustomPath(xpugroupby_build_path_context *con)
 		pp_info->xpu_task_flags |= (DEVTASK__PREAGG | DEVTASK__PINNED_HASH_RESULTS);
 	else
 		pp_info->xpu_task_flags |= (DEVTASK__PREAGG | DEVTASK__PINNED_ROW_RESULTS);
-	pp_info->sibling_param_id = con->sibling_param_id;
 	/* TODO: more precise cost factors */
 	pp_info->final_nrows = con->num_groups;
 
@@ -2364,7 +2362,7 @@ consider_sorted_groupby_path(PlannerInfo *root,
 
 						if (!pgstrom_xpu_expression((Expr *)f_expr,
 													pp_info->xpu_task_flags,
-													pp_info->scan_relid,
+													pp_info->base_relid,
 													inner_target_list,
 													NULL))
 						{
@@ -2413,19 +2411,19 @@ consider_sorted_groupby_path(PlannerInfo *root,
 }
 
 /*
- * __try_add_xpupreagg_normal_path
+ * tryAddSimpleGpuPreAggPath
  */
 static void
-__try_add_xpupreagg_normal_path(PlannerInfo *root,
-								UpperRelationKind upper_stage,
-								RelOptInfo *input_rel,
-								RelOptInfo *group_rel,
-								GroupPathExtraData *gp_extra,
-								uint32_t xpu_task_flags,
-								bool be_parallel,
-								pgstromOuterPathLeafInfo *op_leaf)
+tryAddSimpleGpuPreAggPath(PlannerInfo *root,
+						  UpperRelationKind upper_stage,
+						  RelOptInfo *group_rel,
+						  RelOptInfo *input_rel,
+						  CustomPath *input_path,
+						  GroupPathExtraData *gp_extra,
+						  bool be_parallel)
 {
 	xpugroupby_build_path_context con;
+	pgstromPlanInfo *pp_input = linitial(input_path->custom_private);
 	Query	   *parse = root->parse;
 	List	   *inner_target_list = NIL;
 	ListCell   *lc;
@@ -2440,7 +2438,7 @@ __try_add_xpupreagg_normal_path(PlannerInfo *root,
 		groupExprs = get_sortgrouplist_exprs(parse->groupClause,
 											 gp_extra->targetList);
 		num_groups = estimate_num_groups(root, groupExprs,
-										 op_leaf->leaf_nrows,
+										 pp_input->final_nrows,
 										 NULL, NULL);
 	}
 	else if (parse->distinctClause)
@@ -2450,11 +2448,11 @@ __try_add_xpupreagg_normal_path(PlannerInfo *root,
 		distinctExprs = get_sortgrouplist_exprs(parse->distinctClause,
 												parse->targetList);
 		num_groups = estimate_num_groups(root, distinctExprs,
-										 op_leaf->leaf_nrows,
+										 pp_input->final_nrows,
 										 NULL, NULL);
 	}
 	/* setup inner_target_list */
-	foreach (lc, op_leaf->inner_paths_list)
+	foreach (lc, input_path->custom_paths)
 	{
 		Path	   *i_path = lfirst(lc);
 		inner_target_list = lappend(inner_target_list, i_path->pathtarget);
@@ -2466,16 +2464,15 @@ __try_add_xpupreagg_normal_path(PlannerInfo *root,
 	con.upper_stage    = upper_stage;
 	con.group_rel      = group_rel;
 	con.input_rel      = input_rel;
-	con.param_info     = op_leaf->leaf_param;
+	con.param_info     = input_path->path.param_info;
 	con.num_groups     = num_groups;
 	con.try_parallel   = be_parallel;
 	con.target_upper   = root->upper_targets[upper_stage];
 	con.target_partial = create_empty_pathtarget();
 	con.target_agg_final = create_empty_pathtarget();
 	con.target_proj_final = create_empty_pathtarget();
-	con.pp_info        = op_leaf->pp_info;
-	con.sibling_param_id = -1;
-	con.inner_paths_list = op_leaf->inner_paths_list;
+	con.pp_info        = pp_input;
+	con.inner_paths_list = input_path->custom_paths;
 	con.inner_target_list = inner_target_list;
 	/* construction of the target-list for each level */
 	if (!xpugroupby_build_path_target(&con))
@@ -2493,9 +2490,7 @@ __try_add_xpupreagg_normal_path(PlannerInfo *root,
 	 * can ignore this overhead.
 	 * Elsewhere, no CPU-based Agg-node is needed.
 	 */
-	if (pgstrom_cpu_fallback_elevel < ERROR ||
-		parse->groupClause == NIL ||
-		(xpu_task_flags & DEVKIND__ANY) != DEVKIND__NVIDIA_GPU)
+	if (pgstrom_cpu_fallback_elevel < ERROR || parse->groupClause == NIL)
 	{
 		Path   *__path = &cpath->path;
 
@@ -2594,137 +2589,6 @@ __try_add_xpupreagg_normal_path(PlannerInfo *root,
 	}
 }
 
-/*
- * __try_add_xpupreagg_partition_path
- */
-static void
-__try_add_xpupreagg_partition_path(PlannerInfo *root,
-								   UpperRelationKind upper_stage,
-								   RelOptInfo *input_rel,
-								   RelOptInfo *group_rel,
-								   GroupPathExtraData *gp_extra,
-								   uint32_t xpu_task_flags,
-								   bool try_parallel_path,
-								   int sibling_param_id,
-								   List *op_leaf_list)
-{
-	xpugroupby_build_path_context con;
-	Query	   *parse = root->parse;
-	List	   *preagg_cpath_list = NIL;
-	ListCell   *lc1, *lc2;
-	PathTarget *part_target = NULL;
-	Path	   *part_path;
-	int			parallel_nworkers = 0;
-	double		total_nrows = 0.0;
-
-	foreach (lc1, op_leaf_list)
-	{
-		pgstromOuterPathLeafInfo *op_leaf = lfirst(lc1);
-		double		num_groups = 1.0;
-		List	   *inner_target_list = NIL;
-		CustomPath *cpath;
-
-		/* estimate number of groups */
-		if (parse->groupClause)
-		{
-			List   *groupExprs;
-
-			groupExprs = get_sortgrouplist_exprs(parse->groupClause,
-												 gp_extra->targetList);
-			num_groups = estimate_num_groups(root, groupExprs,
-											 op_leaf->leaf_nrows,
-											 NULL, NULL);
-		}
-		else if (parse->distinctClause)
-		{
-			List   *distinctExprs;
-
-			distinctExprs = get_sortgrouplist_exprs(parse->groupClause,
-													parse->targetList);
-			num_groups = estimate_num_groups(root, distinctExprs,
-											 op_leaf->leaf_nrows,
-											 NULL, NULL);
-		}
-		/* setup inner_target_list */
-		foreach (lc2, op_leaf->inner_paths_list)
-		{
-			Path	   *i_path = lfirst(lc2);
-			inner_target_list = lappend(inner_target_list, i_path->pathtarget);
-		}
-		/* setup context */
-		memset(&con, 0, sizeof(con));
-		con.device_executable = true;
-		con.root           = root;
-		con.upper_stage    = upper_stage;
-		con.group_rel      = group_rel;
-		con.input_rel      = op_leaf->leaf_rel;
-		con.param_info     = op_leaf->leaf_param;
-		con.num_groups     = num_groups;
-		con.try_parallel   = try_parallel_path;
-		con.target_upper   = root->upper_targets[upper_stage];
-		con.target_partial = create_empty_pathtarget();
-		con.target_agg_final = create_empty_pathtarget();
-		con.target_proj_final = create_empty_pathtarget();
-		con.pp_info        = op_leaf->pp_info;
-		con.sibling_param_id = sibling_param_id;
-		con.inner_paths_list = op_leaf->inner_paths_list;
-		con.inner_target_list = inner_target_list;
-		/* construction of the target-list for each level */
-		if (!xpugroupby_build_path_target(&con))
-			return;
-		/* preserve */
-		if (!part_target)
-			part_target = copy_pathtarget(con.target_partial);
-		/* fixup references to the leaf relations */
-		con.target_partial->exprs =
-			fixup_expression_by_partition_leaf(root,
-											   op_leaf->leaf_rel->relids,
-											   con.target_partial->exprs);
-		cpath = __buildXpuPreAggCustomPath(&con);
-
-		parallel_nworkers += cpath->path.parallel_workers;
-		total_nrows       += cpath->path.rows;
-
-		preagg_cpath_list = lappend(preagg_cpath_list, cpath);
-	}
-
-	if (list_length(preagg_cpath_list) == 0)
-		return;
-	/* adjust number of workers */
-	if (try_parallel_path)
-	{
-		if (parallel_nworkers > max_parallel_workers_per_gather)
-			parallel_nworkers = max_parallel_workers_per_gather;
-		if (parallel_nworkers == 0)
-			return;
-	}
-	/* Append path to consolidate partition leafs */
-	part_path = (Path *)
-		create_append_path(root,
-						   input_rel,
-						   (try_parallel_path ? NIL : preagg_cpath_list),
-						   (try_parallel_path ? preagg_cpath_list : NIL),
-						   NIL,
-						   NULL,
-						   (try_parallel_path ? parallel_nworkers : 0),
-						   try_parallel_path,
-						   total_nrows);
-	part_path->pathtarget = part_target;
-
-	/* attach Gather path if parallel-aware */
-	if (try_parallel_path)
-	{
-		part_path = (Path *)
-			create_gather_path(root,
-							   group_rel,
-							   part_path,
-							   part_path->pathtarget,
-							   NULL,
-							   &total_nrows);
-	}
-	try_add_final_groupby_paths(&con, part_path);
-}
-
 static void
 tryGpuPreAggAddCustomPath(PlannerInfo *root,
 						  UpperRelationKind upper_stage,
@@ -2733,7 +2597,6 @@ tryGpuPreAggAddCustomPath(PlannerInfo *root,
 						  void *extra)
 {
 	Query	   *parse = root->parse;
-	uint32_t	xpu_task_flags = TASK_KIND__GPUPREAGG;
 
 	/* quick bailout if not supported */
 	if (parse->groupingSets != NIL)
@@ -2758,132 +2621,161 @@ tryGpuPreAggAddCustomPath(PlannerInfo *root,
 
 	for (int try_parallel=0; try_parallel < 2; try_parallel++)
 	{
-		pgstromOuterPathLeafInfo *op_leaf;
+		CustomPath *input_path;
 
+		input_path = pgstrom_find_custom_path(root,
+											  input_rel,
+											  try_parallel > 0);
+		if (!input_path)
+			continue;
 		/*
-		 * Try normal XpuPreAgg Path
+		 * unless pg_strom.enable_partitionwise_gpupreagg is enabled,
+		 * we don't make a path for partitioned outer relation.
 		 */
-		op_leaf = pgstrom_find_op_normal(root,
-										 input_rel,
-										 xpu_task_flags,
-										 (try_parallel > 0));
-		if (op_leaf)
+		if (!pgstrom_enable_partitionwise_gpupreagg)
 		{
-			__try_add_xpupreagg_normal_path(root,
-											upper_stage,
-											input_rel,
-											group_rel,
-											extra,
-											xpu_task_flags,
-											(try_parallel > 0),
-											op_leaf);
+			pgstromPlanInfo *pp_input = linitial(input_path->custom_private);
+			if ((pp_input->xpu_task_flags & DEVTASK__IS_PARTITION_WISE) != 0)
+				continue;
 		}
-
-		/*
-		 * Try partition-wise XpuPreAgg Path
-		 */
-		if (pgstrom_enable_partitionwise_gpupreagg)
-		{
-			List   *op_leaf_list;
-			bool	identical_inners;
-			int		sibling_param_id = -1;
-
-			op_leaf_list = pgstrom_find_op_leafs(root,
-												 input_rel,
-												 xpu_task_flags,
-												 (try_parallel > 0),
-												 &identical_inners);
-			if (identical_inners)
-			{
-				PlannerGlobal  *glob = root->glob;
-
-				sibling_param_id = list_length(glob->paramExecTypes);
-				glob->paramExecTypes = lappend_oid(glob->paramExecTypes,
-												   INTERNALOID);
-			}
-			if (op_leaf_list != NIL)
-				__try_add_xpupreagg_partition_path(root,
-												   upper_stage,
-												   input_rel,
-												   group_rel,
-												   extra,
-												   xpu_task_flags,
-												   (try_parallel > 0),
-												   sibling_param_id,
-												   op_leaf_list);
-		}
+		/* try add GPU-PreAgg path */
+		tryAddSimpleGpuPreAggPath(root,
+								  upper_stage,
+								  group_rel,
+								  input_rel,
+								  input_path,
+								  extra,
+								  try_parallel > 0);
 	}
+}
+
+/*
+ * __duplicateWindowAggPath
+ */
+static Path *
+__duplicateWindowAggPath(PlannerInfo *root,
+						 WindowAggPath *wpath,
+						 Path *subpath)
+{
+	Query		   *parse = root->parse;
+	WindowClause   *__wc = wpath->winclause;
+	WindowFuncLists *wflists
+		= find_window_functions((Node *)root->processed_tlist,
+								list_length(parse->windowClause));
+	return (Path *)create_windowagg_path(root,
+										 wpath->path.parent,
+										 subpath,
+										 wpath->path.pathtarget,
+										 wflists->windowFuncs[__wc->winref],
+										 wpath->runCondition,
+										 __wc,
+										 wpath->qual,
+										 wpath->topwindow);
 }
 
 /*
  * tryGpuSortWithLimitPath
  */
 static Path *
-__tryGpuSortWithLimitPath(PlannerInfo *root, Path *path, uint32_t limit_count)
+tryGpuSortWithLimitPath(PlannerInfo *root,
+						FinalPathExtraData *extra,
+						Path *path,
+						bool be_parallel)
 {
 	Path   *subpath;
 
 	switch (path->type)
 	{
-		case T_GatherPath:
-			subpath = ((GatherPath *)path)->subpath;
-			subpath = __tryGpuSortWithLimitPath(root, subpath, limit_count);
+		case T_LimitPath: {
+			LimitPath  *lpath = (LimitPath *)lpath;
+
+			if (extra->limit_needed &&
+				extra->limit_tuples > 0.0)
+			{
+				subpath = tryGpuSortWithLimitPath(root, extra, lpath->subpath, be_parallel);
+				if (subpath)
+				{
+					return (Path *)create_limit_path(root,
+													 lpath->path.parent,
+													 subpath,
+													 lpath->limitOffset,
+													 lpath->limitCount,
+													 lpath->limitOption,
+													 extra->offset_est,
+													 extra->count_est);
+				}
+			}
+			break;
+		}
+		case T_GatherPath: {
+			GatherPath *gpath = (GatherPath *)path;
+
+			subpath = tryGpuSortWithLimitPath(root, extra, gpath->subpath, true);
 			if (subpath)
 			{
-				GatherPath *gpath
+				GatherPath *result
 					= create_gather_path(root,
 										 path->parent,
 										 subpath,
 										 path->pathtarget,
 										 NULL,
 										 &subpath->rows);
-				gpath->path.pathkeys = path->pathkeys;
-				//elog(INFO, "Gpath startup=%f total=%f rows=%.0f", gpath->path.startup_cost, gpath->path.total_cost, gpath->path.rows);
-				return &gpath->path;
+				result->path.pathkeys = path->pathkeys;
+				return &result->path;
 			}
 			break;
+		}
+		case T_GatherMergePath: {
+			GatherMergePath *gmpath = (GatherMergePath *)path;
 
-		case T_GatherMergePath:
-			subpath = ((GatherMergePath *)path)->subpath;
-			subpath = __tryGpuSortWithLimitPath(root, subpath, limit_count);
+			subpath = tryGpuSortWithLimitPath(root, extra, gmpath->subpath, true);
 			if (subpath)
 			{
-				GatherPath *gpath
+				GatherPath *result
 					= create_gather_path(root,
 										 path->parent,
 										 subpath,
 										 path->pathtarget,
 										 NULL,
 										 &subpath->rows);
-				gpath->path.pathkeys = path->pathkeys;
-				//elog(INFO, "Gpath startup=%f total=%f rows=%.0f", gpath->path.startup_cost, gpath->path.total_cost, gpath->path.rows);
-				return &gpath->path;
+				result->path.pathkeys = path->pathkeys;
+				return &result->path;
 			}
 			break;
+		}
+		case T_ProjectionPath: {
+			ProjectionPath *pjpath = (ProjectionPath *)path;
 
-		case T_ProjectionPath:
-			subpath = ((ProjectionPath *)path)->subpath;
-			subpath = __tryGpuSortWithLimitPath(root, subpath, limit_count);
+			subpath = tryGpuSortWithLimitPath(root, extra, pjpath->subpath, be_parallel);
 			if (subpath)
 			{
-				ProjectionPath *ppath
+				ProjectionPath *result
 					= create_projection_path(root,
 											 path->parent,
 											 subpath,
 											 path->pathtarget);
-				ppath->path.pathkeys = path->pathkeys;
-				//elog(INFO, "Proj-path startup=%f total=%f rows=%.0f", ppath->path.startup_cost, ppath->path.total_cost, ppath->path.rows);
-				return &ppath->path;
+				result->path.pathkeys = path->pathkeys;
+				return &result->path;
 			}
 			break;
-
+		}
+		case T_AppendPath:
+			if (IS_PARTITIONED_REL(path->parent))
+			{
+				CustomPath *cpath = pgstrom_find_custom_path(root,
+															 path->parent,
+															 be_parallel);
+				if (cpath)
+					path = &cpath->path;
+			}
+			__attribute__ ((fallthrough));
 		case T_CustomPath:
 			if (pgstrom_is_dummy_path(path))
 			{
 				CustomPath *cpath = (CustomPath *)path;
 
 				subpath = linitial(cpath->custom_paths);
-				subpath = __tryGpuSortWithLimitPath(root, subpath, limit_count);
+				subpath = tryGpuSortWithLimitPath(root, extra, subpath, be_parallel);
 				if (subpath)
 					return pgstrom_create_dummy_path(root, subpath);
 			}
@@ -2899,22 +2791,22 @@ __tryGpuSortWithLimitPath(PlannerInfo *root, Path *path, uint32_t limit_count)
 				if (pp_info->gpusort_keys_expr == NIL ||
 					pp_info->gpusort_keys_kind == NIL)
 					return NULL;	/* no sort */
-				if (pp_info->final_nrows <= limit_count)
+				if (pp_info->final_nrows <= extra->limit_tuples)
 					return NULL;	/* makes no sense */
 				/* duplicate CustomPath */
 				cpath = pmemdup(cpath, sizeof(CustomPath));
 				cpath->custom_private = list_copy(cpath->custom_private);
 				pp_info = copy_pgstrom_plan_info(pp_info);
-				pp_info->gpusort_limit_count = limit_count;
+				pp_info->gpusort_limit_count = extra->limit_tuples;
 				linitial(cpath->custom_private) = pp_info;
 				/* adjust the final cost factor */
 				__startup_cost = cpath->path.total_cost
 					- __per_tuple * cpath->path.rows
-					+ __per_tuple * (double)limit_count / 2.0;
+					+ __per_tuple * extra->limit_tuples / 2.0;
 				cpath->path.startup_cost = __startup_cost;
 				cpath->path.total_cost = __startup_cost
-					+ __per_tuple * (double)limit_count / 2.0;
-				cpath->path.rows = (double)limit_count;
+					+ __per_tuple * extra->limit_tuples / 2.0;
+				cpath->path.rows = extra->limit_tuples;
 				return &cpath->path;
 			}
 			break;
@@ -2924,9 +2816,9 @@ __tryGpuSortWithLimitPath(PlannerInfo *root, Path *path, uint32_t limit_count)
 	}
 	return NULL;
 }
-
+#if 0
 static Path *
-tryGpuSortWithLimitPath(PlannerInfo *root, Path *path)
+tryGpuSortWithLimitPath(PlannerInfo *root, FinalPathExtraData *extra, Path *path)
 {
 	Query	   *parse = root->parse;
 	Const	   *con = (Const *)parse->limitCount;
@@ -2949,10 +2841,11 @@ tryGpuSortWithLimitPath(PlannerInfo *root, Path *path)
 		}
 
 		if (limit_count > 0 && limit_count < INT_MAX)
-			return __tryGpuSortWithLimitPath(root, path, limit_count);
+			return __tryGpuSortWithLimitPath(root, path, limit_count, false);
 	}
 	return NULL;
 }
+#endif
 
 /*
  * tryGpuSortWithWindowRankPath
@@ -2960,7 +2853,6 @@ tryGpuSortWithLimitPath(PlannerInfo *root, Path *path)
 static Path *
 __attachGpuSortWithWindowRankPath(PlannerInfo *root,
 								  WindowAggPath *wpath,
-								  //WindowClause *wc,
 								  CustomPath *cpath)
 {
 	pgstromPlanInfo *pp_info = linitial(cpath->custom_private);
@@ -3166,8 +3058,8 @@ __attachGpuSortWithWindowRankPath(PlannerInfo *root,
 static Path *
 tryGpuSortWithWindowRankPath(PlannerInfo *root,
 							 WindowAggPath *wpath,
-							 //WindowClause *wc,
-							 Path *__path)
+							 Path *__path,
+							 bool be_parallel)
 {
 	Path   *subpath;
 
@@ -3176,34 +3068,19 @@ tryGpuSortWithWindowRankPath(PlannerInfo *root,
 		case T_WindowAggPath:
 			{
 				WindowAggPath  *__wpath = (WindowAggPath *)__path;
-				WindowClause   *__wc = __wpath->winclause;
 
 				subpath = tryGpuSortWithWindowRankPath(root,
 													   __wpath,
-													   __wpath->subpath);
+													   __wpath->subpath,
+													   be_parallel);
 				if (subpath)
-				{
-					Query	   *parse = root->parse;
-					WindowFuncLists *wflists
-						= find_window_functions((Node *)root->processed_tlist,
-												list_length(parse->windowClause));
-					wpath = create_windowagg_path(root,
-												  __wpath->path.parent,
-												  subpath,
-												  __wpath->path.pathtarget,
-												  wflists->windowFuncs[__wc->winref],
-												  __wpath->runCondition,
-												  __wc,
-												  __wpath->qual,
-												  __wpath->topwindow);
-					return &wpath->path;
-				}
+					return __duplicateWindowAggPath(root, __wpath, subpath);
 			}
 			break;
 
 		case T_GatherPath:
 			subpath = ((GatherPath *)__path)->subpath;
-			subpath = tryGpuSortWithWindowRankPath(root, wpath, subpath);
+			subpath = tryGpuSortWithWindowRankPath(root, wpath, subpath, true);
 			if (subpath)
 			{
 				GatherPath *gpath
@@ -3221,7 +3098,7 @@ tryGpuSortWithWindowRankPath(PlannerInfo *root,
 
 		case T_GatherMergePath:
 			subpath = ((GatherMergePath *)__path)->subpath;
-			subpath = tryGpuSortWithWindowRankPath(root, wpath, subpath);
+			subpath = tryGpuSortWithWindowRankPath(root, wpath, subpath, true);
 			if (subpath)
 			{
 				GatherPath *gpath
@@ -3239,7 +3116,7 @@ tryGpuSortWithWindowRankPath(PlannerInfo *root,
 
 		case T_ProjectionPath:
 			subpath = ((ProjectionPath *)__path)->subpath;
-			subpath = tryGpuSortWithWindowRankPath(root, wpath, subpath);
+			subpath = tryGpuSortWithWindowRankPath(root, wpath, subpath, be_parallel);
 			if (subpath)
 			{
 				ProjectionPath *ppath
@@ -3253,13 +3130,23 @@ tryGpuSortWithWindowRankPath(PlannerInfo *root,
 			}
 			break;
 
+		case T_AppendPath:
+			if (IS_PARTITIONED_REL(__path->parent))
+			{
+				CustomPath *cpath = pgstrom_find_custom_path(root,
+															 __path->parent,
+															 be_parallel);
+				if (cpath)
+					__path = &cpath->path;	/* fallback to T_CustomPath below */
+			}
+			__attribute__ ((fallthrough));
 		case T_CustomPath:
 			if (pgstrom_is_dummy_path(__path))
 			{
 				CustomPath *cpath = (CustomPath *)__path;
 
 				subpath = linitial(cpath->custom_paths);
-				subpath = tryGpuSortWithWindowRankPath(root, wpath, subpath);
+				subpath = tryGpuSortWithWindowRankPath(root, wpath, subpath, be_parallel);
 				if (subpath)
 					return pgstrom_create_dummy_path(root, subpath);
 			}
@@ -3280,15 +3167,161 @@ tryGpuSortWithWindowRankPath(PlannerInfo *root,
 }
 
 /*
- * XpuPreAggAddCustomPath
+ * tryInjectPartitionedGpuScanPath
+ *
+ * See issue #1026 for details.
+ *
+ * Once the PostgreSQL optimizer has built Scan/Join paths, if the
+ * top-level relation is a partitioned table, apply_scanjoin_target_to_paths()
+ * removes all paths registered on that relation and replaces them with an
+ * Append path that aggregates scan paths from the child relations.
+ *
+ * Therefore, even if a CustomPath such as GpuScan is available on the
+ * partitioned table itself, it will not be selected simply because it has
+ * the lowest cost. We must explicitly re-inject the CustomPath after this
+ * rewrite; otherwise it has already been discarded before the final path
+ * selection.
+ */
+static Path *
+__tryAddPartitionedGpuScanPath(PlannerInfo *root,
+							   FinalPathExtraData *extra,
+							   const Path *path, bool be_parallel)
+{
+	Path   *subpath;
+
+	switch (path->type)
+	{
+		case T_WindowAggPath: {
+			WindowAggPath  *wpath = (WindowAggPath *)path;
+
+			subpath = __tryAddPartitionedGpuScanPath(root, extra,
+													 wpath->subpath,
+													 be_parallel);
+			if (subpath)
+				return __duplicateWindowAggPath(root, wpath, subpath);
+			break;
+		}
+		case T_GatherPath: {
+			GatherPath	   *gpath = (GatherPath *)path;
+
+			subpath = __tryAddPartitionedGpuScanPath(root, extra,
+													 gpath->subpath, true);
+			if (subpath)
+				return (Path *)create_gather_path(root,
+												  gpath->path.parent,
+												  subpath,
+												  gpath->path.pathtarget,
+												  NULL,
+												  &subpath->rows);
+			break;
+		}
+		case T_GatherMergePath: {
+			GatherMergePath *gmpath = (GatherMergePath *)path;
+
+			subpath = __tryAddPartitionedGpuScanPath(root, extra,
+													 gmpath->subpath, true);
+			if (subpath)
+				return (Path *)create_gather_merge_path(root,
+														gmpath->path.parent,
+														subpath,
+														gmpath->path.pathtarget,
+														gmpath->path.pathkeys,
+														NULL,
+														&subpath->rows);
+			break;
+		}
+		case T_ProjectionPath: {
+			ProjectionPath *pjpath = (ProjectionPath *)path;
+
+			subpath = __tryAddPartitionedGpuScanPath(root, extra,
+													 pjpath->subpath, be_parallel);
+			if (subpath)
+				return (Path *)create_projection_path(root,
+													  pjpath->path.parent,
+													  subpath,
+													  pjpath->path.pathtarget);
+
+			break;
+		}
+		case T_SortPath: {
+			SortPath	   *spath = (SortPath *)path;
+
+			subpath = __tryAddPartitionedGpuScanPath(root, extra,
+													 spath->subpath, be_parallel);
+			if (subpath)
+				return (Path *)create_sort_path(root,
+												spath->path.parent,
+												subpath,
+												spath->path.pathkeys,
+												root->limit_tuples);
+			break;
+		}
+		case T_LimitPath: {
+			LimitPath	   *lpath = (LimitPath *)path;
+
+			subpath = __tryAddPartitionedGpuScanPath(root, extra,
+													 lpath->subpath, be_parallel);
+			if (subpath)
+				return (Path *)create_limit_path(root,
+												 lpath->path.parent,
+												 subpath,
+												 lpath->limitOffset,
+												 lpath->limitCount,
+												 lpath->limitOption,
+												 extra->offset_est,
+												 extra->count_est);
+			break;
+		}
+		case T_AppendPath:
+			if (IS_PARTITIONED_REL(path->parent))
+			{
+				CustomPath *cpath = pgstrom_find_custom_path(root,
+															 path->parent,
+															 be_parallel);
+				if (cpath)
+					return (Path *)pmemdup(cpath, sizeof(CustomPath));
+			}
+			break;
+		default:
+			break;
+	}
+	return NULL;
+}
+
+static void
+tryAddPartitionedGpuScanPath(PlannerInfo *root,
+							 FinalPathExtraData *extra,
+							 RelOptInfo *input_rel)
+{
+	List	   *pathlist = NIL;
+	ListCell   *lc;
+
+	foreach (lc, input_rel->pathlist)
+	{
+		Path   *oldpath = lfirst(lc);
+		Path   *newpath;
+
+		newpath = __tryAddPartitionedGpuScanPath(root, extra, oldpath, false);
+		if (newpath)
+			pathlist = lappend(pathlist, newpath);
+	}
+	foreach (lc, pathlist)
+		add_path(input_rel, (Path *)lfirst(lc));
+}
+
+/*
+ * GpuPreAggAddCustomPath
  */
 static void
-XpuPreAggAddCustomPath(PlannerInfo *root,
+GpuPreAggAddCustomPath(PlannerInfo *root,
 					   UpperRelationKind upper_stage,
 					   RelOptInfo *input_rel,
 					   RelOptInfo *upper_rel,
 					   void *extra)
 {
+	List	   *pathlist = NIL;
+	ListCell   *lc;
+
 	if (create_upper_paths_next)
 		create_upper_paths_next(root,
 								upper_stage,
@@ -3297,40 +3330,53 @@ XpuPreAggAddCustomPath(PlannerInfo *root,
 								extra);
 	if (!pgstrom_enabled())
 		return;
-	if (upper_stage == UPPERREL_GROUP_AGG || upper_stage == UPPERREL_DISTINCT)
+
+	switch (upper_stage)
 	{
-		if (pgstrom_enable_gpupreagg && gpuserv_ready_accept())
-			tryGpuPreAggAddCustomPath(root,
-									  upper_stage,
-									  input_rel,
-									  upper_rel,
-									  extra);
-	}
-	else if (upper_stage == UPPERREL_WINDOW && pgstrom_enable_gpusort)
-	{
-		ListCell   *lc;
+		case UPPERREL_GROUP_AGG:
+		case UPPERREL_DISTINCT:
+			if (pgstrom_enable_gpupreagg && gpuserv_ready_accept())
+			{
+				tryGpuPreAggAddCustomPath(root,
+										  upper_stage,
+										  input_rel,
+										  upper_rel,
+										  extra);
+			}
+			break;
+		case UPPERREL_WINDOW:
+			if (pgstrom_enable_gpusort)
+			{
+				foreach (lc, upper_rel->pathlist)
+				{
+					Path   *__path = lfirst(lc);
 
-		foreach (lc, upper_rel->pathlist)
-		{
-			Path   *__path = lfirst(lc);
+					__path = tryGpuSortWithWindowRankPath(root, NULL, __path, false);
+					if (__path)
+						pathlist = lappend(pathlist, __path);
+				}
+				foreach (lc, pathlist)
+					add_path(upper_rel, (Path *)lfirst(lc));
+			}
+			break;
+		case UPPERREL_FINAL:
+			if (pgstrom_enable_gpusort)
+			{
+				foreach (lc, input_rel->pathlist)
+				{
+					Path   *__path = lfirst(lc);
 
-			__path = tryGpuSortWithWindowRankPath(root, NULL, __path);
-			if (__path)
-				add_path(upper_rel, __path);
-		}
-	}
-	else if (upper_stage == UPPERREL_FINAL && pgstrom_enable_gpusort)
-	{
-		ListCell   *lc;
-
-		foreach (lc, input_rel->pathlist)
-		{
-			Path   *__path = lfirst(lc);
-
-			__path = tryGpuSortWithLimitPath(root, __path);
-			if (__path)
-				add_path(upper_rel, __path);
-		}
+					__path = tryGpuSortWithLimitPath(root, extra, __path, false);
+					if (__path)
+						pathlist = lappend(pathlist, __path);
+				}
+				foreach (lc, pathlist)
+					add_path(upper_rel, (Path *)lfirst(lc));
+			}
+			tryAddPartitionedGpuScanPath(root, extra, upper_rel);
+			break;
+		default:
+			break;
 	}
 }
 
@@ -3540,6 +3586,6 @@ pgstrom_init_gpu_preagg(void)
 
 	/* hook registration */
 	create_upper_paths_next = create_upper_paths_hook;
-	create_upper_paths_hook = XpuPreAggAddCustomPath;
+	create_upper_paths_hook = GpuPreAggAddCustomPath;
 	CacheRegisterSyscacheCallback(PROCOID, aggfunc_catalog_htable_invalidator, 0);
 }

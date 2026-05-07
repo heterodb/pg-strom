@@ -451,278 +451,159 @@ pgstrom_removal_dummy_plans(PlannedStmt *pstmt, Plan **p_plan)
 }
 
 /*
- * pgstrom_path_tracker
+ * pgstrom_plan_info_tracker
  */
-static HTAB	   *pgstrom_paths_htable = NULL;
+static HTAB	   *pgstrom_ppinfo_htable = NULL;
 
 typedef struct
 {
 	PlannerInfo *root;
-	Relids		parent_relids;
-	uint32_t	xpu_devkind;	/* one of DEVKIND__* */
-	pgstromOuterPathLeafInfo *op_normal_single;
-	pgstromOuterPathLeafInfo *op_normal_parallel;
-	List	   *op_leaf_single;
-	List	   *op_leaf_parallel;
-	Cost		total_cost_single;
-	Cost		total_cost_parallel;
-	bool		identical_inners_single;
-	bool		identical_inners_parallel;
-} pgstromPathEntry;
+	Relids		relids;
+} pgstromPlanInfoKey;
+
+typedef struct
+{
+	pgstromPlanInfoKey key;
+	CustomPath		cpath_single;
+	CustomPath		cpath_parallel;
+} pgstromPlanInfoEntry;
 
 static uint32
-pgstrom_path_entry_hash(const void *key, Size keysize)
+pgstrom_plan_info_key_hash(const void *__key, Size keysize)
 {
-	const pgstromPathEntry *entry = key;
+	const pgstromPlanInfoKey *key = __key;
 
-	return (hash_bytes((const unsigned char *)&entry->root,
+	Assert(keysize == sizeof(pgstromPlanInfoKey));
+	return (hash_bytes((const unsigned char *)&key->root,
 					   sizeof(PlannerInfo *)) ^
-			bms_hash_value(entry->parent_relids) ^
-			entry->xpu_devkind);
+			bms_hash_value(key->relids));
 }
 
 static int
-pgstrom_path_entry_match(const void *key1, const void *key2, Size keysize)
+pgstrom_plan_info_key_match(const void *__key1,
+							const void *__key2, Size keysize)
 {
-	const pgstromPathEntry *entry1 = key1;
-	const pgstromPathEntry *entry2 = key2;
+	const pgstromPlanInfoKey *key1 = __key1;
+	const pgstromPlanInfoKey *key2 = __key2;
 
-	Assert(keysize == offsetof(pgstromPathEntry,
-							   xpu_devkind) + sizeof(uint32_t));
-	return (entry1->root == entry2->root &&
-			bms_equal(entry1->parent_relids,
-					  entry2->parent_relids) &&
-			entry1->xpu_devkind == entry2->xpu_devkind ? 0 : -1);
+	Assert(keysize == sizeof(pgstromPlanInfoKey));
+	return (key1->root == key2->root &&
+			bms_equal(key1->relids, key2->relids) ? 0 : -1);
 }
 
-static void
-__pgstrom_build_paths_htable(void)
+void
+pgstrom_remember_custom_path(PlannerInfo *root,
+							 RelOptInfo *outer_rel,
+							 CustomPath *cpath,
+							 bool be_parallel)
 {
-	if (!pgstrom_paths_htable)
+	pgstromPlanInfoKey key;
+	pgstromPlanInfoEntry *entry;
+	bool		found;
+
+	Assert(IsA(cpath, CustomPath));
+	if (!pgstrom_ppinfo_htable)
 	{
 		HASHCTL		hctl;
 
 		memset(&hctl, 0, sizeof(HASHCTL));
 		hctl.hcxt = CurrentMemoryContext;
-		hctl.keysize = offsetof(pgstromPathEntry,
-								xpu_devkind) + sizeof(uint32_t);
-		hctl.entrysize = sizeof(pgstromPathEntry);
-		hctl.hash = pgstrom_path_entry_hash;
-		hctl.match = pgstrom_path_entry_match;
-		pgstrom_paths_htable = hash_create("PG-Strom Outer/Leaf Paths Tracker",
-										   256L,
-										   &hctl,
-										   HASH_ELEM |
-										   HASH_FUNCTION |
-										   HASH_COMPARE |
-										   HASH_CONTEXT);
+		hctl.keysize = sizeof(pgstromPlanInfoKey);
+		hctl.entrysize = sizeof(pgstromPlanInfoEntry);
+		hctl.hash = pgstrom_plan_info_key_hash;
+		hctl.match = pgstrom_plan_info_key_match;
+		pgstrom_ppinfo_htable  = hash_create("PG-Strom PlanInfo Tracker",
+											 256L,
+											 &hctl,
+											 HASH_ELEM |
+											 HASH_FUNCTION |
+											 HASH_COMPARE |
+											 HASH_CONTEXT);
 	}
-}
-
-void
-pgstrom_remember_op_normal(PlannerInfo *root,
-						   RelOptInfo *outer_rel,
-						   pgstromOuterPathLeafInfo *op_leaf,
-						   bool be_parallel)
-{
-	pgstromPathEntry *pp_entry;
-	pgstromPathEntry  pp_key;
-	bool		found;
-
-	/* sanity checks */
-	Assert(list_length(op_leaf->inner_paths_list) == op_leaf->pp_info->num_rels);
-	op_leaf->outer_rel = outer_rel;
-
-	/* lookup the hash-table */
-	__pgstrom_build_paths_htable();
-	memset(&pp_key, 0, sizeof(pgstromPathEntry));
-	pp_key.root = root;
-	pp_key.parent_relids = outer_rel->relids;
-	pp_key.xpu_devkind = (op_leaf->pp_info->xpu_task_flags & DEVKIND__ANY);
-	pp_entry = (pgstromPathEntry *)
-		hash_search(pgstrom_paths_htable,
-					&pp_key,
+	key.root   = root;
+	key.relids = outer_rel->relids;
+	entry = (pgstromPlanInfoEntry *)
+		hash_search(pgstrom_ppinfo_htable,
+					&key,
 					HASH_ENTER,
 					&found);
+	Assert(entry->key.root == root &&
+		   bms_equal(entry->key.relids, outer_rel->relids));
 	if (!found)
 	{
-		Assert(pp_key.root == pp_entry->root &&
-			   bms_equal(pp_key.parent_relids,
-						 pp_entry->parent_relids));
-		memcpy(pp_entry, &pp_key, sizeof(pgstromPathEntry));
-	}
-
-	if (be_parallel)
-	{
-		if (!pp_entry->op_normal_parallel ||
-			pp_entry->op_normal_parallel->leaf_cost > op_leaf->leaf_cost)
-			pp_entry->op_normal_parallel = op_leaf;
-	}
-	else
-	{
-		if (!pp_entry->op_normal_single ||
-			pp_entry->op_normal_single->leaf_cost > op_leaf->leaf_cost)
-			pp_entry->op_normal_single = op_leaf;
-	}
-}
-
-void
-pgstrom_remember_op_leafs(PlannerInfo *root,
-						  RelOptInfo *parent_rel,
-						  List *op_leaf_list,
-						  bool be_parallel)
-{
-	pgstromPathEntry *pp_entry;
-	pgstromPathEntry  pp_key;
-	ListCell   *cell;
-	List	   *inner_paths_list = NIL;
-	uint32_t	xpu_devkind = 0;
-	int			identical_inners = -1;
-	Cost		total_cost = 0.0;
-	bool		found;
-
-	__pgstrom_build_paths_htable();
-	/* calculation of total cost */
-	foreach (cell, op_leaf_list)
-	{
-		pgstromOuterPathLeafInfo *op_leaf = lfirst(cell);
-
-		/* sanity checks */
-		Assert(list_length(op_leaf->inner_paths_list) == op_leaf->pp_info->num_rels);
-		op_leaf->outer_rel = parent_rel;
-		total_cost += op_leaf->leaf_cost;
-
-		/* check whether all entries have identical xPU device */
-		if (xpu_devkind == 0)
-			xpu_devkind = (op_leaf->pp_info->xpu_task_flags & DEVKIND__ANY);
-		else if (xpu_devkind != (op_leaf->pp_info->xpu_task_flags & DEVKIND__ANY))
-			elog(ERROR, "Bug? different xPU devices are mixtured.");
-
-		if (cell == list_head(op_leaf_list))
+		if (!be_parallel)
 		{
-			inner_paths_list = op_leaf->inner_paths_list;
+			memcpy(&entry->cpath_single, cpath, sizeof(CustomPath));
+			memset(&entry->cpath_parallel, 0, sizeof(CustomPath));
 		}
-		else if (identical_inners != 0)
+		else
 		{
-			ListCell   *lc1, *lc2;
-
-			forboth (lc1, inner_paths_list,
-					 lc2, op_leaf->inner_paths_list)
-			{
-				Path   *__i_path1 = lfirst(lc1);
-				Path   *__i_path2 = lfirst(lc2);
-
-				if (!bms_equal(__i_path1->parent->relids,
-							   __i_path2->parent->relids))
-					break;
-			}
-			if (lc1 == NULL && lc2 == NULL)
-				identical_inners = 1;
-			else
-				identical_inners = 0;
+			memset(&entry->cpath_single, 0, sizeof(CustomPath));
+			memcpy(&entry->cpath_parallel, cpath, sizeof(CustomPath));
 		}
 	}
-	/* lookup the hash-table */
-	memset(&pp_key, 0, sizeof(pgstromPathEntry));
-	pp_key.root = root;
-	pp_key.parent_relids = parent_rel->relids;
-	pp_key.xpu_devkind = xpu_devkind;
-	pp_entry = (pgstromPathEntry *)
-		hash_search(pgstrom_paths_htable,
-					&pp_key,
-					HASH_ENTER,
-					&found);
-	if (!found)
+	else if (!be_parallel)
 	{
-		Assert(pp_key.root == pp_entry->root &&
-			   bms_equal(pp_key.parent_relids,
-						 pp_entry->parent_relids));
-		memcpy(pp_entry, &pp_key, sizeof(pgstromPathEntry));
-	}
-
-	if (be_parallel)
-	{
-		if (pp_entry->op_leaf_parallel == NIL ||
-			pp_entry->total_cost_parallel > total_cost)
+		if (!IsA(&entry->cpath_single, CustomPath))
+			memcpy(&entry->cpath_single, cpath, sizeof(CustomPath));
+		else
 		{
-			pp_entry->op_leaf_parallel = op_leaf_list;
-			pp_entry->total_cost_parallel = total_cost;
-			pp_entry->identical_inners_parallel = (identical_inners > 0);
+			pgstromPlanInfo *pp_orig = linitial(entry->cpath_single.custom_private);
+			pgstromPlanInfo *pp_info = linitial(cpath->custom_private);
+
+			if ((pp_orig->startup_cost +
+				 pp_orig->inner_cost +
+				 pp_orig->run_cost) > (pp_info->startup_cost +
+									   pp_info->inner_cost +
+									   pp_info->run_cost))
+				memcpy(&entry->cpath_single, cpath, sizeof(CustomPath));
 		}
 	}
 	else
 	{
-		if (pp_entry->op_leaf_single == NIL ||
-			pp_entry->total_cost_single > total_cost)
+		if (!IsA(&entry->cpath_parallel, CustomPath))
+			memcpy(&entry->cpath_parallel, cpath, sizeof(CustomPath));
+		else
 		{
-			pp_entry->op_leaf_single = op_leaf_list;
-			pp_entry->total_cost_single = total_cost;
-			pp_entry->identical_inners_single = (identical_inners > 0);
+			pgstromPlanInfo *pp_orig = linitial(entry->cpath_parallel.custom_private);
+			pgstromPlanInfo *pp_info = linitial(cpath->custom_private);
+
+			if ((pp_orig->startup_cost +
+				 pp_orig->inner_cost +
+				 pp_orig->run_cost) > (pp_info->startup_cost +
+									   pp_info->inner_cost +
+									   pp_info->run_cost))
+				memcpy(&entry->cpath_parallel, cpath, sizeof(CustomPath));
 		}
 	}
 }
 
-pgstromOuterPathLeafInfo *
-pgstrom_find_op_normal(PlannerInfo *root,
-					   RelOptInfo *outer_rel,
-					   uint32_t xpu_task_flags,
-					   bool be_parallel)
+CustomPath *
+pgstrom_find_custom_path(PlannerInfo *root,
+						 RelOptInfo *outer_rel,
+						 bool be_parallel)
 {
-	if (pgstrom_paths_htable)
+	if (pgstrom_ppinfo_htable)
 	{
-		pgstromPathEntry *pp_entry;
-		pgstromPathEntry  pp_key;
+		pgstromPlanInfoKey key;
+		pgstromPlanInfoEntry *entry;
 
-		memset(&pp_key, 0, sizeof(pgstromPathEntry));
-		pp_key.root = root;
-		pp_key.parent_relids = outer_rel->relids;
-		pp_key.xpu_devkind = (xpu_task_flags & DEVKIND__ANY);
-		pp_entry = (pgstromPathEntry *)
-			hash_search(pgstrom_paths_htable,
-						&pp_key,
+		key.root = root;
+		key.relids = outer_rel->relids;
+		entry = (pgstromPlanInfoEntry *)
+			hash_search(pgstrom_ppinfo_htable,
+						&key,
 						HASH_FIND,
 						NULL);
-		if (pp_entry)
-			return (be_parallel
-					? pp_entry->op_normal_parallel
-					: pp_entry->op_normal_single);
+		if (entry)
+		{
+			CustomPath *cpath = (!be_parallel
+								 ? &entry->cpath_single
+								 : &entry->cpath_parallel);
+			return IsA(cpath, CustomPath) ? cpath : NULL;
+		}
 	}
 	return NULL;
-}
-
-List *
-pgstrom_find_op_leafs(PlannerInfo *root,
-					  RelOptInfo *parent_rel,
-					  uint32_t xpu_task_flags,
-					  bool be_parallel,
-					  bool *p_identical_inners)
-{
-	if (pgstrom_paths_htable)
-	{
-		pgstromPathEntry *pp_entry;
-		pgstromPathEntry  pp_key;
-
-		memset(&pp_key, 0, sizeof(pgstromPathEntry));
-		pp_key.root = root;
-		pp_key.parent_relids = parent_rel->relids;
-		pp_key.xpu_devkind = (xpu_task_flags & DEVKIND__ANY);
-		pp_entry = (pgstromPathEntry *)
-			hash_search(pgstrom_paths_htable,
-						&pp_key,
-						HASH_FIND,
-						NULL);
-		if (pp_entry)
-		{
-			if (p_identical_inners)
-				*p_identical_inners = (be_parallel
-									   ? pp_entry->identical_inners_parallel
-									   : pp_entry->identical_inners_single);
-			return (be_parallel
-					? pp_entry->op_leaf_parallel
-					: pp_entry->op_leaf_single);
-		}
-	}
-	return NIL;
 }
 
 /*
@@ -734,13 +615,13 @@ pgstrom_post_planner(Query *parse,
 					 int cursorOptions,
 					 ParamListInfo boundParams)
 {
-	HTAB	   *saved_paths_htable = pgstrom_paths_htable;
+	HTAB	   *saved_ppinfo_htable = pgstrom_ppinfo_htable;
 	PlannedStmt *pstmt;
 	ListCell   *lc;
 
 	PG_TRY();
 	{
-		pgstrom_paths_htable = NULL;
+		pgstrom_ppinfo_htable = NULL;
 
 		pstmt = planner_hook_next(parse,
 								  query_string,
@@ -753,13 +634,13 @@ pgstrom_post_planner(Query *parse,
 	}
 	PG_CATCH();
 	{
-		hash_destroy(pgstrom_paths_htable);
-		pgstrom_paths_htable = saved_paths_htable;
+		hash_destroy(pgstrom_ppinfo_htable);
+		pgstrom_ppinfo_htable = saved_ppinfo_htable;
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
-	hash_destroy(pgstrom_paths_htable);
-	pgstrom_paths_htable = saved_paths_htable;
+	hash_destroy(pgstrom_ppinfo_htable);
+	pgstrom_ppinfo_htable = saved_ppinfo_htable;
 	return pstmt;
 }
 
@@ -944,7 +825,6 @@ _PG_init(void)
 		pgstrom_init_gpu_scan();
 		pgstrom_init_gpu_join();
 		pgstrom_init_gpu_preagg();
-		pgstrom_init_gpu_cache();
 		pgstrom_init_select_into();
 	}
 	/* callback for the extension checker */
