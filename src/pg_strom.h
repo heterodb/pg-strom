@@ -350,7 +350,6 @@ typedef struct
 	/* scan relations */
 	List	   *scan_rels_list;			/* list of pgstromPlanScanInfo */
 	/* inner relations */
-	int			sibling_param_id;		//deprecated
 	int			num_inner_rels;
 	pgstromPlanInnerInfo inners[FLEXIBLE_ARRAY_MEMBER];
 } pgstromPlanInfo;
@@ -1054,12 +1053,6 @@ extern pgstromPlanInfo *deform_pgstrom_plan_info(CustomScan *cscan);
 extern pgstromPlanInfo *copy_pgstrom_plan_info(const pgstromPlanInfo *pp_orig);
 extern Expr	   *fixup_scanstate_expr(ScanState *ss, Expr *expr);
 extern List	   *fixup_scanstate_quals(ScanState *ss, List *quals);
-extern List	   *fixup_expression_by_partition_leaf(PlannerInfo *root,
-												   Relids leaf_relids,
-												   List *clauses);
-extern Relids	fixup_relids_by_partition_leaf(PlannerInfo *root,
-											   Relids leaf_join_relids,
-											   Relids parent_relids);
 extern int		__appendBinaryStringInfo(StringInfo buf,
 										 const void *data, int datalen);
 extern int		__appendZeroStringInfo(StringInfo buf, int nbytes);

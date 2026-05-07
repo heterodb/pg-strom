@@ -1496,7 +1496,6 @@ typedef struct
 	AggClauseCosts	final_agg_clause_costs;
 	QualCost		final_proj_clause_costs;
 	pgstromPlanInfo *pp_info;
-	int				sibling_param_id;
 	List		   *inner_paths_list;
 	List		   *inner_target_list;
 	List		   *groupby_keys;
@@ -2155,7 +2154,6 @@ __buildXpuPreAggCustomPath(xpugroupby_build_path_context *con)
 		pp_info->xpu_task_flags |= (DEVTASK__PREAGG | DEVTASK__PINNED_HASH_RESULTS);
 	else
 		pp_info->xpu_task_flags |= (DEVTASK__PREAGG | DEVTASK__PINNED_ROW_RESULTS);
-	pp_info->sibling_param_id = con->sibling_param_id;
 	/* TODO: more precise cost factors */
 	pp_info->final_nrows = con->num_groups;
 
@@ -2474,7 +2472,6 @@ tryAddSimpleGpuPreAggPath(PlannerInfo *root,
 	con.target_agg_final = create_empty_pathtarget();
 	con.target_proj_final = create_empty_pathtarget();
 	con.pp_info        = pp_input;
-	con.sibling_param_id = -1;
 	con.inner_paths_list = input_path->custom_paths;
 	con.inner_target_list = inner_target_list;
 	/* construction of the target-list for each level */

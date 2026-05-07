@@ -321,14 +321,20 @@ __fixup_join_varnullingrels_walker(Node *node, void *__data)
 static pgstromPlanInfo *
 fixup_join_varnullingrels(RelOptInfo *joinrel, pgstromPlanInfo *pp_info)
 {
+	ListCell   *lc;
 #define __FIXUP_FIELD(VAL)												\
 	VAL = (void *)__fixup_join_varnullingrels_walker((Node *)(VAL), joinrel)
 
 	__FIXUP_FIELD(pp_info->used_params);
 	__FIXUP_FIELD(pp_info->host_quals);
 	__FIXUP_FIELD(pp_info->scan_quals);
-//	__FIXUP_FIELD(pp_info->brin_index_conds);
-//	__FIXUP_FIELD(pp_info->brin_index_quals);
+	foreach (lc, pp_info->scan_rels_list)
+	{
+		pgstromPlanScanInfo *pp_scan = lfirst(lc);
+
+		__FIXUP_FIELD(pp_scan->brin_conds);
+		__FIXUP_FIELD(pp_scan->brin_quals);
+	}
 	for (int i=0; i < pp_info->num_inner_rels; i++)
 	{
 		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[i];
@@ -503,7 +509,6 @@ __buildGpuJoinPlanInfo(PlannerInfo *root,
 	pp_info = copy_pgstrom_plan_info(pp_prev);
 	pp_info->xpu_task_flags &= ~DEVTASK__MASK;
 	pp_info->xpu_task_flags |= DEVTASK__JOIN;
-	pp_info->sibling_param_id = -1;
 
 	pp_inner = &pp_info->inners[pp_info->num_inner_rels++];
 	pp_inner->join_type = join_type;
@@ -1386,8 +1391,6 @@ PlanGpuJoinPathCommon(PlannerInfo *root,
 	 */
 	if ((pp_info->xpu_task_flags & DEVTASK__MASK) == DEVTASK__PREAGG)
 	{
-		Relids	leaf_relids = cpath->path.parent->relids;
-		tlist = fixup_expression_by_partition_leaf(root, leaf_relids, tlist);
 		pgstrom_build_groupby_tlist_dev(context, root, tlist,
 										pp_info->groupby_actions);
 		codegen_build_groupby_actions(context, pp_info);

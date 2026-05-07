@@ -189,7 +189,6 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 	}
 	privs = lappend(privs, scan_rels_list);
 	/* inner relations */
-	privs = lappend(privs, makeInteger(pp_info->sibling_param_id));
 	privs = lappend(privs, makeInteger(pp_info->num_inner_rels));
 	for (int i=0; i < pp_info->num_inner_rels; i++)
 	{
@@ -333,7 +332,6 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 		pp_data.scan_rels_list = lappend(pp_data.scan_rels_list, pp_scan);
 	}
 	/* inner relations */
-	pp_data.sibling_param_id = intVal(list_nth(privs, pindex++));
 	pp_data.num_inner_rels = intVal(list_nth(privs, pindex++));
 	pp_info = palloc0(offsetof(pgstromPlanInfo, inners[pp_data.num_inner_rels]));
 	memcpy(pp_info, &pp_data, offsetof(pgstromPlanInfo, inners));
@@ -474,83 +472,6 @@ fixup_scanstate_quals(ScanState *ss, List *quals)
 		return (List *)__fixup_customscan_expressions_walker((Node *)quals,
 															 ss->ps.plan);
 	return quals;
-}
-
-/*
- * fixup_expression_by_partition_leaf
- */
-List *
-fixup_expression_by_partition_leaf(PlannerInfo *root,
-								   Relids leaf_relids,
-								   List *clauses)
-{
-	AppendRelInfo **appinfos;
-	Relids		next_relids = NULL;
-	int			i, nitems = 0;
-
-	if (!root->append_rel_array)
-		return clauses;		/* shortcut */
-
-	appinfos = alloca(sizeof(AppendRelInfo *) * root->simple_rel_array_size);
-	for (i = bms_next_member(leaf_relids, -1);
-		 i >= 0;
-		 i = bms_next_member(leaf_relids, i))
-	{
-		AppendRelInfo *appinfo = root->append_rel_array[i];
-
-		if (appinfo)
-		{
-			Assert(appinfo->child_relid == i);
-			appinfos[nitems++] = appinfo;
-			next_relids = bms_add_member(next_relids, appinfo->parent_relid);
-		}
-	}
-
-	if (nitems > 0)
-	{
-		clauses = fixup_expression_by_partition_leaf(root,
-													 next_relids,
-													 clauses);
-		clauses = (List *)adjust_appendrel_attrs(root,
-												 (Node *)clauses,
-												 nitems,
-												 appinfos);
-	}
-	return clauses;
-}
-
-/*
- * fixup_relids_by_partition_leaf
- */
-Relids
-fixup_relids_by_partition_leaf(PlannerInfo *root,
-							   const Relids leaf_relids,
-							   const Relids parent_relids)
-{
-	Relids	results = NULL;
-	int		curr;
-
-	for (curr = bms_next_member(leaf_relids, -1);
-		 curr >= 0;
-		 curr = bms_next_member(leaf_relids, curr))
-	{
-		int		relid = curr;
-	again:
-		for (int k=0; k < root->simple_rel_array_size; k++)
-		{
-			AppendRelInfo *ap_info = root->append_rel_array[k];
-
-			if (ap_info && ap_info->child_relid == relid)
-			{
-				if (ap_info->parent_relid == relid)
-					break;
-				relid = ap_info->parent_relid;
-				goto again;
-			}
-		}
-		results = bms_add_member(results, relid);
-	}
-	return results;
 }
 
 /*

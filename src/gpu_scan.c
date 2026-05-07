@@ -313,7 +313,6 @@ __gpuScanBuildPlanInfo(PlannerInfo *root,
 	pp_info->final_nrows = pp_info->scan_nrows;
 	pp_info->outer_refs = outer_refs;
 	pp_info->scan_rels_list = scan_rels_list;
-	pp_info->sibling_param_id = -1;		//to be deprecated
 	return pp_info;
 }
 
