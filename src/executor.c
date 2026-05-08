@@ -2959,24 +2959,28 @@ pgstromExplainTaskState(CustomScanState *node,
 
 		if (ptss->arrow_state)
 		{
-			pgstromSharedScanState *psss = ptss->dsm;
-			uint32_t    nchunks_parquet_read = pg_atomic_read_u32(&psss->nchunks_parquet_read);
-			uint32_t    ncaches_parquet_load = pg_atomic_read_u32(&psss->ncaches_parquet_load);
-
 			pgstromExplainArrowFdwHint(&pts->css.ss,
 									   ptss->arrow_state,
 									   es, dcontext, NULL);
 			/* parquet-cache stats */
-			if (!pgstrom_explain_developer_mode && nchunks_parquet_read > 0)
+			if (!pgstrom_explain_developer_mode && ptss->dsm)
 			{
-				resetStringInfo(&buf);
-				appendStringInfo(&buf, "cache-hit: %u of total %u chunks (cache ratio: %.2f%%)",
-								 ncaches_parquet_load,
-								 ncaches_parquet_load + nchunks_parquet_read,
-								 100.0 *
-								 (double)(ncaches_parquet_load) /
-								 (double)(ncaches_parquet_load + nchunks_parquet_read));
-				ExplainPropertyText("Parquet-cache", buf.data, es);
+				pgstromSharedScanState *psss = ptss->dsm;
+				uint32_t	nchunks_parquet_read = pg_atomic_read_u32(&psss->nchunks_parquet_read);
+				uint32_t	ncaches_parquet_load = pg_atomic_read_u32(&psss->ncaches_parquet_load);
+
+				if (nchunks_parquet_read > 0)
+				{
+					resetStringInfo(&buf);
+					appendStringInfo(&buf,
+									 "cache-hit: %u of total %u chunks (cache ratio: %.2f%%)",
+									 ncaches_parquet_load,
+									 ncaches_parquet_load + nchunks_parquet_read,
+									 100.0 *
+									 (double)(ncaches_parquet_load) /
+									 (double)(ncaches_parquet_load + nchunks_parquet_read));
+					ExplainPropertyText("Parquet-cache", buf.data, es);
+				}
 			}
 		}
 		else if (ptss->brin_state)
