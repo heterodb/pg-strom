@@ -1058,7 +1058,7 @@ __parquetReadOneRowGroupNormal(std::shared_ptr<arrow::io::ReadableFile> parquet_
 								   parquet_cached_chunks,
 								   referenced,
 								   revmap);
-#if ARROW_VERSION_MAJOR >= 24
+#if PARQUET_VERSION_MAJOR >= 24
 		{
 			auto	rv = arrow_file_reader->ReadRowGroup(row_group_id,
 														 referenced);

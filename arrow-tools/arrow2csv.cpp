@@ -955,7 +955,6 @@ process_one_parquet_file(arrowReadableFile arrow_input_file, const char *filenam
 {
 	std::unique_ptr<parquet::arrow::FileReader> arrow_reader;
 	std::shared_ptr<arrow::Schema> arrow_schema;
-	Status		status;
 	static bool	is_first_call = true;
 
 #if PARQUET_VERSION_MAJOR >= 19
@@ -968,19 +967,23 @@ process_one_parquet_file(arrowReadableFile arrow_input_file, const char *filenam
 		arrow_reader = std::move(rv.ValueOrDie());
 	}
 #else
+	{
 	/* OpenFile() API was changed at Arrow v19 (issue #44784) */
-	status = parquet::arrow::OpenFile(arrow_input_file,
-									  default_memory_pool(),
-									  &arrow_reader);
-	if (!status.ok())
-		Elog("failed on parquet::arrow::OpenFile('%s'): %s",
-			 filename, status.ToString().c_str());
+		arrow::Status	status
+			= parquet::arrow::OpenFile(arrow_input_file,
+									   default_memory_pool(),
+									   &arrow_reader);
+		if (!status.ok())
+			Elog("failed on parquet::arrow::OpenFile('%s'): %s",
+				 filename, status.ToString().c_str());
+	}
 #endif
-
-	status = arrow_reader->GetSchema(&arrow_schema);
-	if (!status.ok())
-		Elog("failed on parquet::arrow::FileReader::GetSchema('%s'): %s",
-			 filename, status.ToString().c_str());
+	{
+		arrow::Status	status = arrow_reader->GetSchema(&arrow_schema);
+		if (!status.ok())
+			Elog("failed on parquet::arrow::FileReader::GetSchema('%s'): %s",
+				 filename, status.ToString().c_str());
+	}
 	if (shows_header)
 		print_field_names(arrow_schema);
 	else if (is_first_call && with_create_table)
@@ -992,11 +995,23 @@ process_one_parquet_file(arrowReadableFile arrow_input_file, const char *filenam
 	for (int k=0; k < num_groups; k++)
 	{
 		std::shared_ptr<arrow::Table> table;
+#if PARQUET_VERSION_MAJOR >= 24
+		{
+			auto	rv = arrow_reader->ReadRowGroup(k);
 
-		status = arrow_reader->ReadRowGroup(k, &table);
-		if (!status.ok())
-			Elog("failed on parquet::arrow::FileReader::ReadRowGroup(%d): %s",
-				 k, status.ToString().c_str());
+			if (!rv.ok())
+				Elog("failed on parquet::arrow::FileReader::ReadRowGroup(%d): %s",
+					 k, rv.status().ToString().c_str());
+			table = rv.ValueOrDie();
+		}
+#else
+		{
+			status = arrow_reader->ReadRowGroup(k, &table);
+			if (!status.ok())
+				Elog("failed on parquet::arrow::FileReader::ReadRowGroup(%d): %s",
+					 k, status.ToString().c_str());
+		}
+#endif
 		if (!process_one_table(table))
 			break;		/* terminated by --limit */
 	}
