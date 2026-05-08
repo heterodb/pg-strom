@@ -673,7 +673,7 @@ extern Size		pgstromBrinIndexShutdownDSM(BrinIndexState *brin_state);
 extern void		pgstromBrinIndexExplain(BrinIndexState *brin_state,
 										ExplainState *es,
 										List *dcontext,
-										int32_t scan_relidx);
+										const char *prefix);
 extern void		pgstrom_init_brin(void);
 
 /*
@@ -987,7 +987,7 @@ extern void		pgstromExplainArrowFdwHint(ScanState *ss,
 										   ArrowFdwState *arrow_state,
 										   ExplainState *es,
 										   List *dcontext,
-										   int32_t scan_relidx);
+										   const char *prefix);
 extern void		pgstromExplainArrowFdwFiles(ScanState *ss,
 											List *arrow_state_list,
 											ExplainState *es,

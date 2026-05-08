@@ -5636,7 +5636,7 @@ pgstromExplainArrowFdwHint(ScanState *ss,	/* Foreign or Custom */
 						   ArrowFdwState *arrow_state,
 						   ExplainState *es,
 						   List *dcontext,
-						   int32_t scan_relidx)
+						   const char *prefix)
 {
 	arrowStatsHint *stats_hint = arrow_state->stats_hint;
 	StringInfoData	buf;
@@ -5669,10 +5669,10 @@ pgstromExplainArrowFdwHint(ScanState *ss,	/* Foreign or Custom */
 		appendStringInfo(&buf, "  [loaded: %u, skipped: %u]",
 						 pg_atomic_read_u32(arrow_state->rbatch_nload),
 						 pg_atomic_read_u32(arrow_state->rbatch_nskip));
-	if (scan_relidx < 0)
+	if (!prefix)
 		strcpy(label, "Stats-Hint");
 	else
-		snprintf(label, sizeof(label), "stats-hint%d", scan_relidx);
+		snprintf(label, sizeof(label), "%s-stats-hint", prefix);
 
 	ExplainPropertyText(label, buf.data, es);
 	pfree(buf.data);
@@ -5788,7 +5788,7 @@ ArrowExplainForeignScan(ForeignScanState *node, ExplainState *es)
 										node->ss.ps.plan,
 										NULL);
 	pgstromExplainRefColumns(frel, arrow_state->referenced, es, dcontext);
-	pgstromExplainArrowFdwHint(&node->ss, arrow_state, es, dcontext, -1);
+	pgstromExplainArrowFdwHint(&node->ss, arrow_state, es, dcontext, NULL);
 	pgstromExplainArrowFdwFiles(&node->ss, list_make1(arrow_state), es, dcontext);
 }
 

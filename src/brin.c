@@ -976,7 +976,7 @@ void
 pgstromBrinIndexExplain(BrinIndexState *brin_state,
 						ExplainState *es,
 						List *dcontext,
-						int32_t scan_relidx)
+						const char *prefix)
 {
 	StringInfoData	buf;
 	ListCell	   *lc;
@@ -999,10 +999,10 @@ pgstromBrinIndexExplain(BrinIndexState *brin_state,
 						 pg_atomic_read_u32(brin_state->brin_num_fetched),
 						 pg_atomic_read_u32(brin_state->brin_num_skipped));
 	}
-	if (scan_relidx < 0)
+	if (!prefix)
 		strcpy(label, "Brin Quals");
 	else
-		snprintf(label, sizeof(label), "brin%d", scan_relidx);
+		snprintf(label, sizeof(label), "%s-brin", prefix);
 	ExplainPropertyText(label, buf.data, es);
 
 	pfree(buf.data);
