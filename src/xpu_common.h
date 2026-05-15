@@ -420,6 +420,7 @@ typedef enum {
 	FuncOpCode__CaseWhenExpr,
 	FuncOpCode__ScalarArrayOpAny,
 	FuncOpCode__ScalarArrayOpAll,
+	FuncOpCode__HashedArrayOp,
 #include "xpu_opcodes.h"
 	FuncOpCode__LoadVars = 9999,
 	FuncOpCode__MoveVars,
@@ -2526,6 +2527,25 @@ typedef struct
 
 #define SPECIAL_DEPTH__PREAGG_FINAL		(-2)
 
+typedef struct
+{
+	uint32_t	hash;
+	uint32_t	next;
+	/*
+	 * kern_hashed_array_op_item is always aligned to 8byte aligned offset
+	 * from the head of kexp, so its lower 3bit should be always zero.
+	 * So, for efficient memory usage, the 'next' field is used as follows:
+	 * bit0 : item has a valid key (not NULL)
+	 * bit1 : item has a valid value (not NULL)
+	 * bit2 : reserved
+	 * bit3-31: offset to the next item from kexp head, if not zero
+	 */
+	char		data[1]		__MAXALIGNED__;
+} kern_hashed_array_op_item;
+#define KERN_HASHED_ARRAY_OP_ITEM_HAS_KEY		0x01U
+#define KERN_HASHED_ARRAY_OP_ITEM_HAS_VALUE		0x02U
+#define KERN_HASHED_ARRAY_OP_ITEM_NEXT_MASK		0x07U
+
 struct kern_expression
 {
 	uint32_t		len;			/* length of this expression */
@@ -2567,6 +2587,14 @@ struct kern_expression
 			uint16_t	elem_slot_id;	/* slot-id of temporary array element */
 			char		data[1]			__MAXALIGNED__;
 		} saop;		/* ScalarArrayOp */
+		struct {
+			const xpu_datum_operators *elem_ops;
+			TypeOpCode	elem_type;		/* element type-code */
+			uint32_t	nslots;			/* number of hash-slots */
+			uint32_t	default_offset;	/* offset to the default value */
+			char		__padding[4];
+			uint32_t	hslots[1]		__MAXALIGNED__;
+		} haop;		/* HashedArrayOp */
 		struct {
 			int			depth;
 			int			nitems;

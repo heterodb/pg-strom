@@ -3281,7 +3281,13 @@ __resolveDevicePointersWalker(gpuClient *gclient,
 					return false;
 			}
 			break;
-			
+		case FuncOpCode__HashedArrayOp:
+			if (!__lookupDeviceTypeOper(gclient,
+										gcontext,
+										&kexp->u.haop.elem_ops,
+										kexp->u.haop.elem_type))
+				return false;
+			break;
 		default:
 			break;
 	}

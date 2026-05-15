@@ -763,7 +763,6 @@ PG_FLOAT_DIV_OPERATOR_TEMPLATE(float8div, float8,float8,float8,)
 			}															\
 			result->expr_ops = &xpu_##TYPE##_ops;                       \
 			result->value = x_val.value % y_val.value;                  \
-			printf("%d <- %d mod %d\n", (int)result->value, x_val.value, y_val.value); \
 		}																\
 		return true;													\
 	}

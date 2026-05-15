@@ -486,63 +486,26 @@ found:
 /*
  * devtype_get_name_by_opcode
  */
-typedef struct {
-	TypeOpCode	type_code;
-	const char *type_name;
-} devtype_reverse_entry;
-
 static const char *
 devtype_get_name_by_opcode(TypeOpCode type_code)
 {
-	devtype_reverse_entry *entry;
-	bool		found;
-
-	if (!devtype_rev_htable)
+	switch (type_code)
 	{
-		HASHCTL	hctl;
-
-		memset(&hctl, 0, sizeof(HASHCTL));
-		hctl.keysize = sizeof(TypeOpCode);
-		hctl.entrysize = sizeof(devtype_reverse_entry);
-		hctl.hcxt = devinfo_memcxt;
-
-		devtype_rev_htable = hash_create("devtype_rev_htable",
-										 128,
-										 &hctl,
-										 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+		case TypeOpCode__composite:
+			return "composite";
+		case TypeOpCode__array:
+			return "array";
+		case TypeOpCode__internal:
+			return "internal";
+		default:
+			for (int i=0; devtype_catalog[i].type_name != NULL; i++)
+			{
+				if (devtype_catalog[i].type_code == type_code)
+					return devtype_catalog[i].type_name;
+			}
+			break;
 	}
-
-	entry = (devtype_reverse_entry *)
-		hash_search(devtype_rev_htable, &type_code, HASH_ENTER, &found);
-	if (!found)
-	{
-		switch (type_code)
-		{
-			case TypeOpCode__composite:
-				entry->type_name = "composite";
-				break;
-			case TypeOpCode__array:
-				entry->type_name = "array";
-				break;
-			case TypeOpCode__internal:
-				entry->type_name = "internal";
-				break;
-			default:
-				entry->type_name = NULL;
-				for (int i=0; devtype_catalog[i].type_name != NULL; i++)
-				{
-					if (devtype_catalog[i].type_code == type_code)
-					{
-						entry->type_name = devtype_catalog[i].type_name;
-						break;
-					}
-				}
-				break;
-		}
-	}
-	if (!entry->type_name)
-		elog(ERROR, "device type opcode:%u not found", type_code);
-	return entry->type_name;
+	elog(ERROR, "device type opcode:%u not found", type_code);
 }
 
 /*
@@ -2622,6 +2585,92 @@ codegen_casewhen_expression(codegen_context *context,
 /*
  * codegen_scalar_array_op_expression
  */
+static bool
+__build_hashed_array_op_expression(codegen_context *context,
+								   StringInfo buf, int curr_depth,
+								   devtype_info *dtype_s,
+								   devtype_info *dtype_e,
+								   Expr *expr_s, Const *expr_a)
+{
+	ArrayType  *arr;
+	int			nitems, nslots;
+	size_t		head_sz;
+	kern_expression *kexp = NULL;
+	StringInfoData temp;
+
+	if (expr_a->constisnull)
+		return false;
+	arr = DatumGetArrayTypeP(expr_a->constvalue);
+	nitems = ArrayGetNItems(ARR_NDIM(arr), ARR_DIMS(arr));
+	if (nitems < 4)
+		return false;	/* too short for HashedArrayOp */
+	nslots = nitems * 5 / 4 + 1;
+	/* header portion + hash-table */
+	head_sz = MAXALIGN(offsetof(kern_expression, u.haop.hslots[nslots]));
+	if (buf)
+	{
+		ArrayIterator iter;
+		Datum		datum;
+		bool		isnull;
+
+		kexp = (kern_expression *)alloca(head_sz);
+		memset(kexp, 0, head_sz);
+		kexp->exptype = TypeOpCode__bool;
+		kexp->expflags = context->kexp_flags;
+		kexp->opcode  = FuncOpCode__HashedArrayOp;
+		kexp->nr_args = 1;
+		kexp->u.haop.elem_type = dtype_e->type_code;
+		kexp->u.haop.nslots = nslots;
+		/* default 'false' */
+		kexp->u.haop.default_offset = offsetof(kern_expression, u.haop.__padding[0]);
+		initStringInfo(&temp);
+		enlargeStringInfo(&temp, head_sz);
+		temp.len = head_sz;
+		/* build a hash table */
+		iter = array_create_iterator(arr, 0, NULL);
+		while (array_iterate(iter, &datum, &isnull))
+		{
+			kern_hashed_array_op_item item;
+			int		hindex;
+
+			item.hash = dtype_e->type_hashfunc(isnull, datum);
+			hindex = item.hash % nslots;
+			item.next = kexp->u.haop.hslots[hindex];
+			if (!isnull)
+				item.next |= KERN_HASHED_ARRAY_OP_ITEM_HAS_KEY;
+			item.next |= KERN_HASHED_ARRAY_OP_ITEM_HAS_VALUE;
+			kexp->u.haop.hslots[hindex] =
+				__appendBinaryStringInfo(&temp, &item,
+										 offsetof(kern_hashed_array_op_item, data));
+			/* key */
+			if (dtype_e->type_byval)
+				appendBinaryStringInfo(&temp, &datum, dtype_e->type_length);
+			else
+				appendBinaryStringInfo(&temp, DatumGetPointer(datum), VARSIZE_ANY(datum));
+			/* value */
+			appendStringInfoChar(&temp, true);
+		}
+		array_free_iterator(iter);
+		/* alignment */
+		__appendZeroStringInfo(&temp, 0);
+		kexp->args_offset = temp.len;
+		memcpy(temp.data, kexp, head_sz);
+	}
+	/* 1st arg - scalar expression to be compared */
+	if (codegen_expression_walker(context,
+								  buf ? &temp : NULL,
+								  curr_depth, expr_s))
+		return false;
+	/* terminate the epression */
+	if (buf)
+	{
+		int		pos = __appendBinaryStringInfo(buf, temp.data, temp.len);
+		__appendKernExpMagicAndLength(buf, pos);
+		pfree(temp.data);
+	}
+	return true;
+}
+
 static int
 codegen_scalar_array_op_expression(codegen_context *context,
 								   StringInfo buf, int curr_depth,
@@ -2630,6 +2679,7 @@ codegen_scalar_array_op_expression(codegen_context *context,
 	Expr		   *expr_a, *expr_s;
 	devtype_info   *dtype_a, *dtype_s, *dtype_e;
 	devfunc_info   *dfunc;
+	Oid				oper_oid = sa_op->opno;
 	Oid				type_oid;
 	Oid				func_oid;
 	Oid				argtypes[2];
@@ -2657,7 +2707,7 @@ codegen_scalar_array_op_expression(codegen_context *context,
 	if (dtype_s->type_element == NULL &&
 		dtype_a->type_element != NULL)
 	{
-		func_oid = get_opcode(sa_op->opno);
+		func_oid = get_opcode(oper_oid);
 	}
 	else if (dtype_s->type_element != NULL &&
 			 dtype_a->type_element == NULL)
@@ -2665,14 +2715,13 @@ codegen_scalar_array_op_expression(codegen_context *context,
 		/* swap arguments */
 		Expr		   *expr_temp  = expr_a;
 		devtype_info   *dtype_temp = dtype_a;
-		Oid				opcode;
 
 		expr_a  = expr_s;
 		dtype_a = dtype_s;
 		expr_s  = expr_temp;
 		dtype_s = dtype_temp;
-		opcode = get_commutator(sa_op->opno);
-		func_oid = get_opcode(opcode);
+		oper_oid = get_commutator(oper_oid);
+		func_oid = get_opcode(oper_oid);
 	}
 	else
 	{
@@ -2680,6 +2729,22 @@ codegen_scalar_array_op_expression(codegen_context *context,
 				  sa_op->useOr ? "ANY" : "ALL");
 	}
 	dtype_e = dtype_a->type_element;
+	/* Try HashedArrayOp if possible */
+	if (sa_op->useOr &&							/* ANY */
+		op_hashjoinable(oper_oid,				/* '=' */
+						dtype_s->type_oid) &&
+		IsBinaryCoercible(dtype_e->type_oid,	/* binary convertible */
+						  dtype_s->type_oid) &&
+		IsA(expr_a, Const) &&					/* constant array */
+		dtype_e->type_hashfunc != NULL &&		/* has device hash function */
+		dtype_e->type_element == NULL &&		/* element must not be array */
+		dtype_e->comp_nfields == 0 &&			/* element must not be composite */
+		__build_hashed_array_op_expression(context,
+										   buf, curr_depth,
+										   dtype_s, dtype_e,
+										   expr_s, (Const *)expr_a))
+		return 0;
+
 	argtypes[0] = dtype_s->type_oid;
 	argtypes[1] = dtype_e->type_oid;
 	dfunc = __pgstrom_devfunc_lookup(func_oid,
@@ -4781,6 +4846,177 @@ __xpucode_projection_cstring(StringInfo buf,
 	}
 }
 
+/*
+ * __devtype_get_oid_by_opcode
+ */
+static Oid
+__devtype_get_oid_by_opcode(TypeOpCode type_code)
+{
+	Oid		type_oid = InvalidOid;
+
+	switch (type_code)
+	{
+		case TypeOpCode__composite:
+			return RECORDOID;
+		case TypeOpCode__array:
+			return ANYARRAYOID;
+		case TypeOpCode__internal:
+			return INTERNALOID;
+		default:
+			for (int i=0; devtype_catalog[i].type_name != NULL; i++)
+			{
+				if (devtype_catalog[i].type_code == type_code)
+				{
+					const char *type_name = devtype_catalog[i].type_name;
+					const char *type_ext  = devtype_catalog[i].type_extension;
+					CatCList   *typelist;
+
+					typelist = SearchSysCacheList1(TYPENAMENSP,
+												   CStringGetDatum(type_name));
+					for (int j=0; j < typelist->n_members; j++)
+					{
+						HeapTuple	htup = &typelist->members[j]->tuple;
+						Form_pg_type type_form = (Form_pg_type) GETSTRUCT(htup);
+						const char *ext_name;
+
+						ext_name = get_extension_name_by_object(TypeRelationId,
+																type_form->oid);
+						if (type_ext != NULL
+							? (ext_name && strcmp(type_ext, ext_name) == 0)
+							: (!ext_name && type_form->typnamespace == PG_CATALOG_NAMESPACE))
+						{
+							type_oid = type_form->oid;
+							ReleaseCatCacheList(typelist);
+							return type_oid;
+						}
+					}
+					ReleaseCatCacheList(typelist);
+				}
+			}
+			elog(ERROR, "No type oid found for device type-code:%u", type_code);
+	}
+}
+
+/*
+ * __xpucode_hashed_array_cstring
+ */
+static void
+__xpucode_hashed_array_cstring(StringInfo buf,
+							   const kern_expression *kexp)
+{
+	Oid			kexp_oid = __devtype_get_oid_by_opcode(kexp->exptype);
+	Oid			elem_oid = __devtype_get_oid_by_opcode(kexp->u.haop.elem_type);
+	const char *elem_name = devtype_get_name_by_opcode(kexp->u.haop.elem_type);
+	int16		elem_len,	kexp_len;
+	bool		elem_byval,	kexp_byval;
+	char		elem_align,	kexp_align;
+	char		elem_delim,	kexp_delim;
+	Oid			elem_ioparam, kexp_ioparam;
+	Oid			elem_outfunc, kexp_outfunc;
+	int			count = 0;
+
+	get_type_io_data(elem_oid,
+					 IOFunc_output,
+					 &elem_len,
+					 &elem_byval,
+					 &elem_align,
+					 &elem_delim,
+					 &elem_ioparam,
+					 &elem_outfunc);
+	get_type_io_data(kexp_oid,
+					 IOFunc_output,
+					 &kexp_len,
+					 &kexp_byval,
+					 &kexp_align,
+					 &kexp_delim,
+					 &kexp_ioparam,
+					 &kexp_outfunc);
+	appendStringInfo(buf, "(%s)[", elem_name);
+	for (int i=0; i < kexp->u.haop.nslots; i++)
+	{
+		uint32_t	next = kexp->u.haop.hslots[i];
+
+		assert((next & KERN_HASHED_ARRAY_OP_ITEM_NEXT_MASK) == 0);
+		while (next != 0)
+		{
+			const kern_hashed_array_op_item *item
+				= (const kern_hashed_array_op_item *)((const char *)kexp + next);
+			int		offset = 0;
+
+			if (count++ > 0)
+				appendStringInfoString(buf, ", ");
+			appendStringInfo(buf, "<hash=%08x, ", item->hash);
+			if ((item->next & KERN_HASHED_ARRAY_OP_ITEM_HAS_KEY) == 0)
+				appendStringInfo(buf, "null");
+			else if (elem_byval)
+			{
+				Datum	s, datum = 0;
+
+				assert(elem_len > 0 && elem_len <= sizeof(Datum));
+				memcpy(&datum, item->data, elem_len);
+				s = OidFunctionCall1(elem_outfunc, datum);
+				appendStringInfoString(buf, DatumGetCString(s));
+				offset = elem_len;
+			}
+			else
+			{
+				Datum	s;
+
+				s = OidFunctionCall1(elem_outfunc, PointerGetDatum(item->data));
+				appendStringInfo(buf, "'%s'", DatumGetCString(s));
+				offset = VARSIZE_ANY(item->data);
+			}
+			appendStringInfoString(buf, " => ");
+			if ((item->next & KERN_HASHED_ARRAY_OP_ITEM_HAS_VALUE) == 0)
+				appendStringInfo(buf, "null");
+			else
+			{
+				offset = TYPEALIGN(typealign_get_width(kexp_align), offset);
+				if (kexp_byval)
+				{
+					Datum	s, datum = 0;
+
+					assert(kexp_len > 0 && kexp_len <= sizeof(Datum));
+					memcpy(&datum, item->data + offset, kexp_len);
+					s = OidFunctionCall1(kexp_outfunc, datum);
+					appendStringInfo(buf, "'%s'", DatumGetCString(s));
+				}
+				else
+				{
+					Datum	s;
+
+					s = OidFunctionCall1(kexp_outfunc, PointerGetDatum(item->data + offset));
+					appendStringInfo(buf, "'%s'", DatumGetCString(s));
+				}
+			}
+			appendStringInfoChar(buf, '>');
+
+			next = (item->next & ~KERN_HASHED_ARRAY_OP_ITEM_NEXT_MASK);
+		}
+	}
+	/* default value */
+	if (kexp->u.haop.default_offset)
+	{
+		const char *data = (const char *)kexp + kexp->u.haop.default_offset;
+		Datum		s, datum = 0;
+
+		if (count++ > 0)
+			appendStringInfoString(buf, ", ");
+		if (kexp_byval)
+		{
+			memcpy(&datum, data, kexp_len);
+			s = OidFunctionCall1(kexp_outfunc, datum);
+			appendStringInfo(buf, "<default=%s>", DatumGetCString(s));
+		}
+		else
+		{
+			s = OidFunctionCall1(kexp_outfunc, PointerGetDatum(data));
+			appendStringInfo(buf, "<default=%s>", DatumGetCString(s));
+		}
+	}
+	appendStringInfo(buf, "]");
+}
+
 static void
 __xpucode_to_cstring(StringInfo buf,
 					 const kern_expression *kexp,
@@ -4973,6 +5209,11 @@ __xpucode_to_cstring(StringInfo buf,
 			appendStringInfoChar(buf, '>');
 			break;
 
+		case FuncOpCode__HashedArrayOp:
+			appendStringInfo(buf, "{HashedArrayOp: nslots=%u hash=",
+							 kexp->u.haop.nslots);
+			__xpucode_hashed_array_cstring(buf, kexp);
+			break;
 		default:
 			dname = devfunc_get_name_by_opcode(kexp->opcode, &device_only);
 			if (!dname)

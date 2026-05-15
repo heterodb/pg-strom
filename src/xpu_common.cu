@@ -980,6 +980,81 @@ pgfn_ScalarArrayOp(XPU_PGFUNCTION_ARGS)
 	return true;
 }
 
+STATIC_FUNCTION(bool)
+pgfn_HashedArrayOp(XPU_PGFUNCTION_ARGS)
+{
+	const xpu_datum_operators *kexp_ops = kexp->expr_ops;
+	const xpu_datum_operators *elem_ops = kexp->u.haop.elem_ops;
+	xpu_datum_t	   *sval;	/* scalar value */
+	xpu_datum_t	   *eval;	/* element value */
+	const kern_expression *karg;
+
+	assert(kexp->nr_args == 1 && kexp->u.haop.nslots > 0);
+	sval = (xpu_datum_t *)alloca(elem_ops->xpu_type_sizeof);
+	eval = (xpu_datum_t *)alloca(elem_ops->xpu_type_sizeof);
+	assert(((uintptr_t)sval & (elem_ops->xpu_type_alignof-1)) == 0 &&
+		   ((uintptr_t)eval & (elem_ops->xpu_type_alignof-1)) == 0);
+	/* fetch scalar value */
+	karg = KEXP_FIRST_ARG(kexp);
+	assert(__KEXP_IS_VALID(kexp, karg) &&
+		   karg->exptype == elem_ops->xpu_type_code);
+	if (!EXEC_KERN_EXPRESSION(kcxt, karg, sval))
+		return false;
+	if (XPU_DATUM_ISNULL(sval))
+		__result->expr_ops = NULL;
+	else
+	{
+		const char *data_ptr = NULL;
+		uint32_t	hash, next;
+		int			comp;
+
+		/* compute scalar value's hash */
+		if (!elem_ops->xpu_datum_hash(kcxt, &hash, sval))
+			return false;
+		/* default value, if given */
+		if (kexp->u.haop.default_offset)
+			data_ptr = (const char *)kexp + kexp->u.haop.default_offset;
+		/* walk on the hash table */
+		next = kexp->u.haop.hslots[hash % kexp->u.haop.nslots];
+		assert((next & KERN_HASHED_ARRAY_OP_ITEM_NEXT_MASK) == 0);
+		while (next != 0)
+		{
+			const kern_hashed_array_op_item *curr
+				= (const kern_hashed_array_op_item *)((const char *)kexp + next);
+			if (curr->hash == hash &&
+				(curr->next & KERN_HASHED_ARRAY_OP_ITEM_HAS_KEY) != 0)
+			{
+				/* fetch an element value */
+				if (!elem_ops->xpu_datum_heap_read(kcxt, curr->data, eval))
+					return false;
+				assert(!XPU_DATUM_ISNULL(eval));
+				/* compare two values */
+				if (!elem_ops->xpu_datum_comp(kcxt, &comp, sval, eval))
+					return false;
+				if (comp == 0)
+				{
+					if ((curr->next & KERN_HASHED_ARRAY_OP_ITEM_HAS_VALUE) == 0)
+						data_ptr = NULL;	/* null */
+					else
+					{
+						uint32_t	offset = (elem_ops->xpu_type_byval
+											  ? elem_ops->xpu_type_length
+											  : VARSIZE_ANY(curr->data));
+						offset = TYPEALIGN(kexp_ops->xpu_type_align, offset);
+						data_ptr = curr->data + offset;
+					}
+					break;
+				}
+			}
+			next = (curr->next & ~KERN_HASHED_ARRAY_OP_ITEM_NEXT_MASK);
+		}
+		/* load the result value (may be NULL) */
+		if (!kexp_ops->xpu_datum_heap_read(kcxt, data_ptr, __result))
+			return false;
+	}
+	return true;
+}
+
 /* ----------------------------------------------------------------
  *
  * Routines to support Projection
@@ -2920,6 +2995,7 @@ PUBLIC_DATA(xpu_function_catalog_entry, builtin_xpu_functions_catalog[]) = {
 	{FuncOpCode__CaseWhenExpr,				pgfn_CaseWhenExpr},
 	{FuncOpCode__ScalarArrayOpAny,			pgfn_ScalarArrayOp},
 	{FuncOpCode__ScalarArrayOpAll,			pgfn_ScalarArrayOp},
+	{FuncOpCode__HashedArrayOp,				pgfn_HashedArrayOp},
 #include "xpu_opcodes.h"
 	{FuncOpCode__Projection,                pgfn_Projection},
 	{FuncOpCode__SortKeys,					pgfn_SortKeys},
