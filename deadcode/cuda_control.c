@@ -335,7 +335,11 @@ __gpuMemAlloc(GpuContext *gcontext, int cuda_index, size_t bytesize)
 	 * device memory requirement. smaller number of kernel
 	 * driver call makes better performance!
 	 */
+	if (pgstrom_chunk_size() > (SIZE_MAX / 11))
+		elog(ERROR, "chunk size too large for GPU memory allocation");
 	required = Max(pgstrom_chunk_size() * 11, bytesize);
+	if (required > SIZE_MAX - (1024 * 1024))
+		elog(ERROR, "integer overflow computing required GPU memory size");
 	required = TYPEALIGN(1024 * 1024, required);	/* round up to 1MB */
 #ifdef USE_ASSERT_CHECKING
 	{
