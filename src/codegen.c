@@ -5155,56 +5155,47 @@ __xpucode_hashed_array_cstring(StringInfo buf,
 		{
 			const kern_hashed_array_op_item *item
 				= (const kern_hashed_array_op_item *)((const char *)kexp + next);
-			int		offset = 0;
+			const char *key;
+			const char *value;
+			int			offset = 0;
 
-			if (count++ > 0)
-				appendStringInfoString(buf, ", ");
-			appendStringInfo(buf, "<hash=%08x, ", item->hash);
 			if ((item->next & KERN_HASHED_ARRAY_OP_ITEM_HAS_KEY) == 0)
-				appendStringInfo(buf, "null");
+				key = "null";
 			else if (elem_byval)
 			{
-				Datum	s, datum = 0;
+				Datum	datum = 0;
 
-				assert(elem_len > 0 && elem_len <= sizeof(Datum));
 				memcpy(&datum, item->data, elem_len);
-				s = OidFunctionCall1(elem_outfunc, datum);
-				appendStringInfoString(buf, DatumGetCString(s));
+				key = DatumGetCString(OidFunctionCall1(elem_outfunc, datum));
 				offset = elem_len;
 			}
 			else
 			{
-				Datum	s;
-
-				s = OidFunctionCall1(elem_outfunc, PointerGetDatum(item->data));
-				appendStringInfo(buf, "'%s'", DatumGetCString(s));
+				key = DatumGetCString(OidFunctionCall1(elem_outfunc,
+													   PointerGetDatum(item->data)));
 				offset = VARSIZE_ANY(item->data);
 			}
-			appendStringInfoString(buf, " => ");
 			if ((item->next & KERN_HASHED_ARRAY_OP_ITEM_HAS_VALUE) == 0)
-				appendStringInfo(buf, "null");
+				value = "null";
 			else
 			{
 				offset = TYPEALIGN(typealign_get_width(kexp_align), offset);
 				if (kexp_byval)
 				{
-					Datum	s, datum = 0;
+					Datum	datum = 0;
 
-					assert(kexp_len > 0 && kexp_len <= sizeof(Datum));
 					memcpy(&datum, item->data + offset, kexp_len);
-					s = OidFunctionCall1(kexp_outfunc, datum);
-					appendStringInfo(buf, "'%s'", DatumGetCString(s));
+					value = DatumGetCString(OidFunctionCall1(kexp_outfunc, datum));
 				}
 				else
 				{
-					Datum	s;
-
-					s = OidFunctionCall1(kexp_outfunc, PointerGetDatum(item->data + offset));
-					appendStringInfo(buf, "'%s'", DatumGetCString(s));
+					value = DatumGetCString(OidFunctionCall1(kexp_outfunc,
+															 PointerGetDatum(item->data + offset)));
 				}
 			}
-			appendStringInfoChar(buf, '>');
-
+			if (count++ > 0)
+				appendStringInfoString(buf, ", ");
+			appendStringInfo(buf, "<hash:%08x|%s|%s>", item->hash, key, value);
 			next = (item->next & ~KERN_HASHED_ARRAY_OP_ITEM_NEXT_MASK);
 		}
 	}
@@ -5212,21 +5203,22 @@ __xpucode_hashed_array_cstring(StringInfo buf,
 	if (kexp->u.haop.default_offset)
 	{
 		const char *data = (const char *)kexp + kexp->u.haop.default_offset;
-		Datum		s, datum = 0;
+		const char *value;
 
-		if (count++ > 0)
-			appendStringInfoString(buf, ", ");
 		if (kexp_byval)
 		{
+			Datum	datum = 0;
 			memcpy(&datum, data, kexp_len);
-			s = OidFunctionCall1(kexp_outfunc, datum);
-			appendStringInfo(buf, "<default=%s>", DatumGetCString(s));
+			value = DatumGetCString(OidFunctionCall1(kexp_outfunc, datum));
 		}
 		else
 		{
-			s = OidFunctionCall1(kexp_outfunc, PointerGetDatum(data));
-			appendStringInfo(buf, "<default=%s>", DatumGetCString(s));
+			value = DatumGetCString(OidFunctionCall1(kexp_outfunc,
+													 PointerGetDatum(data)));
 		}
+		if (count++ > 0)
+			appendStringInfoString(buf, ", ");
+		appendStringInfo(buf, "<default:%s>", value);
 	}
 	appendStringInfo(buf, "]");
 }
