@@ -2432,6 +2432,211 @@ codegen_relabel_expression(codegen_context *context,
 }
 
 /*
+ * try_casewhen_expression_by_hashed_array
+ */
+static bool
+try_casewhen_expression_by_hashed_array(codegen_context *context,
+										StringInfo buf, int curr_depth,
+										CaseExpr *caseexpr)
+{
+	kern_expression *kexp = NULL;
+	devtype_info   *dtype_r;	/* result type */
+	devtype_info   *dtype_e;	/* expression type */
+	devtype_info   *dtype;
+	int				nslots, nitems = 0;
+	size_t			head_sz;
+	ListCell	   *lc;
+	StringInfoData temp;
+
+    /* check result type */
+    dtype_r = pgstrom_devtype_lookup(caseexpr->casetype);
+    if (!dtype_r)
+		return false;
+	/* must be CASE expr WHEN val1 ... WHEN val2 ... */
+	if (!caseexpr->arg)
+		return false;
+	/* check expression type */
+	dtype_e = pgstrom_devtype_lookup(exprType((Node *)caseexpr->arg));
+	if (!dtype_e ||
+		!dtype_e->type_hashfunc ||			/* device hash function */
+		dtype_e->type_element != NULL ||	/* array type */
+		dtype_e->comp_nfields != 0)			/* composite type */
+		return false;
+	/* check WHEN clauses */
+	foreach (lc, caseexpr->args)
+	{
+		CaseWhen   *cw = lfirst(lc);
+		OpExpr	   *op;
+		CaseTestExpr *cte;
+		Const	   *con;
+
+		/* result must be Const */
+		if (!IsA(cw->result, Const))
+			return false;
+		dtype = pgstrom_devtype_lookup(exprType((Node *)cw->result));
+		if (!dtype || !IsBinaryCoercible(dtype->type_oid,		/* binary convertible */
+										 dtype_r->type_oid))
+			return false;
+		/* condition must be 'PHVar = Const' */
+		if (!IsA(cw->expr, OpExpr))
+			return false;
+		op = (OpExpr *)cw->expr;
+		if (op->opresulttype != BOOLOID &&
+			list_length(op->args) != 2)
+			return false;
+		cte = linitial(op->args);
+		con = lsecond(op->args);
+		if (IsA(cte, Const) && IsA(con, CaseTestExpr))
+		{
+			/* swap */
+			Const  *__con = (Const *)cte;
+			cte = (CaseTestExpr *)con;
+			con = __con;
+		}
+		if (!IsA(cte, CaseTestExpr) || !IsA(con, Const))
+			return false;
+		if (op_hashjoinable(op->opno,			/* '=' */
+							dtype_e->type_oid) &&
+			IsBinaryCoercible(cte->typeId,		/* binary convertible */
+							  dtype_e->type_oid) &&
+			IsBinaryCoercible(con->consttype,	/* binary convertible */
+							  dtype_e->type_oid))
+		{
+			nitems++;
+		}
+		else
+		{
+			return false;
+		}
+	}
+	/* check default type, if any */
+	if (caseexpr->defresult)
+	{
+		if (!IsA(caseexpr->defresult, Const))
+			return false;
+		dtype = pgstrom_devtype_lookup(exprType((Node *)caseexpr->defresult));
+		if (!dtype || !IsBinaryCoercible(dtype->type_oid,		/* binary convertible */
+										 dtype_r->type_oid))
+			return false;
+	}
+	/* OK, makes Hashed-Array-Operation */
+	if (nitems < KERN_HASHED_ARRAY_OP_NITEMS_THRESHOLD)
+		return false;
+	nslots = nitems * 5 / 4 + 1;
+	head_sz = MAXALIGN(offsetof(kern_expression, u.haop.hslots[nslots]));
+	if (buf)
+	{
+		kexp = (kern_expression *)alloca(head_sz);
+		memset(kexp, 0, head_sz);
+		kexp->exptype = dtype_r->type_code;
+		kexp->expflags = context->kexp_flags;
+		kexp->opcode  = FuncOpCode__HashedArrayOp;
+		kexp->nr_args = 1;
+		kexp->u.haop.elem_type = dtype_e->type_code;
+		kexp->u.haop.nslots = nslots;
+
+		initStringInfo(&temp);
+		enlargeStringInfo(&temp, head_sz);
+		temp.len = head_sz;
+		foreach (lc, caseexpr->args)
+		{
+			kern_hashed_array_op_item item;
+			CaseWhen   *cw = lfirst(lc);
+			Const	   *r_con = (Const *)cw->result;
+			OpExpr	   *op = (OpExpr *)cw->expr;
+			Const	   *e_con;
+			int			hindex;
+
+			if (IsA(linitial(op->args), CaseTestExpr))
+				e_con = lsecond(op->args);
+			else if (IsA(lsecond(op->args), CaseTestExpr))
+				e_con = linitial(op->args);
+			else
+				return false;	/* should not happen */
+			Assert(IsA(e_con, Const) && IsBinaryCoercible(dtype_e->type_oid,
+														  e_con->consttype));
+
+			item.hash = dtype_e->type_hashfunc(e_con->constisnull,
+											   e_con->constvalue);
+			hindex = item.hash % nslots;
+			item.next = kexp->u.haop.hslots[hindex];
+			if (!e_con->constisnull)
+				item.next |= KERN_HASHED_ARRAY_OP_ITEM_HAS_KEY;
+			if (!r_con->constisnull)
+				item.next |= KERN_HASHED_ARRAY_OP_ITEM_HAS_VALUE;
+			kexp->u.haop.hslots[hindex] =
+				__appendBinaryStringInfo(&temp, &item,
+										 offsetof(kern_hashed_array_op_item, data));
+			/* expression */
+			if (!e_con->constisnull)
+			{
+				if (dtype_e->type_byval)
+					appendBinaryStringInfo(&temp,
+										   &e_con->constvalue,
+										   dtype_e->type_length);
+				else
+					appendBinaryStringInfo(&temp,
+										   DatumGetPointer(e_con->constvalue),
+										   VARSIZE_ANY(e_con->constvalue));
+			}
+			/* result */
+			if (!r_con->constisnull)
+			{
+				int		gap = TYPEALIGN(dtype_r->type_align, temp.len) - temp.len;
+				int64_t	zero = 0;
+
+				if (gap > 0)
+					appendBinaryStringInfo(&temp, &zero, 0);
+				if (dtype_r->type_byval)
+					appendBinaryStringInfo(&temp,
+										   &r_con->constvalue,
+										   dtype_r->type_length);
+				else
+					appendBinaryStringInfo(&temp,
+										   DatumGetPointer(r_con->constvalue),
+										   VARSIZE_ANY(r_con->constvalue));
+			}
+		}
+		/* default value, if any */
+		if (caseexpr->defresult)
+		{
+			Const	   *d_con = (Const *)caseexpr->defresult;
+			uint32_t	offset = 0;
+
+			if (!d_con->constisnull)
+			{
+				if (dtype_r->type_byval)
+					offset = __appendBinaryStringInfo(&temp,
+													  &d_con->constvalue,
+													  dtype_r->type_length);
+				else
+					offset = __appendBinaryStringInfo(&temp,
+													  DatumGetPointer(d_con->constvalue),
+													  VARSIZE_ANY(d_con->constvalue));
+			}
+			kexp->u.haop.default_offset = offset;
+		}
+		/* alignment */
+		__appendZeroStringInfo(&temp, 0);
+		kexp->args_offset = temp.len;
+		memcpy(temp.data, kexp, head_sz);
+	}
+	/* 1st arg - scalar expression to be compared */
+	if (codegen_expression_walker(context,
+								  buf ? &temp : NULL,
+								  curr_depth, caseexpr->arg))
+		return false;
+	/* terminate the epression */
+	if (buf)
+	{
+		int		pos = __appendBinaryStringInfo(buf, temp.data, temp.len);
+		__appendKernExpMagicAndLength(buf, pos);
+		pfree(temp.data);
+	}
+	return true;
+}
+
+/*
  * codegen_casetest_expression
  */
 static int		codegen_casetest_key_slot_id = -1;
@@ -2486,6 +2691,12 @@ codegen_casewhen_expression(codegen_context *context,
 	int			saved_casetest_key_slot_id = codegen_casetest_key_slot_id;
 	bool		saved_replace_expr_by_pseudo_const = try_replace_expr_by_pseudo_const;
 
+	/* try fast hash-based CASE ... WHEN */
+	if (try_casewhen_expression_by_hashed_array(context,
+												buf,
+												curr_depth,
+												caseexpr))
+		return 0;
 	/* check result type */
 	dtype = pgstrom_devtype_lookup(caseexpr->casetype);
 	if (!dtype)
@@ -2602,7 +2813,7 @@ __build_hashed_array_op_expression(codegen_context *context,
 		return false;
 	arr = DatumGetArrayTypeP(expr_a->constvalue);
 	nitems = ArrayGetNItems(ARR_NDIM(arr), ARR_DIMS(arr));
-	if (nitems < 4)
+	if (nitems < KERN_HASHED_ARRAY_OP_NITEMS_THRESHOLD)
 		return false;	/* too short for HashedArrayOp */
 	nslots = nitems * 5 / 4 + 1;
 	/* header portion + hash-table */
@@ -2643,11 +2854,14 @@ __build_hashed_array_op_expression(codegen_context *context,
 				__appendBinaryStringInfo(&temp, &item,
 										 offsetof(kern_hashed_array_op_item, data));
 			/* key */
-			if (dtype_e->type_byval)
-				appendBinaryStringInfo(&temp, &datum, dtype_e->type_length);
-			else
-				appendBinaryStringInfo(&temp, DatumGetPointer(datum), VARSIZE_ANY(datum));
-			/* value */
+			if (!isnull)
+			{
+				if (dtype_e->type_byval)
+					appendBinaryStringInfo(&temp, &datum, dtype_e->type_length);
+				else
+					appendBinaryStringInfo(&temp, DatumGetPointer(datum), VARSIZE_ANY(datum));
+			}
+			/* value (bool has character alignment) */
 			appendStringInfoChar(&temp, true);
 		}
 		array_free_iterator(iter);
