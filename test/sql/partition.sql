@@ -32,7 +32,7 @@ select lo_orderpriority, sum(lo_extendedprice*lo_discount) as revenue
    and lo_discount between 1 and 3
    and lo_quantity < 25
  group by lo_orderpriority
- order by lo_orderpriority;
+ order by lo_orderpriority,revenue;
 
 select lo_orderpriority, sum(lo_extendedprice*lo_discount) as revenue
   from plineorder
@@ -40,7 +40,7 @@ select lo_orderpriority, sum(lo_extendedprice*lo_discount) as revenue
    and lo_discount between 1 and 3
    and lo_quantity < 25
  group by lo_orderpriority
- order by lo_orderpriority;
+ order by lo_orderpriority,revenue;
 
 ---
 --- GPU-PreAgg with JOIN
