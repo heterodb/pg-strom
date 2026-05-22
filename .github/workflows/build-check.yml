@@ -106,6 +106,7 @@ jobs:
     name: Regression with PostgreSQL ${{ matrix.test_pgver }}
     if: >
       github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'pull_request' ||
       (github.event_name == 'push' && github.actor == 'kaigai') ||
       (github.event_name == 'pull_request_review' &&
        github.event.review.state == 'approved' &&
