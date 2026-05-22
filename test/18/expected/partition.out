@@ -25,9 +25,9 @@ and lo_quantity < 25;
                referenced: lo_orderdate, lo_quantity, lo_extendedprice, lo_discount
                scan0: plineorder_p1993_heap
                scan1: plineorder_p1993_parquet
-               stats-hint1: (lo_orderdate >= 19930101), (lo_orderdate <= 19931231), (lo_discount >= '1'::numeric), (lo_discount <= '3'::numeric), (lo_quantity < '25'::numeric)
+               scan1-stats-hint: (lo_orderdate >= 19930101), (lo_orderdate <= 19931231), (lo_discount >= '1'::numeric), (lo_discount <= '3'::numeric), (lo_quantity < '25'::numeric)
                scan2: plineorder_p1993_arrow
-               stats-hint2: (lo_orderdate >= 19930101), (lo_orderdate <= 19931231)
+               scan2-stats-hint: (lo_orderdate >= 19930101), (lo_orderdate <= 19931231)
                GPU Scan Quals: ((lo_orderdate >= 19930101) AND (lo_orderdate <= 19931231) AND (lo_discount >= '1'::numeric) AND (lo_discount <= '3'::numeric) AND (lo_quantity < '25'::numeric))
                GPU Group Key: 
                file0: plineorder_p1993_rem1.parquet (read: 2337.33KB, size: 10.40MB)
@@ -51,7 +51,7 @@ select lo_orderpriority, sum(lo_extendedprice*lo_discount) as revenue
    and lo_discount between 1 and 3
    and lo_quantity < 25
  group by lo_orderpriority
- order by lo_orderpriority;
+ order by lo_orderpriority,revenue;
                                                                                         QUERY PLAN                                                                                         
 -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Gather
@@ -61,14 +61,14 @@ select lo_orderpriority, sum(lo_extendedprice*lo_discount) as revenue
          referenced: lo_orderdate, lo_orderpriority, lo_quantity, lo_extendedprice, lo_discount
          scan0: plineorder_p1993_heap
          scan1: plineorder_p1993_parquet
-         stats-hint1: (lo_orderdate >= 19930101), (lo_orderdate <= 19931231), (lo_discount >= '1'::numeric), (lo_discount <= '3'::numeric), (lo_quantity < '25'::numeric)
+         scan1-stats-hint: (lo_orderdate >= 19930101), (lo_orderdate <= 19931231), (lo_discount >= '1'::numeric), (lo_discount <= '3'::numeric), (lo_quantity < '25'::numeric)
          scan2: plineorder_p1993_arrow
-         stats-hint2: (lo_orderdate >= 19930101), (lo_orderdate <= 19931231)
+         scan2-stats-hint: (lo_orderdate >= 19930101), (lo_orderdate <= 19931231)
          GPU Scan Quals: ((lo_orderdate >= 19930101) AND (lo_orderdate <= 19931231) AND (lo_discount >= '1'::numeric) AND (lo_discount <= '3'::numeric) AND (lo_quantity < '25'::numeric))
          GPU Group Key: lo_orderpriority
          file0: plineorder_p1993_rem1.parquet (read: 2421.68KB, size: 10.40MB)
          file1: plineorder_p1993_rem2.arrow (read: 8.30MB, size: 21.56MB)
-         GPU-Sort keys: lo_orderpriority
+         GPU-Sort keys: lo_orderpriority, pgstrom.fsum_numeric((pgstrom.psum((lo_extendedprice * lo_discount))))
 (15 rows)
 
 select lo_orderpriority, sum(lo_extendedprice*lo_discount) as revenue
@@ -77,17 +77,17 @@ select lo_orderpriority, sum(lo_extendedprice*lo_discount) as revenue
    and lo_discount between 1 and 3
    and lo_quantity < 25
  group by lo_orderpriority
- order by lo_orderpriority;
+ order by lo_orderpriority,revenue;
  lo_orderpriority |   revenue   
 ------------------+-------------
- 1-URGENT         | 38370826882
  1-URGENT         | 25816377858
+ 1-URGENT         | 38370826882
  2-HIGH           | 25710813631
  2-HIGH           | 38674134547
  3-MEDIUM         | 24638625682
  3-MEDIUM         | 37810038744
- 4-NOT SPECI      | 37440058771
  4-NOT SPECI      | 25767033534
+ 4-NOT SPECI      | 37440058771
  5-LOW            | 26027553974
  5-LOW            | 38887291723
 (10 rows)
@@ -119,27 +119,27 @@ select c_city,s_city,(lo_orderdate/10000)::int d_year,sum(lo_revenue) as revenue
                            GPU Projection: lo_orderdate, lo_revenue, lo_custkey, s_city
                            referenced: lo_custkey, lo_suppkey, lo_orderdate, lo_revenue
                            scan0: plineorder_p1993_heap
-                           brin0: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                           scan0-brin: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
                            scan1: plineorder_p1993_parquet
-                           stats-hint1: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                           scan1-stats-hint: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
                            scan2: plineorder_p1993_arrow
-                           stats-hint2: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                           scan2-stats-hint: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
                            scan3: plineorder_p1994_heap
                            scan4: plineorder_p1994_parquet
-                           stats-hint4: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                           scan4-stats-hint: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
                            scan5: plineorder_p1994_arrow
-                           stats-hint5: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                           scan5-stats-hint: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
                            scan6: plineorder_p1995_heap
                            scan7: plineorder_p1995_parquet
-                           stats-hint7: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                           scan7-stats-hint: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
                            scan8: plineorder_p1995_arrow
-                           stats-hint8: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                           scan8-stats-hint: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
                            scan9: plineorder_p1996_heap
-                           brin9: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                           scan9-brin: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
                            scan10: plineorder_p1996_parquet
-                           stats-hint10: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                           scan10-stats-hint: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
                            scan11: plineorder_p1996_arrow
-                           stats-hint11: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                           scan11-stats-hint: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
                            GPU Scan Quals: ((lo_orderdate >= 19930701) AND (lo_orderdate <= 19960630))
                            GPU Join Quals [1]: (lo_suppkey = s_suppkey)
                            GPU Outer Hash [1]: lo_suppkey
@@ -214,25 +214,25 @@ select c_city,s_city,(lo_orderdate/10000)::int d_year,lo_shipmode, sum(lo_revenu
                            GPU Projection: lo_orderdate, lo_shipmode, lo_revenue, lo_custkey, s_city
                            referenced: lo_custkey, lo_suppkey, lo_orderdate, lo_revenue
                            scan0: plineorder_p1992_heap
-                           brin0: (lo_orderdate >= 19920701), (lo_orderdate <= 19970630)
+                           scan0-brin: (lo_orderdate >= 19920701), (lo_orderdate <= 19970630)
                            scan1: plineorder_p1992_arrow
-                           stats-hint1: (lo_orderdate <= 19970630), (lo_orderdate >= 19920701)
+                           scan1-stats-hint: (lo_orderdate <= 19970630), (lo_orderdate >= 19920701)
                            scan2: plineorder_p1993_heap
                            scan3: plineorder_p1993_arrow
-                           stats-hint3: (lo_orderdate <= 19970630), (lo_orderdate >= 19920701)
+                           scan3-stats-hint: (lo_orderdate <= 19970630), (lo_orderdate >= 19920701)
                            scan4: plineorder_p1994_heap
                            scan5: plineorder_p1994_arrow
-                           stats-hint5: (lo_orderdate <= 19970630), (lo_orderdate >= 19920701)
+                           scan5-stats-hint: (lo_orderdate <= 19970630), (lo_orderdate >= 19920701)
                            scan6: plineorder_p1995_heap
                            scan7: plineorder_p1995_arrow
-                           stats-hint7: (lo_orderdate <= 19970630), (lo_orderdate >= 19920701)
+                           scan7-stats-hint: (lo_orderdate <= 19970630), (lo_orderdate >= 19920701)
                            scan8: plineorder_p1996_heap
                            scan9: plineorder_p1996_arrow
-                           stats-hint9: (lo_orderdate <= 19970630), (lo_orderdate >= 19920701)
+                           scan9-stats-hint: (lo_orderdate <= 19970630), (lo_orderdate >= 19920701)
                            scan10: plineorder_p1997_heap
-                           brin10: (lo_orderdate >= 19920701), (lo_orderdate <= 19970630)
+                           scan10-brin: (lo_orderdate >= 19920701), (lo_orderdate <= 19970630)
                            scan11: plineorder_p1997_arrow
-                           stats-hint11: (lo_orderdate <= 19970630), (lo_orderdate >= 19920701)
+                           scan11-stats-hint: (lo_orderdate <= 19970630), (lo_orderdate >= 19920701)
                            GPU Scan Quals: ((lo_shipmode = ANY ('{SHIP,RAIL}'::bpchar[])) AND (lo_orderdate <= 19970630) AND (lo_orderdate >= 19920701))
                            GPU Join Quals [1]: (lo_suppkey = s_suppkey)
                            GPU Outer Hash [1]: lo_suppkey
@@ -329,27 +329,27 @@ select c_city,s_city,(lo_orderdate/10000)::int,sum(lo_revenue) as revenue
                                  GPU Projection: lo_orderdate, lo_revenue, lo_custkey, s_city
                                  referenced: lo_custkey, lo_suppkey, lo_orderdate, lo_revenue
                                  scan0: plineorder_p1993_heap
-                                 brin0: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                                 scan0-brin: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
                                  scan1: plineorder_p1993_parquet
-                                 stats-hint1: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                                 scan1-stats-hint: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
                                  scan2: plineorder_p1993_arrow
-                                 stats-hint2: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                                 scan2-stats-hint: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
                                  scan3: plineorder_p1994_heap
                                  scan4: plineorder_p1994_parquet
-                                 stats-hint4: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                                 scan4-stats-hint: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
                                  scan5: plineorder_p1994_arrow
-                                 stats-hint5: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                                 scan5-stats-hint: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
                                  scan6: plineorder_p1995_heap
                                  scan7: plineorder_p1995_parquet
-                                 stats-hint7: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                                 scan7-stats-hint: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
                                  scan8: plineorder_p1995_arrow
-                                 stats-hint8: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                                 scan8-stats-hint: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
                                  scan9: plineorder_p1996_heap
-                                 brin9: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                                 scan9-brin: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
                                  scan10: plineorder_p1996_parquet
-                                 stats-hint10: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                                 scan10-stats-hint: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
                                  scan11: plineorder_p1996_arrow
-                                 stats-hint11: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                                 scan11-stats-hint: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
                                  GPU Scan Quals: ((lo_orderdate >= 19930701) AND (lo_orderdate <= 19960630))
                                  GPU Join Quals [1]: (lo_suppkey = s_suppkey)
                                  GPU Outer Hash [1]: lo_suppkey
@@ -427,27 +427,27 @@ select c_city,s_city,(lo_orderdate/10000)::int,sum(lo_revenue) as revenue
                                        GPU Projection: lo_orderdate, lo_revenue, lo_custkey, lo_suppkey
                                        referenced: lo_custkey, lo_suppkey, lo_orderdate, lo_revenue
                                        scan0: plineorder_p1993_heap
-                                       brin0: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                                       scan0-brin: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
                                        scan1: plineorder_p1993_parquet
-                                       stats-hint1: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                                       scan1-stats-hint: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
                                        scan2: plineorder_p1993_arrow
-                                       stats-hint2: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                                       scan2-stats-hint: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
                                        scan3: plineorder_p1994_heap
                                        scan4: plineorder_p1994_parquet
-                                       stats-hint4: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                                       scan4-stats-hint: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
                                        scan5: plineorder_p1994_arrow
-                                       stats-hint5: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                                       scan5-stats-hint: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
                                        scan6: plineorder_p1995_heap
                                        scan7: plineorder_p1995_parquet
-                                       stats-hint7: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                                       scan7-stats-hint: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
                                        scan8: plineorder_p1995_arrow
-                                       stats-hint8: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                                       scan8-stats-hint: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
                                        scan9: plineorder_p1996_heap
-                                       brin9: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                                       scan9-brin: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
                                        scan10: plineorder_p1996_parquet
-                                       stats-hint10: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                                       scan10-stats-hint: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
                                        scan11: plineorder_p1996_arrow
-                                       stats-hint11: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                                       scan11-stats-hint: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
                                        GPU Scan Quals: ((lo_orderdate >= 19930701) AND (lo_orderdate <= 19960630))
                                        file0: plineorder_p1993_rem1.parquet (read: 3336.79KB, size: 10.40MB)
                                        file1: plineorder_p1993_rem2.arrow (read: 3550.37KB, size: 21.56MB)
