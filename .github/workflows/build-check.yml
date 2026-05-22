@@ -20,9 +20,7 @@ jobs:
     name: Build with PostgreSQL ${{ matrix.build_pgver }}
     if: >
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request' &&
-       (github.event.pull_request.author_association == 'OWNER' ||
-        github.event.pull_request.author_association == 'MEMBER')) ||
+      github.event_name == 'pull_request' ||
       (github.event_name == 'push' && github.actor == 'kaigai') ||
       (github.event_name == 'pull_request_review' &&
        github.event.review.state == 'approved' &&
