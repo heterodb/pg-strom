@@ -3,8 +3,8 @@ name: Build Check
 # Run build verification after PR approval.
 # Temporary: also run on PR creation/update.
 on:
-  pull_request:
-    types: [opened, synchronize, reopened]
+  # pull_request:
+  #   types: [opened, synchronize, reopened]
   pull_request_review:
     types: [submitted]
   push:
@@ -20,7 +20,7 @@ jobs:
     name: Build with PostgreSQL ${{ matrix.build_pgver }}
     if: >
       github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'pull_request' ||
+      # github.event_name == 'pull_request' ||
       (github.event_name == 'push' && github.actor == 'kaigai') ||
       (github.event_name == 'pull_request_review' &&
        github.event.review.state == 'approved' &&
@@ -106,7 +106,7 @@ jobs:
     name: Regression with PostgreSQL ${{ matrix.test_pgver }}
     if: >
       github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'pull_request' ||
+      # github.event_name == 'pull_request' ||
       (github.event_name == 'push' && github.actor == 'kaigai') ||
       (github.event_name == 'pull_request_review' &&
        github.event.review.state == 'approved' &&
