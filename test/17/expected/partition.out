@@ -1,0 +1,503 @@
+---
+--- Test cases for partition-wise GpuJoin/GpuPreAgg
+---
+SET search_path = public;
+SET pg_strom.regression_test_mode = on;
+---
+--- Simple GPU-Scan (blocked by issue #1026)
+---
+---
+--- Simpe GPU-PreAgg without JOIN
+---
+explain (costs off)
+select sum(lo_extendedprice*lo_discount) as revenue
+from plineorder
+where lo_orderdate between 19930101 and 19931231
+and lo_discount between 1 and 3
+and lo_quantity < 25;
+                                                                                           QUERY PLAN                                                                                            
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Aggregate
+   ->  Gather
+         Workers Planned: 2
+         ->  Parallel Custom Scan (GpuPreAgg) on plineorder
+               GPU Projection: pgstrom.psum((lo_extendedprice * lo_discount))
+               referenced: lo_orderdate, lo_quantity, lo_extendedprice, lo_discount
+               scan0: plineorder_p1993_heap
+               scan1: plineorder_p1993_parquet
+               scan1-stats-hint: (lo_orderdate >= 19930101), (lo_orderdate <= 19931231), (lo_discount >= '1'::numeric), (lo_discount <= '3'::numeric), (lo_quantity < '25'::numeric)
+               scan2: plineorder_p1993_arrow
+               scan2-stats-hint: (lo_orderdate >= 19930101), (lo_orderdate <= 19931231)
+               GPU Scan Quals: ((lo_orderdate >= 19930101) AND (lo_orderdate <= 19931231) AND (lo_discount >= '1'::numeric) AND (lo_discount <= '3'::numeric) AND (lo_quantity < '25'::numeric))
+               GPU Group Key: 
+               file0: plineorder_p1993_rem1.parquet (read: 2337.33KB, size: 10.40MB)
+               file1: plineorder_p1993_rem2.arrow (read: 6593.54KB, size: 21.56MB)
+(15 rows)
+
+select sum(lo_extendedprice*lo_discount) as revenue
+from plineorder
+where lo_orderdate between 19930101 and 19931231
+and lo_discount between 1 and 3
+and lo_quantity < 25;
+   revenue    
+--------------
+ 319142755346
+(1 row)
+
+explain (costs off)
+select lo_orderpriority, sum(lo_extendedprice*lo_discount) as revenue
+  from plineorder
+ where lo_orderdate between 19930101 and 19931231
+   and lo_discount between 1 and 3
+   and lo_quantity < 25
+ group by lo_orderpriority
+ order by lo_orderpriority,revenue;
+                                                                                        QUERY PLAN                                                                                         
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Gather
+   Workers Planned: 2
+   ->  Parallel Custom Scan (GpuPreAgg) on plineorder
+         GPU Projection: pgstrom.psum((lo_extendedprice * lo_discount)), lo_orderpriority
+         referenced: lo_orderdate, lo_orderpriority, lo_quantity, lo_extendedprice, lo_discount
+         scan0: plineorder_p1993_heap
+         scan1: plineorder_p1993_parquet
+         scan1-stats-hint: (lo_orderdate >= 19930101), (lo_orderdate <= 19931231), (lo_discount >= '1'::numeric), (lo_discount <= '3'::numeric), (lo_quantity < '25'::numeric)
+         scan2: plineorder_p1993_arrow
+         scan2-stats-hint: (lo_orderdate >= 19930101), (lo_orderdate <= 19931231)
+         GPU Scan Quals: ((lo_orderdate >= 19930101) AND (lo_orderdate <= 19931231) AND (lo_discount >= '1'::numeric) AND (lo_discount <= '3'::numeric) AND (lo_quantity < '25'::numeric))
+         GPU Group Key: lo_orderpriority
+         file0: plineorder_p1993_rem1.parquet (read: 2421.68KB, size: 10.40MB)
+         file1: plineorder_p1993_rem2.arrow (read: 8.30MB, size: 21.56MB)
+         GPU-Sort keys: lo_orderpriority, pgstrom.fsum_numeric((pgstrom.psum((lo_extendedprice * lo_discount))))
+(15 rows)
+
+select lo_orderpriority, sum(lo_extendedprice*lo_discount) as revenue
+  from plineorder
+ where lo_orderdate between 19930101 and 19931231
+   and lo_discount between 1 and 3
+   and lo_quantity < 25
+ group by lo_orderpriority
+ order by lo_orderpriority,revenue;
+ lo_orderpriority |   revenue   
+------------------+-------------
+ 1-URGENT         | 25816377858
+ 1-URGENT         | 38370826882
+ 2-HIGH           | 25710813631
+ 2-HIGH           | 38674134547
+ 3-MEDIUM         | 24638625682
+ 3-MEDIUM         | 37810038744
+ 4-NOT SPECI      | 25767033534
+ 4-NOT SPECI      | 37440058771
+ 5-LOW            | 26027553974
+ 5-LOW            | 38887291723
+(10 rows)
+
+---
+--- GPU-PreAgg with JOIN
+---
+explain (costs off)
+select c_city,s_city,(lo_orderdate/10000)::int d_year,sum(lo_revenue) as revenue
+  from customer,plineorder,supplier
+ where lo_custkey = c_custkey
+   and lo_suppkey = s_suppkey
+   and (c_city='UNITED KI1' or c_city='UNITED KI5')
+   and (s_city='UNITED KI1' or s_city='UNITED KI5')
+   and lo_orderdate between 19930701 and 19960630
+ group by 1,2,3
+ order by 3 asc, 2 desc;
+                                                         QUERY PLAN                                                         
+----------------------------------------------------------------------------------------------------------------------------
+ Finalize GroupAggregate
+   Group Key: ((plineorder.lo_orderdate / 10000)), supplier.s_city, customer.c_city
+   ->  Gather Merge
+         Workers Planned: 2
+         ->  Partial GroupAggregate
+               Group Key: ((plineorder.lo_orderdate / 10000)), supplier.s_city, customer.c_city
+               ->  Sort
+                     Sort Key: ((plineorder.lo_orderdate / 10000)), supplier.s_city DESC, customer.c_city
+                     ->  Hash Join
+                           Hash Cond: (plineorder.lo_custkey = customer.c_custkey)
+                           ->  Parallel Custom Scan (GpuJoin) on plineorder
+                                 GPU Projection: lo_orderdate, lo_revenue, lo_custkey, s_city
+                                 referenced: lo_custkey, lo_suppkey, lo_orderdate, lo_revenue
+                                 scan0: plineorder_p1993_heap
+                                 scan0-brin: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                                 scan1: plineorder_p1993_parquet
+                                 scan1-stats-hint: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                                 scan2: plineorder_p1993_arrow
+                                 scan2-stats-hint: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                                 scan3: plineorder_p1994_heap
+                                 scan4: plineorder_p1994_parquet
+                                 scan4-stats-hint: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                                 scan5: plineorder_p1994_arrow
+                                 scan5-stats-hint: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                                 scan6: plineorder_p1995_heap
+                                 scan7: plineorder_p1995_parquet
+                                 scan7-stats-hint: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                                 scan8: plineorder_p1995_arrow
+                                 scan8-stats-hint: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                                 scan9: plineorder_p1996_heap
+                                 scan9-brin: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                                 scan10: plineorder_p1996_parquet
+                                 scan10-stats-hint: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                                 scan11: plineorder_p1996_arrow
+                                 scan11-stats-hint: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                                 GPU Scan Quals: ((lo_orderdate >= 19930701) AND (lo_orderdate <= 19960630))
+                                 GPU Join Quals [1]: (lo_suppkey = s_suppkey)
+                                 GPU Outer Hash [1]: lo_suppkey
+                                 GPU Inner Hash [1]: s_suppkey
+                                 file0: plineorder_p1993_rem1.parquet (read: 3336.79KB, size: 10.40MB)
+                                 file1: plineorder_p1993_rem2.arrow (read: 3550.37KB, size: 21.56MB)
+                                     :                   :                       :
+                                 file6: plineorder_p1996_rem1.parquet (read: 3353.48KB, size: 10.46MB)
+                                 file7: plineorder_p1996_rem2.arrow (read: 3573.80KB, size: 21.70MB)
+                                 ->  Parallel Seq Scan on supplier
+                                       Filter: ((s_city = 'UNITED KI1'::bpchar) OR (s_city = 'UNITED KI5'::bpchar))
+                           ->  Hash
+                                 ->  Custom Scan (GpuScan) on customer
+                                       GPU Projection: c_city, c_custkey
+                                       GPU Scan Quals: ((c_city = 'UNITED KI1'::bpchar) OR (c_city = 'UNITED KI5'::bpchar))
+(50 rows)
+
+select c_city,s_city,(lo_orderdate/10000)::int d_year,sum(lo_revenue) as revenue
+  from customer,plineorder,supplier
+ where lo_custkey = c_custkey
+   and lo_suppkey = s_suppkey
+   and (c_city='UNITED KI1' or c_city='UNITED KI5')
+   and (s_city='UNITED KI1' or s_city='UNITED KI5')
+   and lo_orderdate between 19930701 and 19960630
+ group by 1,2,3
+ order by 3 asc, 2 desc;
+   c_city   |   s_city   | d_year | revenue  
+------------+------------+--------+----------
+ UNITED KI1 | UNITED KI5 |   1993 | 14396779
+ UNITED KI5 | UNITED KI5 |   1993 |  5269724
+ UNITED KI1 | UNITED KI1 |   1993 | 48378209
+ UNITED KI5 | UNITED KI1 |   1993 | 50967293
+ UNITED KI1 | UNITED KI5 |   1994 | 15206803
+ UNITED KI5 | UNITED KI5 |   1994 | 43098258
+ UNITED KI1 | UNITED KI1 |   1994 | 34745139
+ UNITED KI5 | UNITED KI1 |   1994 | 37811792
+ UNITED KI1 | UNITED KI5 |   1995 | 34789226
+ UNITED KI5 | UNITED KI5 |   1995 | 25447806
+ UNITED KI1 | UNITED KI1 |   1995 | 41496928
+ UNITED KI5 | UNITED KI1 |   1995 | 32735114
+ UNITED KI1 | UNITED KI5 |   1996 |  3444608
+ UNITED KI5 | UNITED KI5 |   1996 | 35449508
+ UNITED KI1 | UNITED KI1 |   1996 | 37728390
+ UNITED KI5 | UNITED KI1 |   1996 | 28444432
+(16 rows)
+
+---
+--- only heap and arrow by partition pruning
+---
+explain (costs off)
+select c_city,s_city,(lo_orderdate/10000)::int d_year,lo_shipmode, sum(lo_revenue) as revenue
+  from customer,plineorder,supplier
+ where lo_custkey = c_custkey
+   and lo_suppkey = s_suppkey
+   and (c_city='UNITED KI1' or c_city='UNITED KI5')
+   and (s_city='UNITED KI1' or s_city='UNITED KI5')
+   and lo_orderdate between 19920701 and 19970630
+   and lo_shipmode in ('SHIP','RAIL')
+ group by 1,2,3,4
+ order by 3 asc, 2 desc;
+                                                                          QUERY PLAN                                                                           
+---------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Finalize GroupAggregate
+   Group Key: ((plineorder.lo_orderdate / 10000)), supplier.s_city, customer.c_city, plineorder.lo_shipmode
+   ->  Gather Merge
+         Workers Planned: 2
+         ->  Partial GroupAggregate
+               Group Key: ((plineorder.lo_orderdate / 10000)), supplier.s_city, customer.c_city, plineorder.lo_shipmode
+               ->  Sort
+                     Sort Key: ((plineorder.lo_orderdate / 10000)), supplier.s_city DESC, customer.c_city, plineorder.lo_shipmode
+                     ->  Hash Join
+                           Hash Cond: (plineorder.lo_custkey = customer.c_custkey)
+                           ->  Parallel Custom Scan (GpuJoin) on plineorder
+                                 GPU Projection: lo_orderdate, lo_shipmode, lo_revenue, lo_custkey, s_city
+                                 referenced: lo_custkey, lo_suppkey, lo_orderdate, lo_revenue
+                                 scan0: plineorder_p1992_heap
+                                 scan0-brin: (lo_orderdate >= 19920701), (lo_orderdate <= 19970630)
+                                 scan1: plineorder_p1992_arrow
+                                 scan1-stats-hint: (lo_orderdate <= 19970630), (lo_orderdate >= 19920701)
+                                 scan2: plineorder_p1993_heap
+                                 scan3: plineorder_p1993_arrow
+                                 scan3-stats-hint: (lo_orderdate <= 19970630), (lo_orderdate >= 19920701)
+                                 scan4: plineorder_p1994_heap
+                                 scan5: plineorder_p1994_arrow
+                                 scan5-stats-hint: (lo_orderdate <= 19970630), (lo_orderdate >= 19920701)
+                                 scan6: plineorder_p1995_heap
+                                 scan7: plineorder_p1995_arrow
+                                 scan7-stats-hint: (lo_orderdate <= 19970630), (lo_orderdate >= 19920701)
+                                 scan8: plineorder_p1996_heap
+                                 scan9: plineorder_p1996_arrow
+                                 scan9-stats-hint: (lo_orderdate <= 19970630), (lo_orderdate >= 19920701)
+                                 scan10: plineorder_p1997_heap
+                                 scan10-brin: (lo_orderdate >= 19920701), (lo_orderdate <= 19970630)
+                                 scan11: plineorder_p1997_arrow
+                                 scan11-stats-hint: (lo_orderdate <= 19970630), (lo_orderdate >= 19920701)
+                                 GPU Scan Quals: ((lo_shipmode = ANY ('{SHIP,RAIL}'::bpchar[])) AND (lo_orderdate <= 19970630) AND (lo_orderdate >= 19920701))
+                                 GPU Join Quals [1]: (lo_suppkey = s_suppkey)
+                                 GPU Outer Hash [1]: lo_suppkey
+                                 GPU Inner Hash [1]: s_suppkey
+                                 file0: plineorder_p1992_rem2.arrow (read: 4824.11KB, size: 21.58MB)
+                                 file1: plineorder_p1993_rem2.arrow (read: 4818.36KB, size: 21.56MB)
+                                     :                   :                       :
+                                 file4: plineorder_p1996_rem2.arrow (read: 4850.16KB, size: 21.70MB)
+                                 file5: plineorder_p1997_rem2.arrow (read: 4808.82KB, size: 21.51MB)
+                                 ->  Parallel Seq Scan on supplier
+                                       Filter: ((s_city = 'UNITED KI1'::bpchar) OR (s_city = 'UNITED KI5'::bpchar))
+                           ->  Hash
+                                 ->  Custom Scan (GpuScan) on customer
+                                       GPU Projection: c_city, c_custkey
+                                       GPU Scan Quals: ((c_city = 'UNITED KI1'::bpchar) OR (c_city = 'UNITED KI5'::bpchar))
+(48 rows)
+
+select c_city,s_city,(lo_orderdate/10000)::int d_year,lo_shipmode, sum(lo_revenue) as revenue
+  from customer,plineorder,supplier
+ where lo_custkey = c_custkey
+   and lo_suppkey = s_suppkey
+   and (c_city='UNITED KI1' or c_city='UNITED KI5')
+   and (s_city='UNITED KI1' or s_city='UNITED KI5')
+   and lo_orderdate between 19920701 and 19970630
+   and lo_shipmode in ('SHIP','RAIL')
+ group by 1,2,3,4
+ order by 3 asc, 2 desc;
+   c_city   |   s_city   | d_year | lo_shipmode | revenue  
+------------+------------+--------+-------------+----------
+ UNITED KI5 | UNITED KI5 |   1992 | RAIL        |  2146098
+ UNITED KI1 | UNITED KI1 |   1992 | RAIL        |  8791137
+ UNITED KI1 | UNITED KI1 |   1992 | SHIP        |  2113047
+ UNITED KI5 | UNITED KI1 |   1992 | SHIP        |  8920651
+ UNITED KI1 | UNITED KI5 |   1993 | SHIP        |  7116108
+ UNITED KI5 | UNITED KI5 |   1993 | SHIP        |  4840019
+ UNITED KI1 | UNITED KI1 |   1993 | RAIL        | 17494592
+ UNITED KI1 | UNITED KI1 |   1993 | SHIP        |  6242255
+ UNITED KI5 | UNITED KI1 |   1993 | RAIL        | 15882221
+ UNITED KI5 | UNITED KI1 |   1993 | SHIP        |  5672854
+ UNITED KI1 | UNITED KI5 |   1994 | SHIP        |  2016181
+ UNITED KI5 | UNITED KI5 |   1994 | RAIL        | 11868822
+ UNITED KI5 | UNITED KI5 |   1994 | SHIP        | 14420161
+ UNITED KI1 | UNITED KI1 |   1994 | RAIL        |  7814078
+ UNITED KI1 | UNITED KI1 |   1994 | SHIP        |  8964194
+ UNITED KI5 | UNITED KI1 |   1994 | RAIL        | 15835463
+ UNITED KI1 | UNITED KI5 |   1995 | RAIL        |  3171830
+ UNITED KI1 | UNITED KI5 |   1995 | SHIP        |  4385479
+ UNITED KI5 | UNITED KI5 |   1995 | SHIP        |  4907688
+ UNITED KI1 | UNITED KI1 |   1995 | RAIL        | 15346714
+ UNITED KI1 | UNITED KI1 |   1995 | SHIP        | 12986057
+ UNITED KI5 | UNITED KI1 |   1995 | RAIL        |  2517486
+ UNITED KI5 | UNITED KI1 |   1995 | SHIP        |  6782631
+ UNITED KI1 | UNITED KI5 |   1996 | SHIP        |  3033256
+ UNITED KI5 | UNITED KI5 |   1996 | RAIL        | 19276456
+ UNITED KI5 | UNITED KI5 |   1996 | SHIP        |  8319031
+ UNITED KI1 | UNITED KI1 |   1996 | RAIL        | 19198578
+ UNITED KI1 | UNITED KI1 |   1996 | SHIP        |  5342951
+ UNITED KI5 | UNITED KI1 |   1996 | SHIP        |  4761506
+ UNITED KI1 | UNITED KI5 |   1997 | SHIP        |   269566
+ UNITED KI5 | UNITED KI5 |   1997 | SHIP        |  4005091
+ UNITED KI1 | UNITED KI1 |   1997 | RAIL        |  3090027
+ UNITED KI5 | UNITED KI1 |   1997 | RAIL        |  6383937
+ UNITED KI5 | UNITED KI1 |   1997 | SHIP        |  7910966
+(34 rows)
+
+---
+--- control by parameters
+---
+SET pg_strom.enable_partitionwise_gpupreagg = off;
+explain (costs off)
+select c_city,s_city,(lo_orderdate/10000)::int,sum(lo_revenue) as revenue
+  from customer,plineorder,supplier
+ where lo_custkey = c_custkey
+   and lo_suppkey = s_suppkey
+   and (c_city='UNITED KI1' or c_city='UNITED KI5')
+   and (s_city='UNITED KI1' or s_city='UNITED KI5')
+   and lo_orderdate between 19930701 and 19960630
+ group by 1,2,3
+ order by 3 asc, 4 desc;
+                                                            QUERY PLAN                                                            
+----------------------------------------------------------------------------------------------------------------------------------
+ Incremental Sort
+   Sort Key: ((plineorder.lo_orderdate / 10000)), (sum(plineorder.lo_revenue)) DESC
+   Presorted Key: ((plineorder.lo_orderdate / 10000))
+   ->  Finalize GroupAggregate
+         Group Key: ((plineorder.lo_orderdate / 10000)), customer.c_city, supplier.s_city
+         ->  Gather Merge
+               Workers Planned: 2
+               ->  Partial GroupAggregate
+                     Group Key: ((plineorder.lo_orderdate / 10000)), customer.c_city, supplier.s_city
+                     ->  Sort
+                           Sort Key: ((plineorder.lo_orderdate / 10000)), customer.c_city, supplier.s_city
+                           ->  Hash Join
+                                 Hash Cond: (plineorder.lo_custkey = customer.c_custkey)
+                                 ->  Parallel Custom Scan (GpuJoin) on plineorder
+                                       GPU Projection: lo_orderdate, lo_revenue, lo_custkey, s_city
+                                       referenced: lo_custkey, lo_suppkey, lo_orderdate, lo_revenue
+                                       scan0: plineorder_p1993_heap
+                                       scan0-brin: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                                       scan1: plineorder_p1993_parquet
+                                       scan1-stats-hint: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                                       scan2: plineorder_p1993_arrow
+                                       scan2-stats-hint: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                                       scan3: plineorder_p1994_heap
+                                       scan4: plineorder_p1994_parquet
+                                       scan4-stats-hint: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                                       scan5: plineorder_p1994_arrow
+                                       scan5-stats-hint: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                                       scan6: plineorder_p1995_heap
+                                       scan7: plineorder_p1995_parquet
+                                       scan7-stats-hint: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                                       scan8: plineorder_p1995_arrow
+                                       scan8-stats-hint: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                                       scan9: plineorder_p1996_heap
+                                       scan9-brin: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                                       scan10: plineorder_p1996_parquet
+                                       scan10-stats-hint: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                                       scan11: plineorder_p1996_arrow
+                                       scan11-stats-hint: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                                       GPU Scan Quals: ((lo_orderdate >= 19930701) AND (lo_orderdate <= 19960630))
+                                       GPU Join Quals [1]: (lo_suppkey = s_suppkey)
+                                       GPU Outer Hash [1]: lo_suppkey
+                                       GPU Inner Hash [1]: s_suppkey
+                                       file0: plineorder_p1993_rem1.parquet (read: 3336.79KB, size: 10.40MB)
+                                       file1: plineorder_p1993_rem2.arrow (read: 3550.37KB, size: 21.56MB)
+                                           :                     :                       :
+                                       file6: plineorder_p1996_rem1.parquet (read: 3353.48KB, size: 10.46MB)
+                                       file7: plineorder_p1996_rem2.arrow (read: 3573.80KB, size: 21.70MB)
+                                       ->  Parallel Seq Scan on supplier
+                                             Filter: ((s_city = 'UNITED KI1'::bpchar) OR (s_city = 'UNITED KI5'::bpchar))
+                                 ->  Hash
+                                       ->  Custom Scan (GpuScan) on customer
+                                             GPU Projection: c_city, c_custkey
+                                             GPU Scan Quals: ((c_city = 'UNITED KI1'::bpchar) OR (c_city = 'UNITED KI5'::bpchar))
+(53 rows)
+
+select c_city,s_city,(lo_orderdate/10000)::int,sum(lo_revenue) as revenue
+  from customer,plineorder,supplier
+ where lo_custkey = c_custkey
+   and lo_suppkey = s_suppkey
+   and (c_city='UNITED KI1' or c_city='UNITED KI5')
+   and (s_city='UNITED KI1' or s_city='UNITED KI5')
+   and lo_orderdate between 19930701 and 19960630
+ group by 1,2,3
+ order by 3 asc, 4 desc;
+   c_city   |   s_city   | int4 | revenue  
+------------+------------+------+----------
+ UNITED KI5 | UNITED KI1 | 1993 | 50967293
+ UNITED KI1 | UNITED KI1 | 1993 | 48378209
+ UNITED KI1 | UNITED KI5 | 1993 | 14396779
+ UNITED KI5 | UNITED KI5 | 1993 |  5269724
+ UNITED KI5 | UNITED KI5 | 1994 | 43098258
+ UNITED KI5 | UNITED KI1 | 1994 | 37811792
+ UNITED KI1 | UNITED KI1 | 1994 | 34745139
+ UNITED KI1 | UNITED KI5 | 1994 | 15206803
+ UNITED KI1 | UNITED KI1 | 1995 | 41496928
+ UNITED KI1 | UNITED KI5 | 1995 | 34789226
+ UNITED KI5 | UNITED KI1 | 1995 | 32735114
+ UNITED KI5 | UNITED KI5 | 1995 | 25447806
+ UNITED KI1 | UNITED KI1 | 1996 | 37728390
+ UNITED KI5 | UNITED KI5 | 1996 | 35449508
+ UNITED KI5 | UNITED KI1 | 1996 | 28444432
+ UNITED KI1 | UNITED KI5 | 1996 |  3444608
+(16 rows)
+
+RESET pg_strom.enable_partitionwise_gpupreagg;
+SET pg_strom.enable_partitionwise_gpujoin = off;
+explain (costs off)
+select c_city,s_city,(lo_orderdate/10000)::int,sum(lo_revenue) as revenue
+  from customer,plineorder,supplier
+ where lo_custkey = c_custkey
+   and lo_suppkey = s_suppkey
+   and (c_city='UNITED KI1' or c_city='UNITED KI5')
+   and (s_city='UNITED KI1' or s_city='UNITED KI5')
+   and lo_orderdate between 19930701 and 19960630
+ group by 1,2,3
+ order by 3 asc, 4 desc;
+                                                               QUERY PLAN                                                               
+----------------------------------------------------------------------------------------------------------------------------------------
+ Incremental Sort
+   Sort Key: ((plineorder.lo_orderdate / 10000)), (sum(plineorder.lo_revenue)) DESC
+   Presorted Key: ((plineorder.lo_orderdate / 10000))
+   ->  Finalize GroupAggregate
+         Group Key: ((plineorder.lo_orderdate / 10000)), customer.c_city, supplier.s_city
+         ->  Gather Merge
+               Workers Planned: 2
+               ->  Partial GroupAggregate
+                     Group Key: ((plineorder.lo_orderdate / 10000)), customer.c_city, supplier.s_city
+                     ->  Sort
+                           Sort Key: ((plineorder.lo_orderdate / 10000)), customer.c_city, supplier.s_city
+                           ->  Hash Join
+                                 Hash Cond: (plineorder.lo_suppkey = supplier.s_suppkey)
+                                 ->  Hash Join
+                                       Hash Cond: (plineorder.lo_custkey = customer.c_custkey)
+                                       ->  Parallel Custom Scan (GpuScan) on plineorder
+                                             GPU Projection: lo_orderdate, lo_revenue, lo_custkey, lo_suppkey
+                                             referenced: lo_custkey, lo_suppkey, lo_orderdate, lo_revenue
+                                             scan0: plineorder_p1993_heap
+                                             scan0-brin: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                                             scan1: plineorder_p1993_parquet
+                                             scan1-stats-hint: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                                             scan2: plineorder_p1993_arrow
+                                             scan2-stats-hint: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                                             scan3: plineorder_p1994_heap
+                                             scan4: plineorder_p1994_parquet
+                                             scan4-stats-hint: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                                             scan5: plineorder_p1994_arrow
+                                             scan5-stats-hint: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                                             scan6: plineorder_p1995_heap
+                                             scan7: plineorder_p1995_parquet
+                                             scan7-stats-hint: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                                             scan8: plineorder_p1995_arrow
+                                             scan8-stats-hint: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                                             scan9: plineorder_p1996_heap
+                                             scan9-brin: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                                             scan10: plineorder_p1996_parquet
+                                             scan10-stats-hint: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                                             scan11: plineorder_p1996_arrow
+                                             scan11-stats-hint: (lo_orderdate >= 19930701), (lo_orderdate <= 19960630)
+                                             GPU Scan Quals: ((lo_orderdate >= 19930701) AND (lo_orderdate <= 19960630))
+                                             file0: plineorder_p1993_rem1.parquet (read: 3336.79KB, size: 10.40MB)
+                                             file1: plineorder_p1993_rem2.arrow (read: 3550.37KB, size: 21.56MB)
+                                                 :                       :                       :
+                                             file6: plineorder_p1996_rem1.parquet (read: 3353.48KB, size: 10.46MB)
+                                             file7: plineorder_p1996_rem2.arrow (read: 3573.80KB, size: 21.70MB)
+                                       ->  Hash
+                                             ->  Custom Scan (GpuScan) on customer
+                                                   GPU Projection: c_city, c_custkey
+                                                   GPU Scan Quals: ((c_city = 'UNITED KI1'::bpchar) OR (c_city = 'UNITED KI5'::bpchar))
+                                 ->  Hash
+                                       ->  Custom Scan (GpuScan) on supplier
+                                             GPU Projection: s_city, s_suppkey
+                                             GPU Scan Quals: ((s_city = 'UNITED KI1'::bpchar) OR (s_city = 'UNITED KI5'::bpchar))
+(54 rows)
+
+select c_city,s_city,(lo_orderdate/10000)::int,sum(lo_revenue) as revenue
+  from customer,plineorder,supplier
+ where lo_custkey = c_custkey
+   and lo_suppkey = s_suppkey
+   and (c_city='UNITED KI1' or c_city='UNITED KI5')
+   and (s_city='UNITED KI1' or s_city='UNITED KI5')
+   and lo_orderdate between 19930701 and 19960630
+ group by 1,2,3
+ order by 3 asc, 4 desc;
+   c_city   |   s_city   | int4 | revenue  
+------------+------------+------+----------
+ UNITED KI5 | UNITED KI1 | 1993 | 50967293
+ UNITED KI1 | UNITED KI1 | 1993 | 48378209
+ UNITED KI1 | UNITED KI5 | 1993 | 14396779
+ UNITED KI5 | UNITED KI5 | 1993 |  5269724
+ UNITED KI5 | UNITED KI5 | 1994 | 43098258
+ UNITED KI5 | UNITED KI1 | 1994 | 37811792
+ UNITED KI1 | UNITED KI1 | 1994 | 34745139
+ UNITED KI1 | UNITED KI5 | 1994 | 15206803
+ UNITED KI1 | UNITED KI1 | 1995 | 41496928
+ UNITED KI1 | UNITED KI5 | 1995 | 34789226
+ UNITED KI5 | UNITED KI1 | 1995 | 32735114
+ UNITED KI5 | UNITED KI5 | 1995 | 25447806
+ UNITED KI1 | UNITED KI1 | 1996 | 37728390
+ UNITED KI5 | UNITED KI5 | 1996 | 35449508
+ UNITED KI5 | UNITED KI1 | 1996 | 28444432
+ UNITED KI1 | UNITED KI5 | 1996 |  3444608
+(16 rows)
+
