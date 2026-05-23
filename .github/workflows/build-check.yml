@@ -18,9 +18,9 @@ permissions:
 jobs:
   build:
     name: Build with PostgreSQL ${{ matrix.build_pgver }}
+    # Temporary pull_request trigger disabled.
     if: >
       github.event_name == 'workflow_dispatch' ||
-      # github.event_name == 'pull_request' ||
       (github.event_name == 'push' && github.actor == 'kaigai') ||
       (github.event_name == 'pull_request_review' &&
        github.event.review.state == 'approved' &&
@@ -104,9 +104,9 @@ jobs:
 
   regression:
     name: Regression with PostgreSQL ${{ matrix.test_pgver }}
+    # Temporary pull_request trigger disabled.
     if: >
       github.event_name == 'workflow_dispatch' ||
-      # github.event_name == 'pull_request' ||
       (github.event_name == 'push' && github.actor == 'kaigai') ||
       (github.event_name == 'pull_request_review' &&
        github.event.review.state == 'approved' &&
