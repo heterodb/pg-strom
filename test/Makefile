@@ -32,8 +32,8 @@ ifeq ($(REGRESS_DB_REVISION),$(REGRESS_REVISION))
 REGRESS_OPTS   += --use-existing
 endif
 
-REGRESS_PREP   := pg2arrow arrow2csv dbgen-ssbm parallel_schedule_postgis
-EXTRA_CLEAN    := parallel_schedule_postgis
+REGRESS_PREP   := pg2arrow arrow2csv dbgen-ssbm parallel_schedule
+EXTRA_CLEAN    := parallel_schedule
 
 all: installcheck
 

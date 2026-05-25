@@ -137,6 +137,38 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+parse_failed_tests() {
+  : > "${FAILED_LIST}"
+  grep -E '^not ok[[:space:]]+[0-9]+[[:space:]]+-[[:space:]]+' "${TEST_LOG}" \
+    | sed -E 's/^not ok[[:space:]]+[0-9]+[[:space:]]+-[[:space:]]+//' \
+    | awk '{print $1}' >> "${FAILED_LIST}" || true
+  grep -E '^test[[:space:]]+[^[:space:]]+[[:space:]]+\.\.\.[[:space:]]+FAILED$' "${TEST_LOG}" | awk '{print $2}' >> "${FAILED_LIST}" || true
+  grep -E '^FAILED test\(s\):' "${TEST_LOG}" | sed -E 's/^FAILED test\(s\):[[:space:]]*//' | tr ' ' '\n' >> "${FAILED_LIST}" || true
+  sort -u -o "${FAILED_LIST}" "${FAILED_LIST}"
+}
+
+check_failures_against_allowlist() {
+  parse_failed_tests
+
+  if [[ ! -s "${FAILED_LIST}" ]]; then
+    SHOW_LOGS=1
+    echo "Tests failed but failed test names could not be parsed" >&2
+    exit 1
+  fi
+
+  if [[ ! -f "${KNOWN_FAILURES_FILE}" ]]; then
+    SHOW_LOGS=1
+    echo "Known failures file not found: ${KNOWN_FAILURES_FILE}" >&2
+    exit 1
+  fi
+
+  UNKNOWN_FAILURES=$(grep -vxF -f "${KNOWN_FAILURES_FILE}" "${FAILED_LIST}" || true)
+  if [[ -n "${UNKNOWN_FAILURES}" ]]; then
+    return 1
+  fi
+  return 0
+}
+
 if [[ ! -f "${PGDATA}/PG_VERSION" ]]; then
   echo "Initializing PGDATA: ${PGDATA}"
   "${INITDB}" -D "${PGDATA}" >/dev/null
@@ -174,6 +206,11 @@ TEST_RC=${PIPESTATUS[0]}
 set -e
 
 if [[ ${TEST_RC} -ne 0 && ${TEST_RC} -ne 124 ]]; then
+  if check_failures_against_allowlist; then
+    echo "Only known failures were detected on attempt 1; treating as success"
+    exit 0
+  fi
+
   echo "Initial test run failed (exit=${TEST_RC}); reinitializing pg_strom extension and retrying once"
   if ! "${PSQL}" -v ON_ERROR_STOP=1 -d postgres -c "create extension if not exists pg_strom;" >/dev/null; then
     SHOW_LOGS=1
@@ -215,29 +252,7 @@ if [[ ${TEST_RC} -eq 0 ]]; then
   exit 0
 fi
 
-# Parse failed test names from pg_regress summary and per-test output.
-: > "${FAILED_LIST}"
-grep -E '^not ok[[:space:]]+[0-9]+[[:space:]]+-[[:space:]]+' "${TEST_LOG}" \
-  | sed -E 's/^not ok[[:space:]]+[0-9]+[[:space:]]+-[[:space:]]+//' \
-  | awk '{print $1}' >> "${FAILED_LIST}" || true
-grep -E '^test[[:space:]]+[^[:space:]]+[[:space:]]+\.\.\.[[:space:]]+FAILED$' "${TEST_LOG}" | awk '{print $2}' >> "${FAILED_LIST}" || true
-grep -E '^FAILED test\(s\):' "${TEST_LOG}" | sed -E 's/^FAILED test\(s\):[[:space:]]*//' | tr ' ' '\n' >> "${FAILED_LIST}" || true
-sort -u -o "${FAILED_LIST}" "${FAILED_LIST}"
-
-if [[ ! -s "${FAILED_LIST}" ]]; then
-  SHOW_LOGS=1
-  echo "Tests failed but failed test names could not be parsed" >&2
-  exit 1
-fi
-
-if [[ ! -f "${KNOWN_FAILURES_FILE}" ]]; then
-  SHOW_LOGS=1
-  echo "Known failures file not found: ${KNOWN_FAILURES_FILE}" >&2
-  exit 1
-fi
-
-UNKNOWN_FAILURES=$(grep -vxF -f "${KNOWN_FAILURES_FILE}" "${FAILED_LIST}" || true)
-if [[ -n "${UNKNOWN_FAILURES}" ]]; then
+if ! check_failures_against_allowlist; then
   SHOW_LOGS=1
   echo "Unexpected test failures detected:" >&2
   echo "${UNKNOWN_FAILURES}" >&2

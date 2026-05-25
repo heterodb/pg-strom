@@ -2303,34 +2303,37 @@ pgstromExplainScanRelation(pgstromTaskState *pts,
 
 	initStringInfo(&buf);
 	snprintf(label, sizeof(label), "scan%d", ptss->scan_relidx);
-	appendStringInfo(&buf, "%s [plan: %.0f -> %.0f",
-					 RelationGetRelationName(ptss->scan_rel),
-					 ptss->plan_ntuples_raw,
-					 ptss->plan_ntuples_in);
-	if (es->analyze)
+	appendStringInfoString(&buf, RelationGetRelationName(ptss->scan_rel));
+	if (!pgstrom_regression_test_mode)
 	{
-		pgstromSharedScanState *psss = ptss->dsm;
-		uint64_t	source_ntuples_raw = pg_atomic_read_u64(&psss->source_ntuples_raw);
-		uint64_t	source_ntuples_in = pg_atomic_read_u64(&psss->source_ntuples_in);
-		uint32_t	nchunks_parquet_read = pg_atomic_read_u32(&psss->nchunks_parquet_read);
-		uint32_t	ncaches_parquet_load = pg_atomic_read_u32(&psss->ncaches_parquet_load);
+		appendStringInfo(&buf, " [plan: %.0f -> %.0f",
+						 ptss->plan_ntuples_raw,
+						 ptss->plan_ntuples_in);
+		if (es->analyze)
+		{
+			pgstromSharedScanState *psss = ptss->dsm;
+			uint64_t	source_ntuples_raw = pg_atomic_read_u64(&psss->source_ntuples_raw);
+			uint64_t	source_ntuples_in = pg_atomic_read_u64(&psss->source_ntuples_in);
+			uint32_t	nchunks_parquet_read = pg_atomic_read_u32(&psss->nchunks_parquet_read);
+			uint32_t	ncaches_parquet_load = pg_atomic_read_u32(&psss->ncaches_parquet_load);
 
-		appendStringInfo(&buf, ", exec: %lu -> %lu",
+			appendStringInfo(&buf, ", exec: %lu -> %lu",
 						 source_ntuples_raw,
 						 source_ntuples_in);
-		/* parquet-cache stats */
-		if (!pgstrom_explain_developer_mode && nchunks_parquet_read > 0)
-		{
-			appendStringInfo(&buf, "cache-hit: %u of total %u chunks (cache ratio: %.2f%%)",
+			/* parquet-cache stats */
+			if (!pgstrom_explain_developer_mode && nchunks_parquet_read > 0)
+			{
+				appendStringInfo(&buf, "cache-hit: %u of total %u chunks (cache ratio: %.2f%%)",
 							 ncaches_parquet_load,
 							 ncaches_parquet_load + nchunks_parquet_read,
 							 100.0 *
 							 (double)ncaches_parquet_load /
 							 (double)(ncaches_parquet_load + nchunks_parquet_read));
+			}
 		}
+		//TODO: add execution time for each
+		appendStringInfo(&buf, "]");
 	}
-	//TODO: add execution time for each
-	appendStringInfo(&buf, "]");
 	ExplainPropertyText(label, buf.data, es);
 
 	if (ptss->arrow_state)
