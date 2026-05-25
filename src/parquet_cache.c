@@ -1032,7 +1032,7 @@ pgstrom_init_parquet_cache(void)
 							&pgstrom_parquet_cache_size_mb,
 							160 * 1024,		/* 160GB */
 							32 * 1024,		/* 32GB */
-							INT_MAX,
+							16 * 1024 * 1024, /* 16TB, see issue #1032 */
 							PGC_POSTMASTER,
 							GUC_NOT_IN_SAMPLE | GUC_UNIT_MB,
 							NULL, NULL, NULL);
