@@ -86,7 +86,8 @@ static inline off_t
 __parquetCacheFileOffset(const parquetCacheEntry *entry)
 {
 	size_t	block_sz = (size_t)pgstrom_parquet_cache_unitsz_mb << 20;
-	return (size_t)(entry - parquet_cache_array) * block_sz;
+	size_t	block_idx = (entry - parquet_cache_array);
+	return block_idx * block_sz;
 }
 
 /* __timespec_to_utime */
@@ -446,6 +447,36 @@ static pg_atomic_uint32	parquet_cache_async_write_num_available_workers;
 static pg_atomic_uint32	parquet_cache_async_write_num_active_tasks;
 
 static bool
+__parquetCacheFlushBlockBuffer(char *block_buf,
+							   size_t block_off,
+							   off_t file_base)
+{
+	size_t		block_sz = (size_t)pgstrom_parquet_cache_unitsz_mb << 20;
+	off_t		off = 0;
+	ssize_t		nbytes;
+
+	if (block_off < block_sz)
+		memset(block_buf + block_off, 0, block_sz - block_off);
+	while (off < block_sz)
+	{
+		nbytes = pwrite(pgstrom_parquet_cache_fdesc,
+						block_buf + off,
+						block_sz - off,
+						file_base + off);
+		if (nbytes > 0)
+			off += nbytes;
+		else if (nbytes == 0 || errno != EINTR)
+		{
+			__Notice("parquet-cache: failed on pwrite at %08lx, sz=%ld: %m",
+					 file_base + off,
+					 block_sz - off);
+			return false;
+		}
+	}
+	return true;
+}
+
+static bool
 __parquetCacheAsyncWriteBlock(off_t *p_f_offset,
 							  char *block_buf,
 							  const off_t *fchunk_base,
@@ -466,31 +497,24 @@ __parquetCacheAsyncWriteBlock(off_t *p_f_offset,
 		memcpy(block_buf + block_off, arrow_ptr + arrow_off, sz);
 		arrow_off += sz;
 		f_offset  += sz;
-		block_off += sz;
-		if (block_off >= block_sz || (is_last_buffer && arrow_off >= arrow_len))
+		if (block_off + sz >= block_sz)
 		{
-			off_t	off = 0;
-			ssize_t	nbytes;
-
-			block_off = PAGE_ALIGN(block_off);
-			assert(block_off <= block_sz && arrow_off <= arrow_len);
-			while (off < block_off)
-			{
-				nbytes = pwrite(pgstrom_parquet_cache_fdesc,
-								block_buf + off,
-								block_off - off,
-								fchunk_base[block_idx] + off);
-				if (nbytes > 0)
-					off += nbytes;
-				else if (nbytes == 0 || errno != EINTR)
-				{
-					__Notice("parquet-cache: failed on pwrite at %08lx, sz=%ld: %m",
-							 fchunk_base[block_idx] + off,
-							 block_off - off);
-					return false;
-				}
-			}
+			if (!__parquetCacheFlushBlockBuffer(block_buf,
+												block_off,
+												fchunk_base[block_idx]))
+				return false;	/* failed on pwrite(2) */
 		}
+	}
+	if (is_last_buffer ||
+		(f_offset / block_sz) != (PAGE_ALIGN(f_offset) / block_sz))
+	{
+		uint32_t	block_idx = (f_offset / block_sz);
+		uint32_t	block_off = (f_offset % block_sz);
+
+		if (!__parquetCacheFlushBlockBuffer(block_buf,
+											block_off,
+											fchunk_base[block_idx]))
+			return false;	/* failed on pwrite(2) */
 	}
 	*p_f_offset = PAGE_ALIGN(f_offset);
 	return true;

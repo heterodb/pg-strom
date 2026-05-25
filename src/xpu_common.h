@@ -195,7 +195,7 @@ typedef unsigned int		Oid;
 #define ALIGNOF_ARROW		64
 #define ARROW_ALIGN(len)	TYPEALIGN(ALIGNOF_ARROW,len)
 /* CPU Page alignment */
-#define	PAGE_SIZE			4096
+#define	PAGE_SIZE			4096UL
 #define PAGE_MASK			(PAGE_SIZE-1)
 #define PAGE_SHIFT			12
 #define PAGES_PER_BLOCK		(BLCKSZ / PAGE_SIZE)
@@ -1554,7 +1554,7 @@ KDS_ARROW_REF_VARLENA32_DATUM(const kern_data_store *kds,
 			return (extra + offset[index]);
 		}
 	}
-	return NULL;
+	return NULL;	/* should not happen */
 }
 
 INLINE_FUNCTION(const void *)
@@ -1565,7 +1565,7 @@ KDS_ARROW_REF_VARLENA64_DATUM(const kern_data_store *kds,
 {
 	Assert(cmeta->values_offset > 0 &&
 		   cmeta->extra_offset  > 0);
-	if (sizeof(uint32_t) * (index+1) <= cmeta->values_length)
+	if (sizeof(uint64_t) * (index+1) <= cmeta->values_length)
 	{
 		const uint64_t *offset = (const uint64_t *)
 			((const char *)kds + cmeta->values_offset);
@@ -1579,7 +1579,7 @@ KDS_ARROW_REF_VARLENA64_DATUM(const kern_data_store *kds,
 			return (extra + offset[index]);
 		}
 	}
-	return NULL;
+	return NULL;	/* should not happen */
 }
 
 INLINE_FUNCTION(bool)
