@@ -495,15 +495,15 @@ __parquetCacheAsyncWriteBlock(off_t *p_f_offset,
 		size_t		sz = Min(block_sz - block_off, arrow_len - arrow_off);
 
 		memcpy(block_buf + block_off, arrow_ptr + arrow_off, sz);
-		arrow_off += sz;
-		f_offset  += sz;
 		if (block_off + sz >= block_sz)
 		{
 			if (!__parquetCacheFlushBlockBuffer(block_buf,
-												block_off,
+												block_off + sz,
 												fchunk_base[block_idx]))
 				return false;	/* failed on pwrite(2) */
 		}
+		arrow_off += sz;
+		f_offset  += sz;
 	}
 	if (is_last_buffer ||
 		(f_offset / block_sz) != (PAGE_ALIGN(f_offset) / block_sz))
@@ -511,7 +511,8 @@ __parquetCacheAsyncWriteBlock(off_t *p_f_offset,
 		uint32_t	block_idx = (f_offset / block_sz);
 		uint32_t	block_off = (f_offset % block_sz);
 
-		if (!__parquetCacheFlushBlockBuffer(block_buf,
+		if (block_off > 0 &&	/* only if any pending contents */
+			!__parquetCacheFlushBlockBuffer(block_buf,
 											block_off,
 											fchunk_base[block_idx]))
 			return false;	/* failed on pwrite(2) */
