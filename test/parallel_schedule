@@ -23,7 +23,7 @@ test: dtype_int dtype_float dtype_numeric dtype_time dtype_text dtype_jsonb addi
 # ----------
 # Test for various functions / expressions
 # ----------
-test: dfunc_math dfunc_mbtext dexpr_scalar_array_op dexpr_misc
+test: dfunc_math dfunc_mbtext dexpr_scalar_array_op dexpr_misc dexpr_hashed_array_op
 
 # ----------
 # Test for arrow_fdw
