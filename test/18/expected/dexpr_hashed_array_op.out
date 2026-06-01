@@ -1,0 +1,136 @@
+---
+--- Test for HashedArrayOp optimization
+---
+SET search_path = public;
+SET enable_seqscan = off;
+SET max_parallel_workers_per_gather = 0;
+SET pg_strom.explain_developer_mode = on;
+VACUUM ANALYZE lineorder;
+-- IN-list with 3 constants keeps ScalarArrayOpAny
+EXPLAIN (verbose, costs off)
+SELECT lo_orderkey
+  FROM lineorder
+ WHERE lo_shipmode IN ('RAIL','SHIP','MAIL');
+                                                                                                                 QUERY PLAN                                                                                                                 
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuScan) on public.lineorder
+   Output: lo_orderkey
+   GPU Projection: lineorder.lo_orderkey
+   GPU Scan Quals: (lineorder.lo_shipmode = ANY ('{RAIL,SHIP,MAIL}'::bpchar[]))
+   KVars-Slot: <slot=0, type='bpchar', expr='NULL::bpchar'>, <slot=1, type='bpchar', expr='lo_shipmode', kv_off=0x0000>, <slot=2, type='int8', expr='lo_orderkey', kv_off=0x3400>
+   KVecs-Buffer: nbytes: 22528, ndims: 2, items=[kvec0=<0x0000-33ff, type='bpchar', expr='lo_shipmode'>, kvec1=<0x3400-57ff, type='int8', expr='lo_orderkey'>]
+   LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=2, type='int8' resno=1(lo_orderkey)>, <slot=1, type='bpchar' resno=17(lo_shipmode)>]}}
+   MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=2, offset=0x3400-57ff, type='int8', expr='lo_orderkey'>]}}}
+   Scan Quals OpCode: {ScalarArrayOpAny: elem=<slot=0, type='bpchar'> args=[{Const(array): value='{RAIL,SHIP,MAIL}'}, {Func(bool)::bpchareq args=[{Var(bpchar): slot=1, expr='lo_shipmode'}, {Var(bpchar): slot=0, expr='NULL::bpchar'}]}]}
+   Projection OpCode: {Projection: layout=<2> arg={SaveExpr: <slot=2, type='int8'> arg={Var(int8): kvec=0x3400-5800, expr='lo_orderkey'}}}
+   Fallback-desc: [<dest='0', expr='lo_orderkey', depth=0:1>, <dest='1', expr='lo_shipmode', depth=0:0>]
+   CUDA Stack Size: 4448
+(12 rows)
+
+-- IN-list with 4 constants should switch to HashedArrayOp
+EXPLAIN (verbose, costs off)
+SELECT lo_orderkey
+  FROM lineorder
+ WHERE lo_shipmode IN ('RAIL','SHIP','MAIL','TRUCK');
+                                                                                                        QUERY PLAN                                                                                                        
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuScan) on public.lineorder
+   Output: lo_orderkey
+   GPU Projection: lineorder.lo_orderkey
+   GPU Scan Quals: (lineorder.lo_shipmode = ANY ('{RAIL,SHIP,MAIL,TRUCK}'::bpchar[]))
+   KVars-Slot: <slot=0, type='bpchar', expr='lo_shipmode', kv_off=0x0000>, <slot=1, type='int8', expr='lo_orderkey', kv_off=0x3400>
+   KVecs-Buffer: nbytes: 22528, ndims: 2, items=[kvec0=<0x0000-33ff, type='bpchar', expr='lo_shipmode'>, kvec1=<0x3400-57ff, type='int8', expr='lo_orderkey'>]
+   LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=1, type='int8' resno=1(lo_orderkey)>, <slot=0, type='bpchar' resno=17(lo_shipmode)>]}}
+   MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=1, offset=0x3400-57ff, type='int8', expr='lo_orderkey'>]}}}
+   Scan Quals OpCode: {HashedArrayOp: nslots=6 hash=(bpchar)[<hash:e99a53ea|TRUCK|t>, <hash:e7d7a8fc|RAIL|t>, <hash:7ad83bf6|MAIL|t>, <hash:b5b0202c|SHIP|t>, <default:f>] arg={Var(bpchar): slot=0, expr='lo_shipmode'}}
+   Projection OpCode: {Projection: layout=<1> arg={SaveExpr: <slot=1, type='int8'> arg={Var(int8): kvec=0x3400-5800, expr='lo_orderkey'}}}
+   Fallback-desc: [<dest='0', expr='lo_orderkey', depth=0:1>, <dest='1', expr='lo_shipmode', depth=0:0>]
+   CUDA Stack Size: 4304
+(12 rows)
+
+SET pg_strom.enabled = on;
+SELECT lo_orderkey
+  INTO pg_temp.test01g
+  FROM lineorder
+ WHERE lo_shipmode IN ('RAIL','SHIP','MAIL','TRUCK')
+   AND lo_orderkey % 97 = 0;
+SET pg_strom.enabled = off;
+SELECT lo_orderkey
+  INTO pg_temp.test01c
+  FROM lineorder
+ WHERE lo_shipmode IN ('RAIL','SHIP','MAIL','TRUCK')
+   AND lo_orderkey % 97 = 0;
+(SELECT * FROM pg_temp.test01g EXCEPT SELECT * FROM pg_temp.test01c);
+ lo_orderkey 
+-------------
+(0 rows)
+
+(SELECT * FROM pg_temp.test01c EXCEPT SELECT * FROM pg_temp.test01g);
+ lo_orderkey 
+-------------
+(0 rows)
+
+-- CASE expr WHEN with 4 branches should switch to HashedArrayOp
+SET pg_strom.enabled = on;
+EXPLAIN (verbose, costs off)
+SELECT lo_linenumber,
+       CASE lo_linenumber % 5
+       WHEN 0 THEN 'A'
+       WHEN 1 THEN 'B'
+       WHEN 2 THEN 'C'
+       WHEN 3 THEN 'D'
+       ELSE      'X'
+       END AS tag
+  FROM lineorder
+ WHERE lo_shipmode IN ('RAIL','SHIP','MAIL','TRUCK');
+                                                                                                                                                                                                                  QUERY PLAN                                                                                                                                                                                                                   
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuScan) on public.lineorder
+   Output: lo_linenumber, (CASE (lo_linenumber % 5) WHEN 0 THEN 'A'::text WHEN 1 THEN 'B'::text WHEN 2 THEN 'C'::text WHEN 3 THEN 'D'::text ELSE 'X'::text END)
+   GPU Projection: lineorder.lo_linenumber, CASE (lineorder.lo_linenumber % 5) WHEN 0 THEN 'A'::text WHEN 1 THEN 'B'::text WHEN 2 THEN 'C'::text WHEN 3 THEN 'D'::text ELSE 'X'::text END
+   GPU Scan Quals: (lineorder.lo_shipmode = ANY ('{RAIL,SHIP,MAIL,TRUCK}'::bpchar[]))
+   KVars-Slot: <slot=0, type='bpchar', expr='lo_shipmode', kv_off=0x0000>, <slot=1, type='int4', expr='lo_linenumber', kv_off=0x3400>, <slot=2, type='text', expr='(CASE (lo_linenumber % 5) WHEN 0 THEN 'A'::text WHEN 1 THEN 'B'::text WHEN 2 THEN 'C'::text WHEN 3 THEN 'D'::text ELSE 'X'::text END)'>
+   KVecs-Buffer: nbytes: 18432, ndims: 2, items=[kvec0=<0x0000-33ff, type='bpchar', expr='lo_shipmode'>, kvec1=<0x3400-47ff, type='int4', expr='lo_linenumber'>]
+   LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=1, type='int4' resno=2(lo_linenumber)>, <slot=0, type='bpchar' resno=17(lo_shipmode)>]}}
+   MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=1, offset=0x3400-47ff, type='int4', expr='lo_linenumber'>]}}}
+   Scan Quals OpCode: {HashedArrayOp: nslots=6 hash=(bpchar)[<hash:e99a53ea|TRUCK|t>, <hash:e7d7a8fc|RAIL|t>, <hash:7ad83bf6|MAIL|t>, <hash:b5b0202c|SHIP|t>, <default:f>] arg={Var(bpchar): slot=0, expr='lo_shipmode'}}
+   Projection OpCode: {Projection: layout=<1,2> args=[{SaveExpr: <slot=1, type='int4'> arg={Var(int4): kvec=0x3400-4800, expr='lo_linenumber'}}, {SaveExpr: <slot=2, type='text'> arg={HashedArrayOp: nslots=6 hash=(int4)[<hash:efbec0af|0|A>, <hash:8e731746|1|B>, <hash:fe534f97|3|D>, <hash:439edcf6|2|C>, <default:X>] arg={Func(int4)::int4mod args=[{Var(int4): kvec=0x3400-4800, expr='lo_linenumber'}, {Const(int4): value='5'}]}}}]}
+   Fallback-desc: [<dest='0', expr='lo_linenumber', depth=0:1>, <dest='2', expr='lo_shipmode', depth=0:0>]
+   CUDA Stack Size: 4352
+(12 rows)
+
+SELECT lo_linenumber,
+       CASE lo_linenumber % 5
+       WHEN 0 THEN 'A'
+       WHEN 1 THEN 'B'
+       WHEN 2 THEN 'C'
+       WHEN 3 THEN 'D'
+       ELSE      'X'
+       END AS tag
+  INTO pg_temp.test02g
+  FROM lineorder
+ WHERE lo_shipmode IN ('RAIL','SHIP','MAIL','TRUCK')
+   AND lo_orderkey % 97 = 0;
+SET pg_strom.enabled = off;
+SELECT lo_linenumber,
+       CASE lo_linenumber % 5
+       WHEN 0 THEN 'A'
+       WHEN 1 THEN 'B'
+       WHEN 2 THEN 'C'
+       WHEN 3 THEN 'D'
+       ELSE      'X'
+       END AS tag
+  INTO pg_temp.test02c
+  FROM lineorder
+ WHERE lo_shipmode IN ('RAIL','SHIP','MAIL','TRUCK')
+   AND lo_orderkey % 97 = 0;
+(SELECT * FROM pg_temp.test02g EXCEPT SELECT * FROM pg_temp.test02c);
+ lo_linenumber | tag 
+---------------+-----
+(0 rows)
+
+(SELECT * FROM pg_temp.test02c EXCEPT SELECT * FROM pg_temp.test02g);
+ lo_linenumber | tag 
+---------------+-----
+(0 rows)
+
