@@ -3027,14 +3027,26 @@ pgstromExplainTaskState(CustomScanState *node,
 							 pp_info->gpusort_htup_margin);
 		if (es->analyze && ps_state)
 		{
-			pgstromSharedInnerState *psis = pts->inners[pts->num_inner_rels-1].dsm;
-
 			appendStringInfo(&buf, " [buffer reconstruction: %umsec, GPU-sorting %umsec]",
 							 pg_atomic_read_u32(&ps_state->final_reconstruction_msec),
 							 pg_atomic_read_u32(&ps_state->final_sorting_msec));
-			final_nfiltered = (pg_atomic_read_u64(&psis->stats_join) +
-							   pg_atomic_read_u64(&psis->stats_roj) -
-							   pg_atomic_read_u64(&ps_state->final_nitems));
+			if (pts->num_inner_rels > 0)
+			{
+				pgstromSharedInnerState *psis = pts->inners[pts->num_inner_rels-1].dsm;
+				assert(psis != NULL);
+				final_nfiltered = (pg_atomic_read_u64(&psis->stats_join) +
+								   pg_atomic_read_u64(&psis->stats_roj));
+			}
+			else
+			{
+				final_nfiltered = 0;
+				for (int k=0; k < pts->num_scan_rels; k++)
+				{
+					pgstromSharedScanState *psss = pts->scan_rels[k].dsm;
+					final_nfiltered += pg_atomic_read_u64(&psss->source_ntuples_in);
+				}
+			}
+			final_nfiltered -= pg_atomic_read_u64(&ps_state->final_nitems);
 		}
 		ExplainPropertyText("GPU-Sort keys", buf.data, es);
 		
