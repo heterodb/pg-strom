@@ -48,25 +48,27 @@ IMPORT FOREIGN SCHEMA regtest_pq_arrow
 OPTIONS (file :'test_pq_cache_path');
 
 -- ================================================================
--- Correctness baseline: CPU scan of original table
+-- CPU baseline: store results from the original heap table
 -- ================================================================
 SET pg_strom.enabled = off;
 
--- Fixed-length column queries
-SELECT count(*), sum(i4), sum(i8)
+SELECT count(*) AS cnt, sum(i4) AS sum_i4, sum(i8) AS sum_i8
+  INTO pq_q1_cpu
   FROM regtest_pq_data
  WHERE f4 > 0.0;
 
-SELECT count(*), min(f4)::numeric(10,4), max(f4)::numeric(10,4)
+SELECT count(*) AS cnt, min(f4)::numeric(10,4) AS min_f4, max(f4)::numeric(10,4) AS max_f4
+  INTO pq_q2_cpu
   FROM regtest_pq_data
  WHERE i4 BETWEEN -500000 AND 500000;
 
--- Variable-length column queries
-SELECT count(*), min(t1), max(t1)
+SELECT count(*) AS cnt, min(t1) AS min_t1, max(t1) AS max_t1
+  INTO pq_q3_cpu
   FROM regtest_pq_data
  WHERE t2 LIKE 'a%';
 
-SELECT count(*)
+SELECT count(*) AS cnt
+  INTO pq_q4_cpu
   FROM regtest_pq_data
  WHERE length(t1) > length(t2);
 
@@ -78,6 +80,8 @@ SELECT pgstrom.parquet_cache_info()::text NOT LIKE '%"cache_path" : null%' AS ca
 
 \if :cache_active
 
+SET arrow_fdw.parquet_cache_enabled = on;
+
 -- ================================================================
 -- 1st scan: cold cache
 -- All chunks are read from the Parquet file (no cache hits yet).
@@ -86,7 +90,6 @@ SELECT pgstrom.parquet_cache_info()::text NOT LIKE '%"cache_path" : null%' AS ca
 -- (partial/full cache hit path), not the initial Parquet-only reads.
 -- Chunks are written to cache asynchronously after 1st scan.
 -- ================================================================
-SET arrow_fdw.parquet_cache_enabled = on;
 
 -- Fixed-length column query
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
@@ -94,11 +97,13 @@ SELECT count(*), sum(i4), sum(i8)
   FROM regtest_pq_arrow
  WHERE f4 > 0.0;
 
-SELECT count(*), sum(i4), sum(i8)
+SELECT count(*) AS cnt, sum(i4) AS sum_i4, sum(i8) AS sum_i8
+  INTO pq_q1_cold
   FROM regtest_pq_arrow
  WHERE f4 > 0.0;
 
-SELECT count(*), min(f4)::numeric(10,4), max(f4)::numeric(10,4)
+SELECT count(*) AS cnt, min(f4)::numeric(10,4) AS min_f4, max(f4)::numeric(10,4) AS max_f4
+  INTO pq_q2_cold
   FROM regtest_pq_arrow
  WHERE i4 BETWEEN -500000 AND 500000;
 
@@ -108,13 +113,32 @@ SELECT count(*), min(t1), max(t1)
   FROM regtest_pq_arrow
  WHERE t2 LIKE 'a%';
 
-SELECT count(*), min(t1), max(t1)
+SELECT count(*) AS cnt, min(t1) AS min_t1, max(t1) AS max_t1
+  INTO pq_q3_cold
   FROM regtest_pq_arrow
  WHERE t2 LIKE 'a%';
 
-SELECT count(*)
+SELECT count(*) AS cnt
+  INTO pq_q4_cold
   FROM regtest_pq_arrow
  WHERE length(t1) > length(t2);
+
+-- Cold scan correctness: GPU Arrow vs CPU heap (should be empty)
+(SELECT * FROM pq_q1_cold EXCEPT ALL SELECT * FROM pq_q1_cpu)
+UNION ALL
+(SELECT * FROM pq_q1_cpu  EXCEPT ALL SELECT * FROM pq_q1_cold);
+
+(SELECT * FROM pq_q2_cold EXCEPT ALL SELECT * FROM pq_q2_cpu)
+UNION ALL
+(SELECT * FROM pq_q2_cpu  EXCEPT ALL SELECT * FROM pq_q2_cold);
+
+(SELECT * FROM pq_q3_cold EXCEPT ALL SELECT * FROM pq_q3_cpu)
+UNION ALL
+(SELECT * FROM pq_q3_cpu  EXCEPT ALL SELECT * FROM pq_q3_cold);
+
+(SELECT * FROM pq_q4_cold EXCEPT ALL SELECT * FROM pq_q4_cpu)
+UNION ALL
+(SELECT * FROM pq_q4_cpu  EXCEPT ALL SELECT * FROM pq_q4_cold);
 
 -- ================================================================
 -- 2nd scan: warm cache
@@ -122,23 +146,37 @@ SELECT count(*)
 -- in EXPLAIN when at least one chunk was looked up via the cache
 -- path (nchunks_parquet_read > 0 means partial/full cache hit).
 -- ================================================================
+
+-- Fixed-length column query
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT count(*), sum(i4), sum(i8)
   FROM regtest_pq_arrow
  WHERE f4 > 0.0;
 
-SELECT count(*), sum(i4), sum(i8)
+SELECT count(*) AS cnt, sum(i4) AS sum_i4, sum(i8) AS sum_i8
+  INTO pq_q1_warm
   FROM regtest_pq_arrow
  WHERE f4 > 0.0;
 
+-- Variable-length column query
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT count(*), min(t1), max(t1)
   FROM regtest_pq_arrow
  WHERE t2 LIKE 'a%';
 
-SELECT count(*), min(t1), max(t1)
+SELECT count(*) AS cnt, min(t1) AS min_t1, max(t1) AS max_t1
+  INTO pq_q3_warm
   FROM regtest_pq_arrow
  WHERE t2 LIKE 'a%';
+
+-- Warm scan correctness: GPU Arrow (cached) vs CPU heap (should be empty)
+(SELECT * FROM pq_q1_warm EXCEPT ALL SELECT * FROM pq_q1_cpu)
+UNION ALL
+(SELECT * FROM pq_q1_cpu  EXCEPT ALL SELECT * FROM pq_q1_warm);
+
+(SELECT * FROM pq_q3_warm EXCEPT ALL SELECT * FROM pq_q3_cpu)
+UNION ALL
+(SELECT * FROM pq_q3_cpu  EXCEPT ALL SELECT * FROM pq_q3_warm);
 
 -- ================================================================
 -- parquet_cache_info() after scans: verify cache was used
@@ -165,34 +203,60 @@ SELECT count(*), sum(i4), sum(i8)
   FROM regtest_pq_arrow
  WHERE f4 > 0.0;
 
-SELECT count(*), sum(i4), sum(i8)
+SELECT count(*) AS cnt, sum(i4) AS sum_i4, sum(i8) AS sum_i8
+  INTO pq_q1_nocache
   FROM regtest_pq_arrow
  WHERE f4 > 0.0;
+
+-- Cache-disabled correctness: GPU Arrow (no cache) vs CPU heap (should be empty)
+(SELECT * FROM pq_q1_nocache EXCEPT ALL SELECT * FROM pq_q1_cpu)
+UNION ALL
+(SELECT * FROM pq_q1_cpu    EXCEPT ALL SELECT * FROM pq_q1_nocache);
 
 RESET arrow_fdw.parquet_cache_enabled;
 
 \else
 -- ================================================================
--- Cache not configured: skip cache-specific tests, verify GPU reads
+-- Cache not configured: GPU Arrow vs CPU heap correctness check
 -- Set pg_strom.parquet_cache_path in postgresql.conf to enable.
 -- ================================================================
 \echo 'NOTE: pg_strom.parquet_cache_path is not configured'
 \echo 'NOTE: Skipping cache tests; running correctness check only'
 
-SELECT count(*), sum(i4), sum(i8)
+SELECT count(*) AS cnt, sum(i4) AS sum_i4, sum(i8) AS sum_i8
+  INTO pq_q1_gpu
   FROM regtest_pq_arrow
  WHERE f4 > 0.0;
 
-SELECT count(*), min(f4)::numeric(10,4), max(f4)::numeric(10,4)
+SELECT count(*) AS cnt, min(f4)::numeric(10,4) AS min_f4, max(f4)::numeric(10,4) AS max_f4
+  INTO pq_q2_gpu
   FROM regtest_pq_arrow
  WHERE i4 BETWEEN -500000 AND 500000;
 
-SELECT count(*), min(t1), max(t1)
+SELECT count(*) AS cnt, min(t1) AS min_t1, max(t1) AS max_t1
+  INTO pq_q3_gpu
   FROM regtest_pq_arrow
  WHERE t2 LIKE 'a%';
 
-SELECT count(*)
+SELECT count(*) AS cnt
+  INTO pq_q4_gpu
   FROM regtest_pq_arrow
  WHERE length(t1) > length(t2);
+
+(SELECT * FROM pq_q1_gpu EXCEPT ALL SELECT * FROM pq_q1_cpu)
+UNION ALL
+(SELECT * FROM pq_q1_cpu EXCEPT ALL SELECT * FROM pq_q1_gpu);
+
+(SELECT * FROM pq_q2_gpu EXCEPT ALL SELECT * FROM pq_q2_cpu)
+UNION ALL
+(SELECT * FROM pq_q2_cpu EXCEPT ALL SELECT * FROM pq_q2_gpu);
+
+(SELECT * FROM pq_q3_gpu EXCEPT ALL SELECT * FROM pq_q3_cpu)
+UNION ALL
+(SELECT * FROM pq_q3_cpu EXCEPT ALL SELECT * FROM pq_q3_gpu);
+
+(SELECT * FROM pq_q4_gpu EXCEPT ALL SELECT * FROM pq_q4_cpu)
+UNION ALL
+(SELECT * FROM pq_q4_cpu EXCEPT ALL SELECT * FROM pq_q4_gpu);
 
 \endif
