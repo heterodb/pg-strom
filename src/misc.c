@@ -2546,6 +2546,7 @@ __munmapShmem(void *mmap_addr)
 	return false;
 }
 
+#if 0
 /* ----------------------------------------------------------------
  *
  * SQL functions exist in the previous release (not supported now)
@@ -2586,3 +2587,4 @@ pgstrom_gpucache_info(PG_FUNCTION_ARGS)
 {
 	elog(ERROR, "pgstrom.gpucache_info is no longer supported");
 }
+#endif

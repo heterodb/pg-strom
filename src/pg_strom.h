@@ -1001,6 +1001,12 @@ extern bool		kds_arrow_fetch_tuple(TupleTableSlot *slot,
 extern void		pgstrom_init_arrow_fdw(void);
 
 /*
+ * gpu_cache.c
+ */
+extern void		pgstrom_init_gpu_cache(void);
+
+
+/*
  * select_into.c
  */
 

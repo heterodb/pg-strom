@@ -258,21 +258,9 @@ mergeGpuPreAggGroupByBuffer(kern_context *kcxt,
 /*
  * Definitions related to GpuCache
  */
-typedef struct {
-	uint32_t	database_oid;
-	uint32_t	table_oid;
-	uint64_t	signature;
-} GpuCacheIdent;
-
-INLINE_FUNCTION(bool)
-GpuCacheIdentEqual(const GpuCacheIdent *a, const GpuCacheIdent *b)
-{
-	return (a->database_oid == b->database_oid &&
-			a->table_oid    == b->table_oid &&
-			a->signature    == b->signature);
-}
-
 #define GCACHE_TX_LOG__MAGIC		0xEBAD7C00
+#define GCACHE_TX_LOG__SETUP_CACHE	(GCACHE_TX_LOG__MAGIC | 'S')
+#define GCACHE_TX_LOG__ERASE_CACHE	(GCACHE_TX_LOG__MAGIC | 'E')
 #define GCACHE_TX_LOG__INSERT		(GCACHE_TX_LOG__MAGIC | 'I')
 #define GCACHE_TX_LOG__DELETE		(GCACHE_TX_LOG__MAGIC | 'D')
 #define GCACHE_TX_LOG__COMMIT_INS	(GCACHE_TX_LOG__MAGIC | 'C')
@@ -283,34 +271,77 @@ GpuCacheIdentEqual(const GpuCacheIdent *a, const GpuCacheIdent *b)
 typedef struct {
     uint32_t	type;
     uint32_t	length;
-	char		data[1];		/* variable length */
-} GCacheTxLogCommon;
+} GpuCacheLogCommon;
 
 typedef struct {
-	uint32_t	type;
-	uint32_t	length;
-	uint32_t	rowid;
-	uint32_t	__padding__;
-	HeapTupleHeaderData htup;
-} GCacheTxLogInsert;
+	GpuCacheLogCommon c;
+	uint32_t	database_oid;
+	uint32_t	table_oid;
+	uint32_t	table_sig;
+	uint32_t	__padding;
+	kern_data_store kds_head;
+} GpuCacheLogSetupCache;
 
 typedef struct {
-	uint32_t	type;
-	uint32_t	length;
+	GpuCacheLogCommon c;
+	uint32_t	database_oid;
+	uint32_t	table_oid;
+	uint32_t	table_sig;
+	uint32_t	__padding;
+} GpuCacheLogEraseCache;
+
+typedef struct {
+	GpuCacheLogCommon c;
+	uint32_t	database_oid;
+	uint32_t	table_oid;
+	uint32_t	table_sig;
+	uint32_t	__padding;
+	kern_tupitem tupitem;
+} GpuCacheLogInsert;
+
+typedef struct {
+	GpuCacheLogCommon c;
+	uint32_t	database_oid;
+	uint32_t	table_oid;
+	uint32_t	table_sig;
 	uint32_t	xid;
-	uint32_t	rowid;
 	ItemPointerData ctid;
-} GCacheTxLogDelete;
+} GpuCacheLogDelete;
 
 /*
  * COMMIT/ABORT
  */
 typedef struct {
-	uint32_t	type;
-	uint32_t	length;
-	uint32_t	rowid;
-	uint32_t	__padding__;
-} GCacheTxLogXact;
+	GpuCacheLogCommon c;
+	uint16_t	pindex;
+	ItemPointerData ctid;
+} GpuCacheLogXact;
+
+/*
+ * GpuCacheSysAttrs is embedded in front of the payload.
+ */
+typedef struct {
+	uint32_t	xmin;
+	uint32_t	xmax;
+	uint16_t	__padding;
+	ItemPointerData ctid;
+} GpuCacheSysAttr;
+
+INLINE_FUNCTION(const GpuCacheSysAttr *)
+fetchGpuCacheSysAttrOfTuple(const kern_tupitem *tupitem)
+{
+	const GpuCacheSysAttr *sysattr;
+
+	assert((uintptr_t)tupitem == MAXALIGN((uintptr_t)tupitem));
+	sysattr = (const GpuCacheSysAttr *)((const char *)tupitem +
+										tupitem->t_hoff -
+										sizeof(GpuCacheSysAttr));
+	assert((const char *)sysattr >= (const char *)tupitem->t_bits +
+		   ((tupitem->t_infomask & HEAP_HASNULL) != 0
+			? BITMAPLEN(tupitem->t_infomask2 & HEAP_NATTS_MASK) : 0));
+	assert((uintptr_t)sysattr == MAXALIGN((uintptr_t)sysattr));
+	return sysattr;
+}
 
 /*
  * REDO Log Buffer

@@ -788,6 +788,7 @@ execGpuScanLoadSource(kern_context *kcxt,
  *
  * ------------------------------------------------------------
  */
+#if 0
 STATIC_FUNCTION(void)
 gpucache_cleanup_row_owner(kern_context *kcxt,
 						   kern_gpucache_redolog *redo,
@@ -1147,13 +1148,14 @@ gpucache_apply_xact_logs(kern_context *kcxt,
 		__atomic_add_uint64(&extra->deadspace, smx_deadspace);
 	}
 }
-
+#endif
 KERNEL_FUNCTION(void)
 kern_gpucache_apply_redo(kern_gpucache_redolog *gcache_redo,
 						 kern_data_store *kds,
 						 kern_data_extra *extra,
 						 int phase)
 {
+#if 0
 	kern_context	kcxt;	/* just for error message */
 
 	/* bailout if any errors */
@@ -1186,6 +1188,7 @@ kern_gpucache_apply_redo(kern_gpucache_redolog *gcache_redo,
 			break;
 	}
 	STROM_WRITEBACK_ERROR_STATUS(&gcache_redo->kerror, &kcxt);
+#endif
 }
 
 KERNEL_FUNCTION(void)
@@ -1193,6 +1196,7 @@ kern_gpucache_compaction(kern_data_store *kds,
 						 kern_data_extra *extra_src,
 						 kern_data_extra *extra_dst)
 {
+#if 0
 	uint32_t	index;
 
 	for (index = get_global_id();
@@ -1230,4 +1234,5 @@ kern_gpucache_compaction(kern_data_store *kds,
 			}
 		}
 	}
+#endif
 }
