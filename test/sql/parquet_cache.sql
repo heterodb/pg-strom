@@ -1,6 +1,11 @@
 ---
 --- Test for Parquet Cache
 ---
+--- This test is NOT included in test/parallel_schedule (requires
+--- pg_strom.parquet_cache_path to be configured in postgresql.conf).
+--- Run it explicitly with:
+---   cd test && make installcheck REGRESS=parquet_cache
+---
 \t on
 SET pg_strom.regression_test_mode = on;
 SET client_min_messages = error;
@@ -124,21 +129,13 @@ SELECT count(*) AS cnt
  WHERE length(t1) > length(t2);
 
 -- Cold scan correctness: GPU Arrow vs CPU heap (should be empty)
-(SELECT * FROM pq_q1_cold EXCEPT ALL SELECT * FROM pq_q1_cpu)
-UNION ALL
-(SELECT * FROM pq_q1_cpu  EXCEPT ALL SELECT * FROM pq_q1_cold);
+SELECT cold.*, cpu.* FROM pq_q1_cold cold, pq_q1_cpu cpu WHERE cold IS DISTINCT FROM cpu;
 
-(SELECT * FROM pq_q2_cold EXCEPT ALL SELECT * FROM pq_q2_cpu)
-UNION ALL
-(SELECT * FROM pq_q2_cpu  EXCEPT ALL SELECT * FROM pq_q2_cold);
+SELECT cold.*, cpu.* FROM pq_q2_cold cold, pq_q2_cpu cpu WHERE cold IS DISTINCT FROM cpu;
 
-(SELECT * FROM pq_q3_cold EXCEPT ALL SELECT * FROM pq_q3_cpu)
-UNION ALL
-(SELECT * FROM pq_q3_cpu  EXCEPT ALL SELECT * FROM pq_q3_cold);
+SELECT cold.*, cpu.* FROM pq_q3_cold cold, pq_q3_cpu cpu WHERE cold IS DISTINCT FROM cpu;
 
-(SELECT * FROM pq_q4_cold EXCEPT ALL SELECT * FROM pq_q4_cpu)
-UNION ALL
-(SELECT * FROM pq_q4_cpu  EXCEPT ALL SELECT * FROM pq_q4_cold);
+SELECT cold.*, cpu.* FROM pq_q4_cold cold, pq_q4_cpu cpu WHERE cold IS DISTINCT FROM cpu;
 
 -- ================================================================
 -- 2nd scan: warm cache
@@ -170,13 +167,9 @@ SELECT count(*) AS cnt, min(t1) AS min_t1, max(t1) AS max_t1
  WHERE t2 LIKE 'a%';
 
 -- Warm scan correctness: GPU Arrow (cached) vs CPU heap (should be empty)
-(SELECT * FROM pq_q1_warm EXCEPT ALL SELECT * FROM pq_q1_cpu)
-UNION ALL
-(SELECT * FROM pq_q1_cpu  EXCEPT ALL SELECT * FROM pq_q1_warm);
+SELECT warm.*, cpu.* FROM pq_q1_warm warm, pq_q1_cpu cpu WHERE warm IS DISTINCT FROM cpu;
 
-(SELECT * FROM pq_q3_warm EXCEPT ALL SELECT * FROM pq_q3_cpu)
-UNION ALL
-(SELECT * FROM pq_q3_cpu  EXCEPT ALL SELECT * FROM pq_q3_warm);
+SELECT warm.*, cpu.* FROM pq_q3_warm warm, pq_q3_cpu cpu WHERE warm IS DISTINCT FROM cpu;
 
 -- ================================================================
 -- parquet_cache_info() after scans: verify cache was used
@@ -209,9 +202,7 @@ SELECT count(*) AS cnt, sum(i4) AS sum_i4, sum(i8) AS sum_i8
  WHERE f4 > 0.0;
 
 -- Cache-disabled correctness: GPU Arrow (no cache) vs CPU heap (should be empty)
-(SELECT * FROM pq_q1_nocache EXCEPT ALL SELECT * FROM pq_q1_cpu)
-UNION ALL
-(SELECT * FROM pq_q1_cpu    EXCEPT ALL SELECT * FROM pq_q1_nocache);
+SELECT nocache.*, cpu.* FROM pq_q1_nocache nocache, pq_q1_cpu cpu WHERE nocache IS DISTINCT FROM cpu;
 
 RESET arrow_fdw.parquet_cache_enabled;
 
@@ -243,20 +234,12 @@ SELECT count(*) AS cnt
   FROM regtest_pq_arrow
  WHERE length(t1) > length(t2);
 
-(SELECT * FROM pq_q1_gpu EXCEPT ALL SELECT * FROM pq_q1_cpu)
-UNION ALL
-(SELECT * FROM pq_q1_cpu EXCEPT ALL SELECT * FROM pq_q1_gpu);
+SELECT gpu.*, cpu.* FROM pq_q1_gpu gpu, pq_q1_cpu cpu WHERE gpu IS DISTINCT FROM cpu;
 
-(SELECT * FROM pq_q2_gpu EXCEPT ALL SELECT * FROM pq_q2_cpu)
-UNION ALL
-(SELECT * FROM pq_q2_cpu EXCEPT ALL SELECT * FROM pq_q2_gpu);
+SELECT gpu.*, cpu.* FROM pq_q2_gpu gpu, pq_q2_cpu cpu WHERE gpu IS DISTINCT FROM cpu;
 
-(SELECT * FROM pq_q3_gpu EXCEPT ALL SELECT * FROM pq_q3_cpu)
-UNION ALL
-(SELECT * FROM pq_q3_cpu EXCEPT ALL SELECT * FROM pq_q3_gpu);
+SELECT gpu.*, cpu.* FROM pq_q3_gpu gpu, pq_q3_cpu cpu WHERE gpu IS DISTINCT FROM cpu;
 
-(SELECT * FROM pq_q4_gpu EXCEPT ALL SELECT * FROM pq_q4_cpu)
-UNION ALL
-(SELECT * FROM pq_q4_cpu EXCEPT ALL SELECT * FROM pq_q4_gpu);
+SELECT gpu.*, cpu.* FROM pq_q4_gpu gpu, pq_q4_cpu cpu WHERE gpu IS DISTINCT FROM cpu;
 
 \endif
