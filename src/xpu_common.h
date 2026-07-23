@@ -1196,11 +1196,20 @@ GistFollowRight(PageHeaderData *page)
 /*
  * Definition of KDS-Items and related
  */
+typedef struct
+{
+	uint32_t	xmin;
+	uint32_t	xmax;
+	uint16_t	__padding__;
+	ItemPointerData	ctid;
+} kern_tupitem_xact_attrs;
+
 struct kern_tupitem
 {
 	uint32_t		t_len;			/* actual length of minimal tuple */
 	uint32_t		hash;			/* hash value of this item */
-	uint16_t		__padding__;
+	uint8_t			has_xact_attrs;	/* if kern_tupitem_xact_attrs is embedded in */
+	uint8_t			__padding__;
 	uint16_t		t_infomask2;	/* number of attributes + various flags */
 	uint16_t		t_infomask;		/* various flag bits, see below */
 	uint8_t			t_hoff;			/* sizeof header incl. bitmap, padding */
@@ -1209,6 +1218,11 @@ struct kern_tupitem
 	/*
 	 * +----------------+
 	 * | NULL-bitmap    |
+	 * +----------------+
+	 * //   padding    //
+	 * +----------------+ <-- ((char *)titem + titem->t_hoff
+	 * | kern_tupitem   |      - sizeof(kern_tupitem_xact_attrs)
+	 * |    _xact_attrs |      - MINIMAL_TUPLE_OFFSET)
 	 * +----------------+ <-- ((char *)titem + titem->t_hoff
 	 * |       :        |      - MINIMAL_TUPLE_OFFSET)
 	 * | Data Payload   |
@@ -1248,6 +1262,25 @@ KERN_TUPITEM_SET_ROWID(kern_tupitem *titem, uint32_t rowid)
 	memcpy((char *)titem
 		   + titem->t_len
 		   - ROWID_SIZE, &rowid, ROWID_SIZE);
+}
+
+INLINE_FUNCTION(kern_tupitem_xact_attrs *)
+KERN_TUPITEM_GET_XACT_ATTRS(kern_tupitem *titem)
+{
+	kern_tupitem_xact_attrs *xattr = NULL;
+	if (titem->has_xact_attrs)
+	{
+		assert((uintptr_t)titem == MAXALIGN((uintptr_t)titem));
+		xattr = (kern_tupitem_xact_attrs *)((char *)titem
+											+ titem->t_hoff
+											- sizeof(kern_tupitem_xact_attrs)
+											- MINIMAL_TUPLE_OFFSET);
+		assert((char *)xattr >= (char *)titem->t_bits +
+			   ((titem->t_infomask & HEAP_HASNULL) != 0
+				? BITMAPLEN(titem->t_infomask2 & HEAP_NATTS_MASK) : 0));
+		assert((uintptr_t)xattr == MAXALIGN((uintptr_t)xattr));
+	}
+	return xattr;
 }
 
 /*
@@ -1310,6 +1343,19 @@ KDS_GET_TUPITEM(const kern_data_store *kds, uint32_t kds_index)
 	if (!offset)
 		return NULL;
 	return (kern_tupitem *)((char *)kds + kds->length - offset);
+}
+
+INLINE_FUNCTION(kern_hashitem *)
+KDS_GET_HASHITEM(const kern_data_store *kds, uint32_t kds_index)
+{
+	uint64_t	offset = __volatileRead(KDS_GET_ROWINDEX(kds) + kds_index);
+
+	if (!offset)
+		return NULL;
+	assert(kds->format == KDS_FORMAT_HASH);
+	return (kern_hashitem *)((char *)kds + kds->length
+							 - offset
+							 - offsetof(kern_hashitem, t));
 }
 
 INLINE_FUNCTION(bool)

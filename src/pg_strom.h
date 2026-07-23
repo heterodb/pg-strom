@@ -782,6 +782,71 @@ extern bool		pgstrom_init_gpu_device(void);
 /*
  * gpu_service.c
  */
+typedef struct
+{
+	struct gpuContext *gcontext;	/* gpuContext that owns this pool */
+	pthread_mutex_t	lock;
+	bool			is_managed;	/* true, if managed memory pool */
+	size_t			total_sz;	/* total pool size */
+	size_t			hard_limit;
+	size_t			keep_limit;
+	dlist_head		segment_list;
+} gpuMemoryPool;
+
+struct gpuContext
+{
+	dlist_node		chain;
+	char			gpu_label[8];	/* for debug output */
+	int				serv_fd;		/* for accept(2) */
+	int				host_numa_id;
+	int				cuda_dindex;
+	gpumask_t		cuda_dmask;		/* = (1UL<<cuda_dindex) */
+	CUdevice		cuda_device;
+	CUmemLocation	cuda_mlocation;
+	CUcontext		cuda_context;
+	CUmodule		cuda_module;
+	HTAB		   *cuda_type_htab;
+	HTAB		   *cuda_func_htab;
+	CUfunction		cufn_kern_gpumain;
+	CUfunction		cufn_prep_gistindex;
+	CUfunction		cufn_merge_outer_join_map;
+	CUfunction		cufn_merge_gpupreagg_buffer;
+	CUfunction		cufn_gpusort_consolidate_buffer;
+	CUfunction		cufn_gpusort_partition_buffer;
+	CUfunction		cufn_gpusort_prep_buffer;
+	CUfunction		cufn_gpusort_exec_bitonic;
+	CUfunction		cufn_kbuf_simple_limit;
+	CUfunction		cufn_kbuf_partitioning;
+	CUfunction		cufn_kbuf_reconstruction;
+	CUfunction		cufn_gpucache_apply_logs;
+	CUfunction		cufn_gpucache_compaction;
+	CUfunction		cufn_windowrank_prep_hash;
+	CUfunction		cufn_windowrank_exec_row_number;
+	CUfunction		cufn_windowrank_exec_rank;
+	CUfunction		cufn_windowrank_exec_dense_rank;
+	CUfunction		cufn_windowrank_finalize;
+	CUfunction		cufn_global_stair_sum_u32;
+	int				gpumain_shmem_sz_limit;
+	xpu_encode_info *cuda_encode_catalog;
+	gpuMemoryPool	pool_raw;
+	gpuMemoryPool	pool_managed;
+	bool			cuda_profiler_started;
+	volatile uint32_t cuda_stack_limit;	/* current configuration */
+	pthread_mutex_t	cuda_setlimit_lock;
+	/* GPU cache */
+	pg_atomic_uint32 gpucache_worker_phase;
+	pthread_t		gpucache_worker;
+	pthread_rwlock_t gpucache_rwlock;
+	kern_gpucache_master_state *gpucache_master_state;	/* managed memory */
+	/* GPU workers */
+	pthread_mutex_t	worker_lock;
+	dlist_head		worker_list;
+	/* XPU commands */
+	pthread_cond_t	cond;
+	pthread_mutex_t	lock;
+	dlist_head		command_list;
+	pg_atomic_uint32 num_commands;
+};
 typedef struct gpuContext	gpuContext;
 typedef struct gpuClient	gpuClient;
 
@@ -1003,6 +1068,7 @@ extern void		pgstrom_init_arrow_fdw(void);
 /*
  * gpu_cache.c
  */
+extern void	   *gpuCacheWorkerMain(void *__gcontext);
 extern void		pgstrom_init_gpu_cache(void);
 
 

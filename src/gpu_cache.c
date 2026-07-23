@@ -38,6 +38,7 @@ typedef struct
 #define GPUCACHE_STATE_HASH_NSLOTS		509
 typedef struct
 {
+	pg_atomic_uint32 error_count;
 	pthread_mutex_t hash_mutex;
 	dlist_head	free_list;
 	dlist_head	hash_slots[GPUCACHE_STATE_HASH_NSLOTS];
@@ -255,51 +256,7 @@ __gpuCacheSendTxLogOne(GpuCacheDesc *gc_desc, int pindex,
 	const char *buf = (const char *)gc_log;
 	size_t		len = gc_log->length;
 	size_t		off = 0;
-#if 1
-	switch (gc_log->type)
-	{
-		case GCACHE_TX_LOG__SETUP_CACHE:
-			elog(NOTICE, "gpucache: SETUP CACHE table_oid=%u table_sig=%08x len=%u",
-				 ((const GpuCacheLogSetupCache *)gc_log)->table_oid,
-				 ((const GpuCacheLogSetupCache *)gc_log)->table_sig,
-				 gc_log->length);
-			break;
-		case GCACHE_TX_LOG__ERASE_CACHE:
-			elog(NOTICE, "gpucache: DROP TABLE table_oid=%u table_sig=%08x len=%u",
-				 ((const GpuCacheLogEraseCache *)gc_log)->table_oid,
-                 ((const GpuCacheLogEraseCache *)gc_log)->table_sig,
-				 gc_log->length);
-			break;
-		case GCACHE_TX_LOG__INSERT:
-			elog(NOTICE, "gpucache: INSERT table_oid=%u table_sig=%08x len=%u",
-				 ((const GpuCacheLogInsert *)gc_log)->table_oid,
-				 ((const GpuCacheLogInsert *)gc_log)->table_sig,
-				 gc_log->length);
-			break;
-		case GCACHE_TX_LOG__DELETE:
-			elog(NOTICE, "gpucache: DELETE table_oid=%u table_sig=%08x len=%u",
-				 ((const GpuCacheLogDelete *)gc_log)->table_oid,
-				 ((const GpuCacheLogDelete *)gc_log)->table_sig,
-				 gc_log->length);
-			break;
-		case GCACHE_TX_LOG__COMMIT_INS:
-			elog(NOTICE, "gpucache: COMMIT_INS");
-			break;
-		case GCACHE_TX_LOG__COMMIT_DEL:
-			elog(NOTICE, "gpucache: COMMIT_DEL");
-			break;
-		case GCACHE_TX_LOG__ABORT_INS:
-			elog(NOTICE, "gpucache: ABORT_INS");
-			break;
-		case GCACHE_TX_LOG__ABORT_DEL:
-			elog(NOTICE, "gpucache: ABORT_DEL");
-			break;
-		default:
-			elog(NOTICE, "gpucache: UNKNOWN");
-			break;
-	}
-	return;
-#endif
+
 	pthreadMutexLock(mutex);
 	while (off < len)
 	{
@@ -650,12 +607,12 @@ gpuCacheTableSignatureInvalidation(Oid table_oid)
 }
 
 /*
- * gpuCacheSharedStateHash
+ * gpuCacheSharedStateHashIndex
  */
 static uint32_t
-gpuCacheSharedStateHash(Oid database_oid,
-						Oid table_oid,
-						uint32_t table_sig)
+gpuCacheSharedStateHashIndex(Oid database_oid,
+							 Oid table_oid,
+							 uint32_t table_sig)
 {
 	struct {
 		Oid			database_oid;
@@ -666,7 +623,7 @@ gpuCacheSharedStateHash(Oid database_oid,
 	hkey.database_oid = database_oid;
 	hkey.table_oid = table_oid;
 	hkey.table_sig = table_sig;
-	return hash_bytes((unsigned char *)&hkey, sizeof(hkey));
+	return hash_bytes((unsigned char *)&hkey, sizeof(hkey)) % GPUCACHE_KDS_HASH_NSLOTS;
 }
 
 /*
@@ -679,11 +636,11 @@ getGpuCacheSharedState(Oid database_oid,
 					   gpumask_t gpumask,
 					   size_t gpucache_sz)
 {
-	uint32_t		hash = gpuCacheSharedStateHash(database_oid, table_oid, table_sig);
-	uint32_t		hindex = (hash % GPUCACHE_STATE_HASH_NSLOTS);
-	dlist_iter		iter;
 	GpuCacheSharedState *gc_sstate;
-
+	dlist_iter	iter;
+	uint32_t	hindex = gpuCacheSharedStateHashIndex(database_oid,
+													  table_oid,
+													  table_sig);
 	pthreadMutexLock(&gpucache_shared_head->hash_mutex);
 	dlist_foreach(iter, &gpucache_shared_head->hash_slots[hindex])
 	{
@@ -829,7 +786,7 @@ __gpuCacheSetupCacheLog(GpuCacheDesc *gc_desc, Relation rel)
 	/* estimation of nitems and nslots */
 	avg_width = MAXALIGN(offsetof(kern_hashitem, t.t_bits) +
 						 BITMAPLEN(tupdesc->natts) +
-						 sizeof(GpuCacheSysAttr))	/* in front of the payload */
+						 sizeof(kern_tupitem_xact_attrs)) /* xact attributes */
 		+ MAXALIGN(data_width + sizeof(uint32_t))	/* payload */
 		+ sizeof(uint64_t)							/* row-id array consumption */
 		+ sizeof(uint64_t);							/* hash slot consumption */
@@ -905,7 +862,7 @@ __setupGpuCacheTupleItem(StringInfo buf,
 	uint32_t	head_sz;
 	uint32_t	hoff, diff;
 	kern_tupitem *tupitem;
-	GpuCacheSysAttr *sysatt;
+	kern_tupitem_xact_attrs *xattrs;
 	static uint64_t zero = 0;
 
 	assert(base == MAXALIGN(base));
@@ -915,12 +872,12 @@ __setupGpuCacheTupleItem(StringInfo buf,
 		nullmap = tuple->t_data->t_bits;
 		head_sz = MAXALIGN(offsetof(kern_tupitem, t_bits)
 						   + BITMAPLEN(nattrs)
-						   + sizeof(GpuCacheSysAttr));
+						   + sizeof(kern_tupitem_xact_attrs));
 	}
 	else
 	{
 		head_sz = MAXALIGN(offsetof(kern_tupitem, t_bits)
-						   + sizeof(GpuCacheSysAttr));
+						   + sizeof(kern_tupitem_xact_attrs));
 	}
 	enlargeStringInfo(buf, head_sz);
 	memset(buf->data + buf->len, 0, head_sz);
@@ -980,15 +937,16 @@ __setupGpuCacheTupleItem(StringInfo buf,
 	tupitem = (kern_tupitem *)(buf->data + base);
 	tupitem->t_len = (buf->len - base);
 	tupitem->hash  = getCtidHash(&tuple->t_self);
+	tupitem->has_xact_attrs = true;
 	tupitem->t_infomask2 = nattrs;
 	tupitem->t_infomask  = tuple->t_data->t_infomask;
-	tupitem->t_hoff = head_sz;
+	tupitem->t_hoff = head_sz + MINIMAL_TUPLE_OFFSET;
 	if (nullmap)
 		memcpy(tupitem->t_bits, nullmap, BITMAPLEN(nattrs));
-	sysatt = (GpuCacheSysAttr *)((char *)tupitem + head_sz - sizeof(GpuCacheSysAttr));
-	sysatt->xmin = xmin;
-	sysatt->xmax = xmax;
-	memcpy(&sysatt->ctid, &tuple->t_self, sizeof(ItemPointerData));
+	xattrs = KERN_TUPITEM_GET_XACT_ATTRS(tupitem);
+	xattrs->xmin = xmin;
+	xattrs->xmax = xmax;
+	memcpy(&xattrs->ctid, &tuple->t_self, sizeof(ItemPointerData));
 }
 
 /*
@@ -1228,7 +1186,6 @@ __gpuCacheInitialLoadMain(GpuCacheDesc *gc_desc, Relation rel)
 {
 	TableScanDesc	hscan;
 	HeapTuple		tuple;
-
 
 	hscan = table_beginscan(rel, SnapshotAny, 0, NULL);
 	while ((tuple = heap_getnext(hscan, ForwardScanDirection)) != NULL)
@@ -1674,9 +1631,11 @@ releaseGpuCacheDesc(GpuCacheDesc *gc_desc, bool normal_commit)
 				continue;
 			}
 			xact.c.length = sizeof(GpuCacheLogXact);
-			xact.pindex = pci->pindex;
+			xact.database_oid = MyDatabaseId;
+			xact.table_oid = gc_desc->table_oid;
+			xact.table_sig = gc_desc->table_sig;
 			memcpy(&xact.ctid, &pci->ctid, sizeof(ItemPointerData));
-			gpuCacheSendTxLog(gc_desc, xact.pindex, &xact.c);
+			gpuCacheSendTxLog(gc_desc, pci->pindex, &xact.c);
 		}
 	}
 	/* cleanup itself */
@@ -1912,4 +1871,653 @@ pgstrom_init_gpu_cache(void)
 	/* transaction callbacks */
 	RegisterXactCallback(gpuCacheXactCallback, NULL);
 	RegisterSubXactCallback(gpuCacheSubXactCallback, NULL);
+}
+
+/* ----------------------------------------------------------------
+ *
+ * GPU-Cache Service Code
+ *
+ * Note that the code below shall be executed under the GPU-Service context,
+ * so it is not capable to touch PostgreSQL objects.
+ *
+ * ----------------------------------------------------------------
+ */
+#define __GC_LOG(fmt,...)		__gsLogLabel("GPU-cache worker",fmt,##__VA_ARGS__)
+
+/*
+ * gpuCacheAllocMasterState
+ */
+static bool
+gpuCacheAllocMasterState(gpuContext *gcontext)
+{
+	if (!gcontext->gpucache_master_state)
+	{
+		size_t		bufsz = (256UL << 20);
+		CUdeviceptr	m_bufptr;
+		CUresult	rc;
+
+		rc = cuMemAllocManaged(&m_bufptr, bufsz,
+							   CU_MEM_ATTACH_GLOBAL);
+		if (rc != CUDA_SUCCESS)
+		{
+			__GC_LOG("out of managed memory");
+			return false;
+		}
+		memset((void *)m_bufptr, 0, offsetof(kern_gpucache_master_state, log_items));
+		gcontext->gpucache_master_state = (kern_gpucache_master_state *)m_bufptr;
+		gcontext->gpucache_master_state->length = bufsz;
+	}
+	return true;
+}
+
+/*
+ * gpuCacheReleaseMasterState
+ */
+static void
+gpuCacheReleaseMasterState(gpuContext *gcontext)
+{
+	pthreadRWLockWriteLock(&gcontext->gpucache_rwlock);
+	if (gcontext->gpucache_master_state)
+	{
+		cuMemFree((CUdeviceptr)gcontext->gpucache_master_state);
+		gcontext->gpucache_master_state = NULL;
+	}
+	pthreadRWLockUnlock(&gcontext->gpucache_rwlock);
+}
+
+/*
+ * gpuCacheMarkAsCorrupted
+ */
+static void
+gpuCacheMarkAsCorrupted(kern_gpucache_data_store *curr)
+{
+	dlist_iter	iter;
+	uint32_t	hindex = gpuCacheSharedStateHashIndex(curr->database_oid,
+													  curr->table_oid,
+													  curr->table_sig);
+
+	pthreadMutexLock(&gpucache_shared_head->hash_mutex);
+	dlist_foreach(iter, &gpucache_shared_head->hash_slots[hindex])
+	{
+		GpuCacheSharedState *gc_sstate = dlist_container(GpuCacheSharedState,
+														 chain, iter.cur);
+		if (gc_sstate->database_oid == curr->database_oid &&
+			gc_sstate->table_oid    == curr->table_oid &&
+			gc_sstate->table_sig    == curr->table_sig)
+		{
+			pg_atomic_write_u32(&gc_sstate->phase,
+								GPUCACHE_PHASE__IS_CORRUPTED);
+		}
+	}
+	/* notify other GPU-Cache services to release corrupted caches */
+	pg_atomic_fetch_and_u32(&gpucache_shared_head->error_count, 1);
+	pthreadMutexUnlock(&gpucache_shared_head->hash_mutex);
+}
+
+/*
+ * gpuCacheExecCompactionOne
+ */
+static kern_gpucache_data_store *
+gpuCacheExecCompactionOne(gpuContext *gcontext, kern_gpucache_data_store *orig)
+{
+	kern_gpucache_data_store *comp = NULL;
+	size_t		length = (offsetof(kern_gpucache_data_store, kds) + orig->kds.length);
+	int			grid_sz;
+	int			block_sz;
+	void	   *kern_args[2];
+	CUresult	rc;
+
+	rc = gpuOptimalBlockSize(&grid_sz,
+							 &block_sz,
+							 gcontext->cufn_gpucache_compaction, 0);
+	if (rc != CUDA_SUCCESS)
+	{
+		__GC_LOG("failed on gpuOptimalBlockSize: %s", cuStrError(rc));
+		return NULL;
+	}
+
+	rc = cuMemAllocManaged((CUdeviceptr *)&comp, length,
+						   CU_MEM_ATTACH_GLOBAL);
+	if (rc != CUDA_SUCCESS)
+	{
+		__GC_LOG("out of managed memory");
+		return NULL;
+	}
+	/* make an empty KDS */
+	comp->next         = orig->next;
+	comp->database_oid = orig->database_oid;
+	comp->table_oid    = orig->table_oid;
+	comp->table_sig    = orig->table_sig;
+	comp->dead_items_nums = 0;
+	comp->dead_items_sz = 0;
+	memcpy(&comp->kds,
+		   &orig->kds,
+		   KDS_HEAD_LENGTH(&orig->kds));
+	comp->kds.nitems = 0;	/* reset */
+	comp->kds.usage  = 0;	/* reset */
+
+	/* launch compaction kernel */
+	kern_args[0] = &comp;
+	kern_args[1] = &orig;
+	rc = cuLaunchKernel(gcontext->cufn_gpucache_compaction,
+						grid_sz, 1, 1,
+						block_sz, 1, 1,
+						0,
+						CU_STREAM_PER_THREAD,
+						kern_args,
+						0);
+	if (rc != CUDA_SUCCESS)
+	{
+		__GC_LOG("failed on cuLaunchKernel(kern_gpucache_compaction): %s",
+				 cuStrError(rc));
+		(void)cuStreamSynchronize(CU_STREAM_PER_THREAD);
+		(void)cuMemFree((CUdeviceptr)comp);
+		return NULL;
+	}
+	rc = cuStreamSynchronize(CU_STREAM_PER_THREAD);
+	if (rc != CUDA_SUCCESS)
+	{
+		__GC_LOG("failed on cuStreamSynchronize: %s",
+				 cuStrError(rc));
+		(void)cuMemFree((CUdeviceptr)comp);
+		return NULL;
+	}
+	return comp;
+}
+
+/*
+ * gpuCacheExecCompaction
+ */
+static bool
+gpuCacheExecCompactionNoLock(gpuContext *gcontext)
+{
+	kern_gpucache_master_state *gc_mstate = gcontext->gpucache_master_state;
+	double		compaction_ratio = 0.80;
+	CUresult	rc;
+
+	for (int i=0; i < GPUCACHE_KDS_HASH_NSLOTS; i++)
+	{
+		kern_gpucache_data_store *curr = gc_mstate->hslots[i];
+		kern_gpucache_data_store *prev = NULL;
+
+		while (curr)
+		{
+			size_t	threshold = (double)curr->kds.length * compaction_ratio;
+			size_t	consumed  = (offsetof(kern_gpucache_data_store, kds) +
+								 sizeof(uint64_t) * (curr->kds.hash_nslots +
+													curr->kds.nitems) + curr->kds.usage);
+			size_t	deadspace = (curr->dead_items_nums * sizeof(uint64_t) +
+								 curr->dead_items_sz);
+
+			if (consumed <= threshold)
+			{
+				/* no need to kick compaction */
+				prev = curr;
+				curr = curr->next;
+			}
+			else if (deadspace > 0 &&
+					 consumed - deadspace <= curr->kds.length)
+			{
+				/* compaction may make sense */
+				kern_gpucache_data_store *comp
+					= gpuCacheExecCompactionOne(gcontext, curr);
+				if (comp)
+				{
+					/* compaction done, replaced */
+					assert(comp->next == curr->next);
+					rc = cuMemFree((CUdeviceptr)curr);
+					if (rc != CUDA_SUCCESS)
+						__GC_LOG("failed on cuMemFree: %s", cuStrError(rc));
+
+					if (prev)
+						prev->next = comp;
+					else
+						gc_mstate->hslots[i] = comp;
+					curr = comp;
+				}
+				else
+				{
+					/* failed on compaction */
+					kern_gpucache_data_store *next = curr->next;
+
+					gpuCacheMarkAsCorrupted(curr);
+					rc = cuMemFree((CUdeviceptr)curr);
+					if (rc != CUDA_SUCCESS)
+						__GC_LOG("failed on cuMemFree: %s", cuStrError(rc));
+					/* detach the corrupted one */
+					if (prev)
+						prev->next = next;
+					else
+						gc_mstate->hslots[i] = next;
+					curr = next;
+				}
+			}
+			else if (consumed > curr->kds.length)
+			{
+				/* compaction does not make sense, corrupted */
+				kern_gpucache_data_store *next = curr->next;
+
+				gpuCacheMarkAsCorrupted(curr);
+				rc = cuMemFree((CUdeviceptr)curr);
+				if (rc != CUDA_SUCCESS)
+					__GC_LOG("failed on cuMemFree: %s", cuStrError(rc));
+				/* detach corrupted one */
+				if (prev)
+					prev->next = next;
+				else
+					gc_mstate->hslots[i] = next;
+				curr = next;
+			}
+		}
+	}
+	return true;
+}
+
+static bool
+gpuCacheExecCompaction(gpuContext *gcontext)
+{
+	bool	retval;
+
+	pthreadRWLockWriteLock(&gcontext->gpucache_rwlock);
+	retval = gpuCacheExecCompactionNoLock(gcontext);
+	pthreadRWLockUnlock(&gcontext->gpucache_rwlock);
+
+	return retval;
+}
+
+/*
+ * gpuCacheFlushPendingLogs
+ */
+static bool
+gpuCacheFlushPendingLogs(gpuContext *gcontext)
+{
+	kern_gpucache_master_state *gc_mstate;
+	CUresult	rc;
+	int			grid_sz;
+	int			block_sz;
+	void	   *kern_args[2];
+	bool		compaction_done = false;
+	bool		retval = false;
+
+	pthreadRWLockWriteLock(&gcontext->gpucache_rwlock);
+	gc_mstate = gcontext->gpucache_master_state;
+	rc = gpuOptimalBlockSize(&grid_sz,
+							 &block_sz,
+							 gcontext->cufn_gpucache_apply_logs, 0);
+	if (rc != CUDA_SUCCESS)
+	{
+		__GC_LOG("failed on gpuOptimalBlockSize for kern_gpucache_apply_logs: %s",
+				 cuStrError(rc));
+		goto out;
+	}
+again:
+	for (int phase=1; phase <= 3; phase++)
+	{
+		kern_args[0] = &gc_mstate;
+		kern_args[1] = &phase;
+		rc = cuLaunchKernel(gcontext->cufn_gpucache_apply_logs,
+							grid_sz, 1, 1,
+							block_sz, 1, 1,
+							0,
+							CU_STREAM_PER_THREAD,
+							kern_args,
+							0);
+		if (rc != CUDA_SUCCESS)
+		{
+			__GC_LOG("failed on cuLaunchKernel(kern_gpucache_apply_logs): %s",
+					 cuStrError(rc));
+			(void)cuStreamSynchronize(CU_STREAM_PER_THREAD);
+			goto out;
+		}
+	}
+	rc = cuStreamSynchronize(CU_STREAM_PER_THREAD);
+	if (rc != CUDA_SUCCESS)
+	{
+		__GC_LOG("failed on cuStreamSynchronize: %s",
+				 cuStrError(rc));
+		goto out;
+	}
+	/*
+	 * If ERRCODE_SUSPEND_NO_SPACE was returned, it means at least one GPU-Cache
+	 * has memory pressure. So, we try compaction once.
+	 * If compaction cannot help the memory pressure, we mark this GPU-Cache as
+	 * corrupted, and ignore the further updates, until it is recovered by hand.
+	 */
+	if (gc_mstate->kerror.errcode == ERRCODE_SUSPEND_NO_SPACE && !compaction_done)
+	{
+		if (gpuCacheExecCompactionNoLock(gcontext))
+		{
+			compaction_done = true;
+			goto again;
+		}
+		__GC_LOG("failed on GPU-Cache compaction");
+	}
+	else if (gc_mstate->kerror.errcode != ERRCODE_STROM_SUCCESS)
+	{
+		__GC_LOG("%s (%s:%d, %s)",
+				 gc_mstate->kerror.message,
+				 gc_mstate->kerror.filename,
+				 gc_mstate->kerror.lineno,
+				 gc_mstate->kerror.funcname);
+	}
+	else
+	{
+		retval = true;
+	}
+out:
+    pthreadRWLockUnlock(&gcontext->gpucache_rwlock);
+	return retval;
+}
+
+/*
+ * gpuCacheProcessSetupCacheLog
+ */
+static bool
+gpuCacheProcessSetupCacheLog(gpuContext *gcontext, GpuCacheLogSetupCache *log)
+{
+	kern_gpucache_data_store *kds_gc;
+	kern_gpucache_master_state *gc_mstate;
+	CUdeviceptr	m_kds_gc;
+	CUresult	rc;
+	size_t		head_sz;
+	size_t		required;
+	uint32_t	hindex;
+
+	if (!gpuCacheFlushPendingLogs(gcontext))
+		return false;
+	/* sanity checks */
+	head_sz = KDS_HEAD_LENGTH(&log->kds_head);
+	if (offsetof(GpuCacheLogSetupCache, kds_head) + head_sz > log->c.length)
+	{
+		__GC_LOG("corrupted GCACHE_TX_LOG__SETUP_CACHE log (len=%lu %u)",
+				 offsetof(GpuCacheLogSetupCache, kds_head) + head_sz,
+				 log->c.length);
+		return false;
+	}
+	required = offsetof(kern_gpucache_data_store,
+						kds) + Max(head_sz, log->kds_head.length);
+	rc = cuMemAllocManaged(&m_kds_gc, required,
+						   CU_MEM_ATTACH_GLOBAL);
+	if (rc != CUDA_SUCCESS)
+	{
+		__GC_LOG("out of managed memory");
+		return false;
+	}
+	kds_gc = (kern_gpucache_data_store *)m_kds_gc;
+	kds_gc->database_oid = log->database_oid;
+	kds_gc->table_oid    = log->table_oid;
+	kds_gc->table_sig    = log->table_sig;
+	memcpy(&kds_gc->kds, &log->kds_head, head_sz);
+
+	/* add to the gpucache master state */
+	hindex = gpuCacheSharedStateHashIndex(log->database_oid,
+										  log->table_oid,
+										  log->table_sig);
+	pthreadRWLockWriteLock(&gcontext->gpucache_rwlock);
+	gc_mstate = gcontext->gpucache_master_state;
+	kds_gc->next = gc_mstate->hslots[hindex];
+	gc_mstate->hslots[hindex] = kds_gc;
+	pthreadRWLockUnlock(&gcontext->gpucache_rwlock);
+
+	return true;
+}
+
+/*
+ * gpuCacheProcessEraseCacheLog
+ */
+static bool
+gpuCacheProcessEraseCacheLog(gpuContext *gcontext, GpuCacheLogEraseCache *log)
+{
+	kern_gpucache_data_store *kds_curr, *kds_prev;
+	kern_gpucache_master_state *gc_mstate;
+	uint32_t	hindex;
+	CUresult	rc;
+
+	if (!gpuCacheFlushPendingLogs(gcontext))
+		return false;
+	hindex = gpuCacheSharedStateHashIndex(log->database_oid,
+										  log->table_oid,
+										  log->table_sig);
+	pthreadRWLockWriteLock(&gcontext->gpucache_rwlock);
+	gc_mstate = (kern_gpucache_master_state *)gcontext->gpucache_master_state;
+	for (kds_curr = gc_mstate->hslots[hindex], kds_prev = NULL;
+		 kds_curr != NULL;
+		 kds_prev = kds_curr, kds_curr = kds_curr->next)
+	{
+		if (kds_curr->database_oid == log->database_oid &&
+			kds_curr->table_oid    == log->table_oid &&
+			kds_curr->table_sig    == log->table_sig)
+		{
+			if (!kds_prev)
+				gc_mstate->hslots[hindex] = kds_curr->next;
+			else
+				kds_prev->next = kds_curr->next;
+
+			rc = cuMemFree((CUdeviceptr)kds_curr);
+			if (rc != CUDA_SUCCESS)
+				__GC_LOG("failed on cuMemFree: %s", cuStrError(rc));
+			goto found;
+		}
+	}
+	__GC_LOG("ERASE-CACHE no GPU-Cache buffer found for database=%u table=%u/%08x",
+			 log->database_oid, log->table_oid, log->table_sig);
+found:
+	pthreadRWLockUnlock(&gcontext->gpucache_rwlock);
+	return true;
+}
+
+/*
+ * gpuCacheProcessRedoLog
+ */
+static bool
+gpuCacheProcessRedoLog(gpuContext *gcontext, GpuCacheLogCommon *log)
+{
+	kern_gpucache_master_state *gc_mstate = gcontext->gpucache_master_state;
+	union {
+		uint64_t	u64;
+		struct {
+			uint32_t nitems;
+			uint32_t usage;
+		} s;
+	} oldval, curval, newval;
+restart:
+	pthreadRWLockReadLock(&gcontext->gpucache_rwlock);
+	oldval.u64 = *((volatile uint64_t *)&gc_mstate->nitems);
+	for (;;)
+	{
+		newval.s.nitems = oldval.s.nitems + 1;
+		newval.s.usage  = oldval.s.usage + MAXALIGN(log->length);
+		if (offsetof(kern_gpucache_master_state, log_items) +
+			sizeof(uint32_t) * newval.s.nitems +
+			newval.s.usage > gc_mstate->length)
+		{
+			/* buffer is full, so flush it once */
+			pthreadRWLockUnlock(&gcontext->gpucache_rwlock);
+			if (!gpuCacheFlushPendingLogs(gcontext))
+				return false;
+			goto restart;
+		}
+		curval.u64 = __atomic_cas_uint64((uint64_t *)&gc_mstate->nitems,
+										 oldval.u64, newval.u64);
+		if (curval.u64 != oldval.u64)
+		{
+			/* try again */
+			oldval.u64 = curval.u64;
+		}
+		else
+		{
+			uint32_t	offset = (gc_mstate->length - newval.s.usage);
+
+			gc_mstate->log_items[newval.s.nitems - 1] = offset;
+			memcpy((char *)gc_mstate + offset, log, log->length);
+			break;
+		}
+	}
+	pthreadRWLockUnlock(&gcontext->gpucache_rwlock);
+
+	return true;
+}
+
+/*
+ * gpuCacheProcessOneRedoLog
+ */
+static bool
+gpuCacheProcessOneRedoLog(gpuContext *gcontext, GpuCacheLogCommon *log)
+{
+	if (!gpuCacheAllocMasterState(gcontext))
+		return false;
+	switch (log->type)
+	{
+		case GCACHE_TX_LOG__SETUP_CACHE:
+			return gpuCacheProcessSetupCacheLog(gcontext,
+												(GpuCacheLogSetupCache *)log);
+		case GCACHE_TX_LOG__ERASE_CACHE:
+			return gpuCacheProcessEraseCacheLog(gcontext,
+												(GpuCacheLogEraseCache *)log);
+		case GCACHE_TX_LOG__INSERT:
+		case GCACHE_TX_LOG__DELETE:
+		case GCACHE_TX_LOG__COMMIT_INS:
+		case GCACHE_TX_LOG__COMMIT_DEL:
+		case GCACHE_TX_LOG__ABORT_INS:
+		case GCACHE_TX_LOG__ABORT_DEL:
+			return gpuCacheProcessRedoLog(gcontext, log);
+		default:
+			__GC_LOG("unknown GPU-Cache log type: %08x", log->type);
+			break;
+	}
+	return false;
+}
+
+/*
+ * gpuCacheWorkerMain
+ */
+void *
+gpuCacheWorkerMain(void *__gcontext)
+{
+	gpuContext *gcontext = (gpuContext *)__gcontext;
+	int			fdesc = gpucache_pipe_read_fdesc[gcontext->cuda_dindex];
+	char	   *pipe_buffer = NULL;
+	size_t		pipe_bufsz = (4UL<<20);	/* 4MB */
+	char	   *wip_buffer = NULL;
+	size_t		wip_length = (4UL<<20);	/* start from 4MB */
+	size_t		wip_usage = 0;
+	CUresult	rc;
+
+	__GC_LOG("start for GPU-%d", gcontext->cuda_dindex);
+	rc = cuCtxSetCurrent(gcontext->cuda_context);
+	if (rc != CUDA_SUCCESS)
+	{
+		__GC_LOG("failed on cuCtxSetCurrent: %s", cuStrError(rc));
+		return NULL;
+	}
+	pipe_buffer = malloc(pipe_bufsz);
+	if (!pipe_buffer)
+	{
+		__GC_LOG("out of memory");
+		goto bailout;
+	}
+	wip_buffer = malloc(wip_length);
+	if (!wip_buffer)
+	{
+		__GC_LOG("out of memory");
+		goto bailout;
+	}
+	/* main loop */
+	while (!gpuServiceGoingTerminate())
+	{
+		GpuCacheLogCommon *log = NULL;
+		struct pollfd pfd;
+		size_t		read_off = 0;
+		ssize_t		nbytes;
+
+		pfd.fd = fdesc;
+		pfd.events = POLLIN | POLLERR | POLLHUP;
+		pfd.revents = 0;
+		if (poll(&pfd, 1, 1000) <= 0)
+		{
+			/* check gpuServiceGoingTerminate() */
+			continue;
+		}
+		nbytes = read(fdesc, pipe_buffer, pipe_bufsz);
+		if (nbytes <= 0)
+		{
+			/* check gpuServiceGoingTerminate() */
+			continue;
+		}
+
+		if (wip_usage > 0)
+		{
+			size_t	sz;
+
+			if (wip_usage + nbytes < sizeof(GpuCacheLogCommon))
+			{
+				memcpy(wip_buffer + wip_usage, pipe_buffer, nbytes);
+				wip_usage += nbytes;
+				continue;
+			}
+			log = (GpuCacheLogCommon *)wip_buffer;
+			if (wip_length < log->length)
+			{
+				size_t	new_length = (log->length + wip_length);
+				char   *new_buffer = realloc(wip_buffer, new_length);
+
+				if (!new_buffer)
+				{
+					__GC_LOG("out of memory");
+					goto bailout;
+				}
+				wip_buffer = new_buffer;
+				wip_length = new_length;
+				log = (GpuCacheLogCommon *)wip_buffer;
+			}
+			sz = Min(log->length - wip_usage, nbytes);
+			memcpy(wip_buffer + wip_usage, pipe_buffer, sz);
+			wip_usage += sz;
+			if (wip_usage < log->length)
+				continue;
+			gpuCacheProcessOneRedoLog(gcontext, log);
+			read_off = sz;
+		}
+		while (read_off < nbytes)
+		{
+			size_t	remained = nbytes - read_off;
+
+			if (remained < sizeof(GpuCacheLogCommon))
+			{
+				memcpy(wip_buffer, pipe_buffer + read_off, remained);
+				wip_usage = remained;
+				break;
+			}
+			log = (GpuCacheLogCommon *)(pipe_buffer + read_off);
+			if (remained < log->length)
+			{
+				if (wip_length < log->length)
+				{
+					size_t	new_length = (log->length + wip_length);
+					char   *new_buffer = realloc(wip_buffer, new_length);
+					if (!new_buffer)
+					{
+						__GC_LOG("out of memory");
+						goto bailout;
+					}
+					wip_buffer = new_buffer;
+					wip_length = new_length;
+				}
+				memcpy(wip_buffer, log, remained);
+				wip_usage = remained;
+				break;
+			}
+			gpuCacheProcessOneRedoLog(gcontext, log);
+			read_off += log->length;
+		}
+	}
+bailout:
+	__GC_LOG("exit for GPU-%d", gcontext->cuda_dindex);
+	/* cleanup */
+	gpuCacheReleaseMasterState(gcontext);
+	if (wip_buffer)
+		free(wip_buffer);
+	if (pipe_buffer)
+		free(pipe_buffer);
+	return NULL;
 }

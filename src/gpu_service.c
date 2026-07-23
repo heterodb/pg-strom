@@ -16,66 +16,6 @@
 /*
  * gpuContext / gpuMemory
  */
-typedef struct
-{
-	struct gpuContext *gcontext;	/* gpuContext that owns this pool */
-	pthread_mutex_t	lock;
-	bool			is_managed;	/* true, if managed memory pool */
-	size_t			total_sz;	/* total pool size */
-	size_t			hard_limit;
-	size_t			keep_limit;
-	dlist_head		segment_list;
-} gpuMemoryPool;
-
-struct gpuContext
-{
-	dlist_node		chain;
-	char			gpu_label[8];	/* for debug output */
-	int				serv_fd;		/* for accept(2) */
-	int				host_numa_id;
-	int				cuda_dindex;
-	gpumask_t		cuda_dmask;		/* = (1UL<<cuda_dindex) */
-	CUdevice		cuda_device;
-	CUmemLocation	cuda_mlocation;
-	CUcontext		cuda_context;
-	CUmodule		cuda_module;
-	HTAB		   *cuda_type_htab;
-	HTAB		   *cuda_func_htab;
-	CUfunction		cufn_kern_gpumain;
-	CUfunction		cufn_prep_gistindex;
-	CUfunction		cufn_merge_outer_join_map;
-	CUfunction		cufn_merge_gpupreagg_buffer;
-	CUfunction		cufn_gpusort_consolidate_buffer;
-	CUfunction		cufn_gpusort_partition_buffer;
-	CUfunction		cufn_gpusort_prep_buffer;
-	CUfunction		cufn_gpusort_exec_bitonic;
-	CUfunction		cufn_kbuf_simple_limit;
-	CUfunction		cufn_kbuf_partitioning;
-	CUfunction		cufn_kbuf_reconstruction;
-	CUfunction		cufn_gpucache_apply_redo;
-	CUfunction		cufn_gpucache_compaction;
-	CUfunction		cufn_windowrank_prep_hash;
-	CUfunction		cufn_windowrank_exec_row_number;
-	CUfunction		cufn_windowrank_exec_rank;
-	CUfunction		cufn_windowrank_exec_dense_rank;
-	CUfunction		cufn_windowrank_finalize;
-	CUfunction		cufn_global_stair_sum_u32;
-	int				gpumain_shmem_sz_limit;
-	xpu_encode_info *cuda_encode_catalog;
-	gpuMemoryPool	pool_raw;
-	gpuMemoryPool	pool_managed;
-	bool			cuda_profiler_started;
-	volatile uint32_t cuda_stack_limit;	/* current configuration */
-	pthread_mutex_t	cuda_setlimit_lock;
-	/* GPU workers */
-	pthread_mutex_t	worker_lock;
-	dlist_head		worker_list;
-	/* XPU commands */
-	pthread_cond_t	cond;
-	pthread_mutex_t	lock;
-	dlist_head		command_list;
-	pg_atomic_uint32 num_commands;
-};
 
 struct gpuMemChunk;
 
@@ -6261,8 +6201,8 @@ gpuservSetupGpuModule(gpuContext *gcontext)
 								  cufn_kbuf_partitioning);
 	__GPU_KERNEL_RESOLVE_FUNCTION(kern_buffer_reconstruction,
 								  cufn_kbuf_reconstruction);
-	__GPU_KERNEL_RESOLVE_FUNCTION(kern_gpucache_apply_redo,
-								  cufn_gpucache_apply_redo);
+	__GPU_KERNEL_RESOLVE_FUNCTION(kern_gpucache_apply_logs,
+								  cufn_gpucache_apply_logs);
 	__GPU_KERNEL_RESOLVE_FUNCTION(kern_gpucache_compaction,
 								  cufn_gpucache_compaction);
 	__GPU_KERNEL_RESOLVE_FUNCTION(kern_windowrank_prep_hash,
@@ -6380,6 +6320,7 @@ static void
 __gpuContextAdjustWorkers(void)
 {
 	uint64_t	conf_val;
+	dlist_iter	iter;
 
 	conf_val = pg_atomic_read_u64(&gpuserv_shared_state->max_async_tasks);
 	if ((conf_val & ~MAX_ASYNC_TASKS_MASK) != 0)
@@ -6393,7 +6334,6 @@ __gpuContextAdjustWorkers(void)
 		if (curr_ts >= conf_ts + MAX_ASYNC_TASKS_DELAY)
 		{
 			uint32_t	nworkers = (conf_val & MAX_ASYNC_TASKS_MASK);
-			dlist_iter	iter;
 
 			dlist_foreach(iter, &gpuserv_gpucontext_list)
 			{
@@ -6403,6 +6343,34 @@ __gpuContextAdjustWorkers(void)
 			}
 			pg_atomic_compare_exchange_u64(&gpuserv_shared_state->max_async_tasks,
 										   &conf_val, (uint64_t)nworkers);
+		}
+	}
+	/*
+	 * also, launch GPU-Cache worker if gone
+	 */
+	dlist_foreach(iter, &gpuserv_gpucontext_list)
+	{
+		gpuContext *gcontext = dlist_container(gpuContext,
+											   chain, iter.cur);
+		uint32_t	phase = 0;
+
+		if (pg_atomic_compare_exchange_u32(&gcontext->gpucache_worker_phase,
+										   &phase, 1))
+		{
+			errno = pthread_create(&gcontext->gpucache_worker,
+								   NULL,
+								   gpuCacheWorkerMain,
+								   gcontext);
+			if (errno == 0)
+			{
+				if (pthread_detach(gcontext->gpucache_worker) != 0)
+					__gsLogCxt(gcontext, "failed on pthread_detach: %m");
+			}
+			else
+			{
+				pg_atomic_exchange_u32(&gcontext->gpucache_worker_phase, UINT_MAX);
+				__gsLogCxt(gcontext, "unable to launch GPU-Cache worker: %m");
+			}
 		}
 	}
 }
@@ -6424,6 +6392,11 @@ gpuservSetupGpuContext(int cuda_dindex)
 	gcontext->cuda_dindex = cuda_dindex;
 	gcontext->cuda_dmask = (1UL << cuda_dindex);
 	pthreadMutexInit(&gcontext->cuda_setlimit_lock);
+
+	pg_atomic_init_u32(&gcontext->gpucache_worker_phase, 0);
+	pthreadRWLockInit(&gcontext->gpucache_rwlock);
+	gcontext->gpucache_master_state = NULL;
+
 	pthreadMutexInit(&gcontext->worker_lock);
 	dlist_init(&gcontext->worker_list);
 

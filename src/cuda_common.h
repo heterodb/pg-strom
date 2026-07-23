@@ -313,7 +313,9 @@ typedef struct {
  */
 typedef struct {
 	GpuCacheLogCommon c;
-	uint16_t	pindex;
+	uint32_t	database_oid;
+	uint32_t	table_oid;
+	uint32_t	table_sig;
 	ItemPointerData ctid;
 } GpuCacheLogXact;
 
@@ -327,32 +329,47 @@ typedef struct {
 	ItemPointerData ctid;
 } GpuCacheSysAttr;
 
-INLINE_FUNCTION(const GpuCacheSysAttr *)
-fetchGpuCacheSysAttrOfTuple(const kern_tupitem *tupitem)
+INLINE_FUNCTION(GpuCacheSysAttr *)
+fetchGpuCacheSysAttrOfTuple(kern_hashitem *hitem)
 {
-	const GpuCacheSysAttr *sysattr;
+	GpuCacheSysAttr *sysattr;
 
-	assert((uintptr_t)tupitem == MAXALIGN((uintptr_t)tupitem));
-	sysattr = (const GpuCacheSysAttr *)((const char *)tupitem +
-										tupitem->t_hoff -
-										sizeof(GpuCacheSysAttr));
-	assert((const char *)sysattr >= (const char *)tupitem->t_bits +
-		   ((tupitem->t_infomask & HEAP_HASNULL) != 0
-			? BITMAPLEN(tupitem->t_infomask2 & HEAP_NATTS_MASK) : 0));
+	assert((uintptr_t)hitem == MAXALIGN((uintptr_t)hitem));
+	sysattr = (GpuCacheSysAttr *)((char *)&hitem->t
+								  + hitem->t.t_hoff
+								  - sizeof(GpuCacheSysAttr));
+	assert((const char *)sysattr >= (const char *)hitem->t.t_bits +
+		   ((hitem->t.t_infomask & HEAP_HASNULL) != 0
+			? BITMAPLEN(hitem->t.t_infomask2 & HEAP_NATTS_MASK) : 0));
 	assert((uintptr_t)sysattr == MAXALIGN((uintptr_t)sysattr));
 	return sysattr;
 }
 
 /*
- * REDO Log Buffer
+ * GPU-Cache Per-GPU structureredo-log buffer
  */
+#define GPUCACHE_KDS_HASH_NSLOTS	(PAGE_SIZE / sizeof(void *))
+
+struct kern_gpucache_data_store {
+	struct kern_gpucache_data_store *next;
+	uint32_t		database_oid;
+	uint32_t		table_oid;
+	uint32_t		table_sig;
+	uint32_t		dead_items_nums;
+	uint64_t		dead_items_sz;
+	kern_data_store	kds __MAXALIGNED__;
+};
+typedef struct kern_gpucache_data_store	kern_gpucache_data_store;
+
 typedef struct {
+	kern_gpucache_data_store *hslots[GPUCACHE_KDS_HASH_NSLOTS];
+	/* <-- 16kB --> */
 	kern_errorbuf	kerror;
 	size_t			length;
-	uint32_t		nrooms;
 	uint32_t		nitems;
-	uint32_t		redo_items[1];
-} kern_gpucache_redolog;
+	uint32_t		usage;
+	uint32_t		log_items[1];
+} kern_gpucache_master_state;
 
 /*
  * GPU-Sort + Window-Rank function control structure
