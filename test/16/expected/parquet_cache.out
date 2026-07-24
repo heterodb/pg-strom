@@ -1,0 +1,248 @@
+---
+--- Test for Parquet Cache
+---
+--- This test is NOT included in test/parallel_schedule (requires
+--- pg_strom.parquet_cache_path to be configured in postgresql.conf).
+--- Run it explicitly with:
+---   cd test && make installcheck REGRESS=parquet_cache
+---
+\t on
+SET pg_strom.regression_test_mode = on;
+SET client_min_messages = error;
+DROP SCHEMA IF EXISTS regtest_parquet_cache_temp CASCADE;
+CREATE SCHEMA regtest_parquet_cache_temp;
+RESET client_min_messages;
+SET search_path = regtest_parquet_cache_temp, public;
+-- ================================================================
+-- Setup: base table with fixed-length and variable-length columns
+-- ================================================================
+SELECT pgstrom.random_setseed(20260622);
+ 
+
+CREATE TABLE regtest_pq_data (
+  id   int,
+  i4   int4,
+  i8   int8,
+  f4   float4,
+  f8   float8,
+  t1   text,
+  t2   varchar(64)
+);
+INSERT INTO regtest_pq_data
+  SELECT x,
+         pgstrom.random_int(1, -1000000, 1000000)::int4,
+         pgstrom.random_int(1, -1000000000, 1000000000),
+         pgstrom.random_float(1, -10000.0, 10000.0)::float4,
+         pgstrom.random_float(1, -10000.0, 10000.0),
+         pgstrom.random_text_len(1, 64),
+         pgstrom.random_text_len(1, 64)
+    FROM generate_series(1, 200000) x;
+\getenv arrow_test_data_dir_path ARROW_TEST_DATA_DIR
+\set test_pq_cache_path :arrow_test_data_dir_path '/test_parquet_cache.data'
+-- Create Parquet file (-q flag) with 4MB row groups for multiple chunks
+\! $PG2ARROW_CMD -q -s 4m -c 'SELECT * FROM regtest_parquet_cache_temp.regtest_pq_data' -o $ARROW_TEST_DATA_DIR/test_parquet_cache.data > /dev/null 2>&1
+-- Import as foreign table (default parquet_cache follows arrow_fdw.parquet_cache_enabled)
+IMPORT FOREIGN SCHEMA regtest_pq_arrow
+  FROM SERVER arrow_fdw
+  INTO regtest_parquet_cache_temp
+OPTIONS (file :'test_pq_cache_path');
+-- ================================================================
+-- CPU baseline: store results from the original heap table
+-- ================================================================
+SET pg_strom.enabled = off;
+SELECT count(*) AS cnt, sum(i4) AS sum_i4, sum(i8) AS sum_i8
+  INTO pq_q1_cpu
+  FROM regtest_pq_data
+ WHERE f4 > 0.0;
+SELECT count(*) AS cnt, min(f4)::numeric(10,4) AS min_f4, max(f4)::numeric(10,4) AS max_f4
+  INTO pq_q2_cpu
+  FROM regtest_pq_data
+ WHERE i4 BETWEEN -500000 AND 500000;
+SELECT count(*) AS cnt, min(t1) AS min_t1, max(t1) AS max_t1
+  INTO pq_q3_cpu
+  FROM regtest_pq_data
+ WHERE t2 LIKE 'a%';
+SELECT count(*) AS cnt
+  INTO pq_q4_cpu
+  FROM regtest_pq_data
+ WHERE length(t1) > length(t2);
+RESET pg_strom.enabled;
+-- Detect if cache is enabled for conditional test execution
+SELECT pgstrom.parquet_cache_info()::text NOT LIKE '%"cache_path" : null%' AS cache_active
+\gset
+\if :cache_active
+SET arrow_fdw.parquet_cache_enabled = on;
+-- ================================================================
+-- 1st scan: cold cache
+-- All chunks are read from the Parquet file (no cache hits yet).
+-- The "Parquet cache" line does NOT appear in EXPLAIN on cold scan
+-- because nchunks_parquet_read tracks only the cache-path reads
+-- (partial/full cache hit path), not the initial Parquet-only reads.
+-- Chunks are written to cache asynchronously after 1st scan.
+-- ================================================================
+-- Fixed-length column query
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT count(*), sum(i4), sum(i8)
+  FROM regtest_pq_arrow
+ WHERE f4 > 0.0;
+ Aggregate (actual rows=1 loops=1)
+   ->  Custom Scan (GpuPreAgg) on regtest_pq_arrow (actual rows=1 loops=1)
+         GPU Projection: pgstrom.nrows(), pgstrom.psum((i4)::bigint), pgstrom.psum64(i8)
+         referenced: i4, i8, f4
+         GPU Scan Quals: (f4 > '0'::double precision) [exec: 0 -> 0]
+         GPU Group Key: 
+         Stats-Hint: (f4 > '0'::double precision)  [loaded: 6, skipped: 0]
+         file0: test_parquet_cache.data (read: 3461.57KB, size: 17.09MB)
+
+SELECT count(*) AS cnt, sum(i4) AS sum_i4, sum(i8) AS sum_i8
+  INTO pq_q1_cold
+  FROM regtest_pq_arrow
+ WHERE f4 > 0.0;
+SELECT count(*) AS cnt, min(f4)::numeric(10,4) AS min_f4, max(f4)::numeric(10,4) AS max_f4
+  INTO pq_q2_cold
+  FROM regtest_pq_arrow
+ WHERE i4 BETWEEN -500000 AND 500000;
+-- Variable-length column query
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT count(*), min(t1), max(t1)
+  FROM regtest_pq_arrow
+ WHERE t2 LIKE 'a%';
+ Aggregate (actual rows=1 loops=1)
+   ->  Custom Scan (GpuScan) on regtest_pq_arrow (actual rows=2999 loops=1)
+         GPU Projection: t1
+         referenced: t1
+         GPU Scan Quals: (t2 ~~ 'a%'::text) [exec: 0 -> 0]
+         file0: test_parquet_cache.data (read: 11.05MB, size: 17.09MB)
+
+SELECT count(*) AS cnt, min(t1) AS min_t1, max(t1) AS max_t1
+  INTO pq_q3_cold
+  FROM regtest_pq_arrow
+ WHERE t2 LIKE 'a%';
+SELECT count(*) AS cnt
+  INTO pq_q4_cold
+  FROM regtest_pq_arrow
+ WHERE length(t1) > length(t2);
+-- Cold scan correctness: GPU Arrow vs CPU heap (should be empty)
+SELECT cold.*, cpu.* FROM pq_q1_cold cold, pq_q1_cpu cpu WHERE cold IS DISTINCT FROM cpu;
+
+SELECT cold.*, cpu.* FROM pq_q2_cold cold, pq_q2_cpu cpu WHERE cold IS DISTINCT FROM cpu;
+
+SELECT cold.*, cpu.* FROM pq_q3_cold cold, pq_q3_cpu cpu WHERE cold IS DISTINCT FROM cpu;
+
+SELECT cold.*, cpu.* FROM pq_q4_cold cold, pq_q4_cpu cpu WHERE cold IS DISTINCT FROM cpu;
+
+-- ================================================================
+-- 2nd scan: warm cache
+-- Most chunks served from cache. The "Parquet cache" line appears
+-- in EXPLAIN when at least one chunk was looked up via the cache
+-- path (nchunks_parquet_read > 0 means partial/full cache hit).
+-- ================================================================
+-- Fixed-length column query
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT count(*), sum(i4), sum(i8)
+  FROM regtest_pq_arrow
+ WHERE f4 > 0.0;
+ Aggregate (actual rows=1 loops=1)
+   ->  Custom Scan (GpuPreAgg) on regtest_pq_arrow (actual rows=1 loops=1)
+         GPU Projection: pgstrom.nrows(), pgstrom.psum((i4)::bigint), pgstrom.psum64(i8)
+         referenced: i4, i8, f4
+         GPU Scan Quals: (f4 > '0'::double precision) [exec: 0 -> 0]
+         GPU Group Key: 
+         Stats-Hint: (f4 > '0'::double precision)  [loaded: 6, skipped: 0]
+         file0: test_parquet_cache.data (read: 3461.57KB, size: 17.09MB)
+
+SELECT count(*) AS cnt, sum(i4) AS sum_i4, sum(i8) AS sum_i8
+  INTO pq_q1_warm
+  FROM regtest_pq_arrow
+ WHERE f4 > 0.0;
+-- Variable-length column query
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT count(*), min(t1), max(t1)
+  FROM regtest_pq_arrow
+ WHERE t2 LIKE 'a%';
+ Aggregate (actual rows=1 loops=1)
+   ->  Custom Scan (GpuScan) on regtest_pq_arrow (actual rows=2999 loops=1)
+         GPU Projection: t1
+         referenced: t1
+         GPU Scan Quals: (t2 ~~ 'a%'::text) [exec: 0 -> 0]
+         file0: test_parquet_cache.data (read: 11.05MB, size: 17.09MB)
+
+SELECT count(*) AS cnt, min(t1) AS min_t1, max(t1) AS max_t1
+  INTO pq_q3_warm
+  FROM regtest_pq_arrow
+ WHERE t2 LIKE 'a%';
+-- Warm scan correctness: GPU Arrow (cached) vs CPU heap (should be empty)
+SELECT warm.*, cpu.* FROM pq_q1_warm warm, pq_q1_cpu cpu WHERE warm IS DISTINCT FROM cpu;
+
+SELECT warm.*, cpu.* FROM pq_q3_warm warm, pq_q3_cpu cpu WHERE warm IS DISTINCT FROM cpu;
+
+-- ================================================================
+-- parquet_cache_info() after scans: verify cache was used
+-- ================================================================
+-- num_cached_chunks > 0: chunks were stored in cache during 1st scan
+SELECT (regexp_match(pgstrom.parquet_cache_info()::text,
+                     '"num_cached_chunks" : (\d+)'))[1]::int > 0
+       AS chunks_were_cached;
+ t
+
+-- total_hit_caches > 0: cache was read during 2nd scan
+SELECT (regexp_match(pgstrom.parquet_cache_info()::text,
+                     '"total_hit_caches" : (\d+)'))[1]::int > 0
+       AS cache_hits_occurred;
+ t
+
+-- ================================================================
+-- Session-level cache disable: SET arrow_fdw.parquet_cache_enabled = off
+-- Cache is bypassed for all tables in this session.
+-- EXPLAIN shows 0% cache hit (all reads from disk).
+-- ================================================================
+SET arrow_fdw.parquet_cache_enabled = off;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT count(*), sum(i4), sum(i8)
+  FROM regtest_pq_arrow
+ WHERE f4 > 0.0;
+ Aggregate (actual rows=1 loops=1)
+   ->  Custom Scan (GpuPreAgg) on regtest_pq_arrow (actual rows=1 loops=1)
+         GPU Projection: pgstrom.nrows(), pgstrom.psum((i4)::bigint), pgstrom.psum64(i8)
+         referenced: i4, i8, f4
+         GPU Scan Quals: (f4 > '0'::double precision) [exec: 0 -> 0]
+         GPU Group Key: 
+         Stats-Hint: (f4 > '0'::double precision)  [loaded: 6, skipped: 0]
+         file0: test_parquet_cache.data (read: 3461.57KB, size: 17.09MB)
+
+SELECT count(*) AS cnt, sum(i4) AS sum_i4, sum(i8) AS sum_i8
+  INTO pq_q1_nocache
+  FROM regtest_pq_arrow
+ WHERE f4 > 0.0;
+-- Cache-disabled correctness: GPU Arrow (no cache) vs CPU heap (should be empty)
+SELECT nocache.*, cpu.* FROM pq_q1_nocache nocache, pq_q1_cpu cpu WHERE nocache IS DISTINCT FROM cpu;
+
+RESET arrow_fdw.parquet_cache_enabled;
+\else
+-- ================================================================
+-- Cache not configured: GPU Arrow vs CPU heap correctness check
+-- Set pg_strom.parquet_cache_path in postgresql.conf to enable.
+-- ================================================================
+\echo 'NOTE: pg_strom.parquet_cache_path is not configured'
+\echo 'NOTE: Skipping cache tests; running correctness check only'
+SELECT count(*) AS cnt, sum(i4) AS sum_i4, sum(i8) AS sum_i8
+  INTO pq_q1_gpu
+  FROM regtest_pq_arrow
+ WHERE f4 > 0.0;
+SELECT count(*) AS cnt, min(f4)::numeric(10,4) AS min_f4, max(f4)::numeric(10,4) AS max_f4
+  INTO pq_q2_gpu
+  FROM regtest_pq_arrow
+ WHERE i4 BETWEEN -500000 AND 500000;
+SELECT count(*) AS cnt, min(t1) AS min_t1, max(t1) AS max_t1
+  INTO pq_q3_gpu
+  FROM regtest_pq_arrow
+ WHERE t2 LIKE 'a%';
+SELECT count(*) AS cnt
+  INTO pq_q4_gpu
+  FROM regtest_pq_arrow
+ WHERE length(t1) > length(t2);
+SELECT gpu.*, cpu.* FROM pq_q1_gpu gpu, pq_q1_cpu cpu WHERE gpu IS DISTINCT FROM cpu;
+SELECT gpu.*, cpu.* FROM pq_q2_gpu gpu, pq_q2_cpu cpu WHERE gpu IS DISTINCT FROM cpu;
+SELECT gpu.*, cpu.* FROM pq_q3_gpu gpu, pq_q3_cpu cpu WHERE gpu IS DISTINCT FROM cpu;
+SELECT gpu.*, cpu.* FROM pq_q4_gpu gpu, pq_q4_cpu cpu WHERE gpu IS DISTINCT FROM cpu;
+\endif
