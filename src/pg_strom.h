@@ -247,6 +247,7 @@ typedef struct devfunc_info
 } devfunc_info;
 
 typedef struct XpuConnection	XpuConnection;
+typedef struct GpuCacheDesc		GpuCacheDesc;
 typedef struct ArrowFdwState	ArrowFdwState;
 typedef struct BrinIndexState	BrinIndexState;
 
@@ -378,6 +379,8 @@ typedef struct
 	/* heap scan */
 	pg_atomic_uint64	scan_block_count;	/* scan counter */
 	uint64_t			scan_block_nums;	/* =RelationGetNumberOfBlocks */
+	/* gpu-cache */
+	pg_atomic_uint32	gpucache_count_data;
 	/* arrow_fdw */
 	pg_atomic_uint32	arrow_rbatch_index;
 	pg_atomic_uint32	arrow_rbatch_nload;	/* # of loaded record-batches */
@@ -481,6 +484,10 @@ typedef struct
 	Relation		scan_rel;
 	double			plan_ntuples_raw;
 	double			plan_ntuples_in;
+	/* gpu-cache */
+	GpuCacheDesc   *gpucache_desc;
+	pg_atomic_uint32 *gpucache_scan_count;
+	pg_atomic_uint32 __gpucache_count_data;
 	/* arrow/parquet */
 	ArrowFdwState  *arrow_state;
 	/* heap scan */
@@ -1068,9 +1075,28 @@ extern void		pgstrom_init_arrow_fdw(void);
 /*
  * gpu_cache.c
  */
+extern bool		baseRelHasGpuCache(PlannerInfo *root,
+								   RelOptInfo *baserel);
+extern bool		pgstromGpuCacheExecInit(pgstromTaskScanState *ptss);
+extern XpuCommand *pgstromScanChunkGpuCache(pgstromTaskState *pts,
+											pgstromTaskScanState *ptss,
+                                            struct iovec *xcmd_iov,
+                                            int *xcmd_iovcnt);
+extern void		pgstromGpuCacheExecReset(pgstromTaskScanState *ptss);
+extern void		pgstromGpuCacheInitDSM(pgstromTaskScanState *ptss,
+									   pgstromSharedScanState *psss);
+extern void		pgstromGpuCacheAttachDSM(pgstromTaskScanState *ptss,
+										 pgstromSharedScanState *psss);
+extern void		pgstromGpuCacheShutdownDSM(pgstromTaskScanState *ptss,
+										   pgstromSharedScanState *psss);
+
 extern void	   *gpuCacheWorkerMain(void *__gcontext);
 extern void		pgstrom_init_gpu_cache(void);
-
+extern kern_data_store *gpuCacheGetKdsBuffer(gpuContext *gcontext,
+											 uint32_t database_oid,
+											 uint32_t table_oid,
+											 uint32_t table_sig);
+extern void		gpuCachePutKdsBuffer(gpuContext *gcontext);
 
 /*
  * select_into.c

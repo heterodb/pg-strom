@@ -842,7 +842,9 @@ pgstromScanNextChunk(pgstromTaskState *pts,
 	{
 		pgstromTaskScanState *ptss = &pts->scan_rels[pts->curr_scan_rel];
 
-		if (ptss->arrow_state)
+		if (ptss->gpucache_desc)
+			xcmd = pgstromScanChunkGpuCache(pts, ptss, xcmd_iov, xcmd_iovcnt);
+		else if (ptss->arrow_state)
 			xcmd = pgstromScanChunkArrowFdw(pts, ptss, xcmd_iov, xcmd_iovcnt);
 		else
 			xcmd = pgstromRelScanChunkDirect(pts, ptss, xcmd_iov, xcmd_iovcnt);
@@ -1476,8 +1478,12 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 		ptss->brin_quals = pp_scan->brin_quals;
 		ptss->heap_vm_buffer = InvalidBuffer;
 
-		if (RelationGetForm(scan_rel)->relkind == RELKIND_RELATION ||
-			RelationGetForm(scan_rel)->relkind == RELKIND_MATVIEW)
+		if (pgstromGpuCacheExecInit(ptss))
+		{
+			pts->xpu_task_flags |= DEVTASK__USED_GPUCACHE;
+		}
+		else if (RelationGetForm(scan_rel)->relkind == RELKIND_RELATION ||
+				 RelationGetForm(scan_rel)->relkind == RELKIND_MATVIEW)
 		{
 			SMgrRelation smgr = RelationGetSmgr(scan_rel);
 			Oid			am_oid = RelationGetForm(scan_rel)->relam;
@@ -2015,6 +2021,8 @@ pgstromExecResetTaskState(CustomScanState *node)
 			pgstromTaskScanState *ptss = &pts->scan_rels[k];
 
 			pg_atomic_write_u64(&ptss->dsm->scan_block_count, 0);
+			if (ptss->gpucache_desc)
+				pgstromGpuCacheExecReset(ptss);
 			if (ptss->arrow_state)
 				pgstromArrowFdwExecReset(ptss->arrow_state);
 			if (ptss->brin_state)
@@ -2144,6 +2152,8 @@ pgstromSharedStateInitDSM(CustomScanState *node,
 			else
 				dsm_addr += MAXALIGN(sizeof(pgstromSharedScanState));
 			psss->scan_block_nums = RelationGetNumberOfBlocks(ptss->scan_rel);
+			if (ptss->gpucache_desc)
+				pgstromGpuCacheInitDSM(ptss, psss);
 		}
 	}
 	/* inner-rel's shared state */

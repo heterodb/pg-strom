@@ -185,6 +185,11 @@ __gpuScanBuildPlanInfo(PlannerInfo *root,
 			avg_page_cost = spc_seq_page_cost * (1.0 - __rel->allvisfrac) +
 				pgstrom_gpu_direct_seq_page_cost * __rel->allvisfrac;
 		}
+		else if (baseRelHasGpuCache(root, __rel))
+		{
+			/* assume GPU-Cache is available */
+			avg_page_cost = 1.0;
+		}
 		else if (GetOptimalGpuForBaseRel(root, __rel) != 0UL)
 		{
 			/* assume GPU-Direct SQL is available */

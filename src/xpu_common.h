@@ -2208,13 +2208,14 @@ typedef struct
 #define DEVTYPE__HAS_COMPARE		0x00000800U	/* Device type has compare handler */
 #define DEVTASK__PINNED_HASH_RESULTS 0x00001000U/* Pinned results in HASH format */
 #define DEVTASK__PINNED_ROW_RESULTS	0x00002000U	/* Pinned results in ROW format */
-#define DEVTASK__USED_GPUDIRECT		0x00004000U	/* Task used GPU-Direct SQL */
-#define DEVTASK__IS_PARTITION_WISE	0x00008000U	/* Task runs across PostgreSQL partitions */
-#define DEVTASK__MERGE_FINAL_BUFFER	0x00010000U	/* Final buffer (GPU-PreAgg or pinned
+#define DEVTASK__USED_GPUCACHE		0x00004000U	/* Task used GPU-Cache */
+#define DEVTASK__USED_GPUDIRECT		0x00008000U	/* Task used GPU-Direct SQL */
+#define DEVTASK__IS_PARTITION_WISE	0x00010000U	/* Task runs across PostgreSQL partitions */
+#define DEVTASK__MERGE_FINAL_BUFFER	0x00020000U	/* Final buffer (GPU-PreAgg or pinned
 												 * inner buffer by GPU-Join/Scan) must
 												 * be merged to a single buffer, for
 												 * complete-aggregation or GPU-Sort */
-#define DEVTASK__SELECT_INTO_DIRECT	0x00020000U	/* Results shall be written to an empty
+#define DEVTASK__SELECT_INTO_DIRECT	0x00040000U	/* Results shall be written to an empty
 												 * heap table files, without XACT logs.
 												 */
 #define DEVTASK__SCAN				0x10000000U	/* xPU-Scan */
@@ -2764,6 +2765,7 @@ typedef struct
 #define XpuCommandTag__SuccessHalfWay		2
 #define XpuCommandTag__OpenSession			100
 #define XpuCommandTag__XpuTaskExec			110
+#define XpuCommandTag__XpuTaskExecGpuCache	111
 #define XpuCommandTag__XpuTaskFinal			119
 #define XpuCommandMagicNumber				0xdeadbeafU
 
@@ -2844,6 +2846,15 @@ typedef struct {
 } kern_exec_task;
 
 typedef struct {
+	kern_exec_task t;
+	uint32_t	database_oid;
+	uint32_t	table_oid;
+	uint32_t	table_sig;
+	uint32_t	cuda_dindex;
+	char		data[1]				__MAXALIGNED__;
+} kern_exec_task_gpucache;
+
+typedef struct {
 	int32_t		scan_relidx;		/* index of the scan relation */
 	uint32_t	chunks_offset;		/* offset of kds_dst array */
 	uint32_t	chunks_nitems;		/* number of kds_dst items */
@@ -2902,6 +2913,7 @@ typedef struct
 		kern_errorbuf		error;
 		kern_session_info	session;
 		kern_exec_task		task;
+		kern_exec_task_gpucache gc_task;
 		kern_exec_results	results;
 		kern_cpu_fallback	fallback;
 	} u;

@@ -4023,6 +4023,7 @@ gpuservHandleGpuTaskExec(gpuContext *gcontext,
 	gpuMemChunk	   *t_chunk = NULL;			/* for kgtask */
 	gpuMemChunk	   *s_chunk = NULL;			/* for kds_src */
 	gpuMemChunk	   *d_chunk = NULL;			/* for kds_dst */
+	bool			has_gpucache_lock = false; /* for GPU-Cache */
 	int				part_nitems = 0;		/* for inner-buffer partitions */
 	gpuContext	  **part_gcontexts = NULL;	/* for inner-buffer partitions */
 	uint32_t	   *part_reminders = NULL;	/* for inner-buffer partitions */
@@ -4037,13 +4038,30 @@ gpuservHandleGpuTaskExec(gpuContext *gcontext,
 		kds_src_iovec = (strom_io_vector *)((char *)xcmd + xcmd->u.task.kds_src_iovec);
 	if (xcmd->u.task.kds_src_offset)
 		kds_src = (kern_data_store *)((char *)xcmd + xcmd->u.task.kds_src_offset);
-	else
+	else if (xcmd->tag != XpuCommandTag__XpuTaskExecGpuCache)
 	{
 		gpuClientELog(gclient, "No source kds buffer found");
 		return;
 	}
 
-	if (kds_src->format == KDS_FORMAT_ROW)
+	if (!kds_src)
+	{
+		assert(xcmd->tag == XpuCommandTag__XpuTaskExecGpuCache);
+		kds_src = gpuCacheGetKdsBuffer(gcontext,
+									   xcmd->u.gc_task.database_oid,
+									   xcmd->u.gc_task.table_oid,
+									   xcmd->u.gc_task.table_sig);
+		if (!kds_src)
+		{
+			gpuClientELog(gclient, "GPU-Cache not found (database_oid: %u, table_oid: %u, table_sig: %08x)",
+						  xcmd->u.gc_task.database_oid,
+						  xcmd->u.gc_task.table_oid,
+						  xcmd->u.gc_task.table_sig);
+			return;
+		}
+		has_gpucache_lock = true;
+	}
+	else if (kds_src->format == KDS_FORMAT_ROW)
 	{
 		rc = gpuMemoryPrefetchKDS(kds_src, MY_MEMLOCATION_PER_THREAD);
 		if (rc != CUDA_SUCCESS)
@@ -4257,6 +4275,9 @@ gpuservHandleGpuTaskExec(gpuContext *gcontext,
 	}
 bailout:
 	THREAD_GPU_CONTEXT_VALIDATION_CHECK(gcontext);
+	/* release lock */
+	if (has_gpucache_lock)
+		gpuCachePutKdsBuffer(gcontext);
 	/* release buffers */
 	if (t_chunk)
 		gpuMemFree(t_chunk);
@@ -5873,6 +5894,7 @@ gpuservGpuWorkerMain(void *__arg)
 				switch (xcmd->tag)
 				{
 					case XpuCommandTag__XpuTaskExec:
+					case XpuCommandTag__XpuTaskExecGpuCache:
 						gpuservHandleGpuTaskExec(gcontext, gclient, xcmd);
 						break;
 					case XpuCommandTag__XpuTaskFinal:

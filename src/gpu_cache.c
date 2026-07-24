@@ -61,7 +61,7 @@ typedef struct
 /*
  * GpuCacheRelDesc
  */
-typedef struct
+struct GpuCacheDesc
 {
 	Oid			table_oid;
 	uint32_t	table_sig;
@@ -75,7 +75,7 @@ typedef struct
 	StringInfoData buf;	/* array of PendingCtidItem */
 	int			nr_gpus;
 	int			pindex[1];
-} GpuCacheDesc;
+};
 
 typedef struct
 {
@@ -1331,6 +1331,133 @@ pgstrom_gpucache_info(PG_FUNCTION_ARGS)
 
 /* ------------------------------------------------------------
  *
+ * Routines for query optimization
+ *
+ * ------------------------------------------------------------
+ */
+bool
+baseRelHasGpuCache(PlannerInfo *root, RelOptInfo *baserel)
+{
+	RangeTblEntry *rte = root->simple_rte_array[baserel->relid];
+	bool	retval = false;
+
+	if (pgstrom_enable_gpucache &&
+		rte->rtekind == RTE_RELATION &&
+		(baserel->reloptkind == RELOPT_BASEREL ||
+		 baserel->reloptkind == RELOPT_OTHER_MEMBER_REL))
+    {
+		Relation	rel = table_open(rte->relid, NoLock);
+		GpuCacheDesc *gc_desc = lookupGpuCacheDesc(rel);
+		uint32_t	phase;
+
+		if (gc_desc)
+		{
+			phase = pg_atomic_read_u32(&gc_desc->gc_sstate->phase);
+			if (phase == GPUCACHE_PHASE__NOT_BUILT ||
+				phase == GPUCACHE_PHASE__NOW_LOADING ||
+				phase == GPUCACHE_PHASE__IS_READY)
+				retval = true;
+		}
+		table_close(rel, NoLock);
+	}
+	return retval;
+}
+
+/* ------------------------------------------------------------
+ *
+ * Routines for query execution
+ *
+ * ------------------------------------------------------------
+ */
+bool
+pgstromGpuCacheExecInit(pgstromTaskScanState *ptss)
+{
+	ptss->gpucache_scan_count = NULL;
+	if (pgstrom_enable_gpucache)
+	{
+		GpuCacheDesc *gc_desc = lookupGpuCacheDesc(ptss->scan_rel);
+		uint32_t	phase;
+
+		if (gc_desc)
+		{
+			phase = pg_atomic_read_u32(&gc_desc->gc_sstate->phase);
+			if (phase == GPUCACHE_PHASE__NOT_BUILT ||
+				phase == GPUCACHE_PHASE__NOW_LOADING ||
+				phase == GPUCACHE_PHASE__IS_READY)
+				ptss->gpucache_desc = gc_desc;
+		}
+	}
+	return (ptss->gpucache_desc != NULL);
+}
+
+XpuCommand *
+pgstromScanChunkGpuCache(pgstromTaskState *pts,
+						 pgstromTaskScanState *ptss,
+						 struct iovec *xcmd_iov,
+						 int *xcmd_iovcnt)
+{
+	GpuCacheDesc *gc_desc = ptss->gpucache_desc;
+	uint32_t	gpucache_count;
+
+	if (!ptss->gpucache_scan_count)
+		ptss->gpucache_scan_count = &ptss->__gpucache_count_data;
+	gpucache_count = pg_atomic_fetch_add_u32(ptss->gpucache_scan_count, 1);
+	if (gpucache_count < gc_desc->nr_gpus)
+	{
+		XpuCommand	__xcmd;
+
+		if (!__gpuCacheInitialLoad(gc_desc, ptss->scan_rel))
+			elog(ERROR, "gpucache: corrupted GPU-Cache for '%s'",
+				 RelationGetRelationName(ptss->scan_rel));
+		resetStringInfo(&pts->xcmd_buf);
+		memset(&__xcmd, 0, sizeof(__xcmd));
+		__xcmd.magic = XpuCommandMagicNumber;
+		__xcmd.tag   = XpuCommandTag__XpuTaskExecGpuCache;
+		__xcmd.u.gc_task.t.scan_relidx = ptss->scan_relidx;
+		__xcmd.u.gc_task.database_oid = MyDatabaseId;
+		__xcmd.u.gc_task.table_oid    = gc_desc->table_oid;
+		__xcmd.u.gc_task.table_sig    = gc_desc->table_sig;
+		__xcmd.u.gc_task.cuda_dindex  = gc_desc->pindex[gpucache_count];
+		appendBinaryStringInfo(&pts->xcmd_buf, &__xcmd,
+							   offsetof(XpuCommand, u.gc_task.data));
+		xcmd_iov->iov_base = pts->xcmd_buf.data;
+		xcmd_iov->iov_len  = pts->xcmd_buf.len;
+		*xcmd_iovcnt = 1;
+
+		return (XpuCommand *)pts->xcmd_buf.data;
+	}
+	return NULL;
+}
+
+void
+pgstromGpuCacheExecReset(pgstromTaskScanState *ptss)
+{
+	ptss->gpucache_scan_count = NULL;
+}
+
+void
+pgstromGpuCacheInitDSM(pgstromTaskScanState *ptss,
+					   pgstromSharedScanState *psss)
+{
+	ptss->gpucache_scan_count = &psss->gpucache_count_data;
+}
+
+void
+pgstromGpuCacheAttachDSM(pgstromTaskScanState *ptss,
+						 pgstromSharedScanState *psss)
+{
+	ptss->gpucache_scan_count = &psss->gpucache_count_data;
+}
+
+void
+pgstromGpuCacheShutdownDSM(pgstromTaskScanState *ptss,
+						   pgstromSharedScanState *psss)
+{
+	/* do nothing */
+}
+
+/* ------------------------------------------------------------
+ *
  * Routines to support DDL callbacks
  *
  * ------------------------------------------------------------
@@ -2520,4 +2647,55 @@ bailout:
 	if (pipe_buffer)
 		free(pipe_buffer);
 	return NULL;
+}
+
+/*
+ * gpuCacheGetKdsBuffer
+ */
+kern_data_store *
+gpuCacheGetKdsBuffer(gpuContext *gcontext,
+					 uint32_t database_oid,
+					 uint32_t table_oid,
+					 uint32_t table_sig)
+{
+	kern_gpucache_master_state *gc_mstate;
+	kern_data_store *kds = NULL;
+
+	/* flush pending logs if any */
+	//TODO: check log existence under read-lock
+	gpuCacheFlushPendingLogs(gcontext);
+	
+	pthreadRWLockReadLock(&gcontext->gpucache_rwlock);
+	gc_mstate = gcontext->gpucache_master_state;
+	if (gc_mstate)
+	{
+		kern_gpucache_data_store *kds_gc;
+		uint32_t	hindex = gpuCacheSharedStateHashIndex(database_oid,
+														  table_oid,
+														  table_sig);
+		for (kds_gc = gc_mstate->hslots[hindex];
+			 kds_gc != NULL;
+			 kds_gc = kds_gc->next)
+		{
+			if (kds_gc->database_oid == database_oid &&
+				kds_gc->table_oid    == table_oid &&
+				kds_gc->table_sig    == table_sig)
+			{
+				kds = &kds_gc->kds;
+				break;
+			}
+		}
+	}
+	if (!kds)
+		pthreadRWLockUnlock(&gcontext->gpucache_rwlock);
+	return kds;
+}
+
+/*
+ * gpuCachePutKdsBuffer
+ */
+void
+gpuCachePutKdsBuffer(gpuContext *gcontext)
+{
+	pthreadRWLockUnlock(&gcontext->gpucache_rwlock);
 }
