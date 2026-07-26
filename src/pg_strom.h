@@ -1089,7 +1089,9 @@ extern void		pgstromGpuCacheAttachDSM(pgstromTaskScanState *ptss,
 										 pgstromSharedScanState *psss);
 extern void		pgstromGpuCacheShutdownDSM(pgstromTaskScanState *ptss,
 										   pgstromSharedScanState *psss);
-
+extern void		pgstromGpuCacheExplain(pgstromTaskScanState *ptss,
+									   ExplainState *es,
+									   const char *prefix);
 extern void	   *gpuCacheWorkerMain(void *__gcontext);
 extern void		pgstrom_init_gpu_cache(void);
 extern kern_data_store *gpuCacheGetKdsBuffer(gpuContext *gcontext,

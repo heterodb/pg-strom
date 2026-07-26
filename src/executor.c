@@ -2352,6 +2352,10 @@ pgstromExplainScanRelation(pgstromTaskState *pts,
 								   ptss->arrow_state,
 								   es, dcontext, label);
 	}
+	else if (ptss->gpucache_desc)
+	{
+		pgstromGpuCacheExplain(ptss, es, label);
+	}
 	else if (ptss->brin_state)
 	{
 		pgstromBrinIndexExplain(ptss->brin_state,
@@ -2996,6 +3000,8 @@ pgstromExplainTaskState(CustomScanState *node,
 				}
 			}
 		}
+		else if (ptss->gpucache_desc)
+			pgstromGpuCacheExplain(ptss, es, NULL);
 		else if (ptss->brin_state)
 			pgstromBrinIndexExplain(ptss->brin_state, es, dcontext, NULL);
 	}

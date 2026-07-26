@@ -1456,6 +1456,24 @@ pgstromGpuCacheShutdownDSM(pgstromTaskScanState *ptss,
 	/* do nothing */
 }
 
+void
+pgstromGpuCacheExplain(pgstromTaskScanState *ptss,
+					   ExplainState *es,
+					   const char *prefix)
+{
+	GpuCacheDesc *gc_desc = ptss->gpucache_desc;
+	char	buf[1024];
+
+	if (gc_desc)
+	{
+		snprintf(buf, sizeof(buf),
+				 "GPU-Cache [cache-sz: %s, gpumask: %08lx]",
+				 format_bytesz(gc_desc->gpucache_sz),
+				 gc_desc->gpumask);
+		ExplainPropertyText(prefix, buf, es);
+	}
+}
+
 /* ------------------------------------------------------------
  *
  * Routines to support DDL callbacks
@@ -2266,8 +2284,6 @@ gpuCacheFlushPendingLogs(gpuContext *gcontext)
 	bool		compaction_done = false;
 	bool		retval = false;
 
-	pthreadRWLockWriteLock(&gcontext->gpucache_rwlock);
-	gc_mstate = gcontext->gpucache_master_state;
 	rc = gpuOptimalBlockSize(&grid_sz,
 							 &block_sz,
 							 gcontext->cufn_gpucache_apply_logs, 0);
@@ -2275,8 +2291,10 @@ gpuCacheFlushPendingLogs(gpuContext *gcontext)
 	{
 		__GC_LOG("failed on gpuOptimalBlockSize for kern_gpucache_apply_logs: %s",
 				 cuStrError(rc));
-		goto out;
+		return false;
 	}
+	pthreadRWLockWriteLock(&gcontext->gpucache_rwlock);
+	gc_mstate = gcontext->gpucache_master_state;
 again:
 	for (int phase=1; phase <= 3; phase++)
 	{
@@ -2332,7 +2350,7 @@ again:
 		retval = true;
 	}
 out:
-    pthreadRWLockUnlock(&gcontext->gpucache_rwlock);
+	pthreadRWLockUnlock(&gcontext->gpucache_rwlock);
 	return retval;
 }
 
@@ -2661,18 +2679,24 @@ gpuCacheGetKdsBuffer(gpuContext *gcontext,
 	kern_gpucache_master_state *gc_mstate;
 	kern_data_store *kds = NULL;
 
-	/* flush pending logs if any */
-	//TODO: check log existence under read-lock
-	gpuCacheFlushPendingLogs(gcontext);
-	
+again:
 	pthreadRWLockReadLock(&gcontext->gpucache_rwlock);
 	gc_mstate = gcontext->gpucache_master_state;
 	if (gc_mstate)
 	{
 		kern_gpucache_data_store *kds_gc;
-		uint32_t	hindex = gpuCacheSharedStateHashIndex(database_oid,
-														  table_oid,
-														  table_sig);
+		uint32_t	hindex;
+
+		/* flush pending logs if any */
+		if (gc_mstate->nitems > 0)
+		{
+			pthreadRWLockUnlock(&gcontext->gpucache_rwlock);
+			gpuCacheFlushPendingLogs(gcontext);
+			goto again;
+		}
+		hindex = gpuCacheSharedStateHashIndex(database_oid,
+											  table_oid,
+											  table_sig);
 		for (kds_gc = gc_mstate->hslots[hindex];
 			 kds_gc != NULL;
 			 kds_gc = kds_gc->next)
