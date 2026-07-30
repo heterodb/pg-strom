@@ -1094,10 +1094,10 @@ extern void		pgstromGpuCacheExplain(pgstromTaskScanState *ptss,
 									   const char *prefix);
 extern void	   *gpuCacheWorkerMain(void *__gcontext);
 extern void		pgstrom_init_gpu_cache(void);
-extern kern_data_store *gpuCacheGetKdsBuffer(gpuContext *gcontext,
-											 uint32_t database_oid,
-											 uint32_t table_oid,
-											 uint32_t table_sig);
+extern CUdeviceptr gpuCacheGetKdsBuffer(gpuContext *gcontext,
+										uint32_t database_oid,
+										uint32_t table_oid,
+										uint32_t table_sig);
 extern void		gpuCachePutKdsBuffer(gpuContext *gcontext);
 
 /*

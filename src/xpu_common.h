@@ -1265,7 +1265,7 @@ KERN_TUPITEM_SET_ROWID(kern_tupitem *titem, uint32_t rowid)
 }
 
 INLINE_FUNCTION(kern_tupitem_xact_attrs *)
-KERN_TUPITEM_GET_XACT_ATTRS(kern_tupitem *titem)
+KERN_TUPITEM_GET_XACT_ATTRS(const kern_tupitem *titem)
 {
 	kern_tupitem_xact_attrs *xattr = NULL;
 	if (titem->has_xact_attrs)

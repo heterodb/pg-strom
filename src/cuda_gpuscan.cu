@@ -612,22 +612,21 @@ __gpuscan_check_row_visibility(kern_context *kcxt,
 							   kern_tupitem *titem)
 {
 	SerializedTransactionState *xstate = SESSION_XACT_STATE(kcxt->session);
-	kern_tupitem_xact_attrs *xattrs = KERN_TUPITEM_GET_XACT_ATTRS(titem);
-
+	const kern_tupitem_xact_attrs *xattrs
+		= KERN_TUPITEM_GET_XACT_ATTRS(titem);
 	assert(xstate != NULL);
-	if (xattrs)
+	if (!xattrs)
+		return true;
+	if (xattrs->xmin == InvalidTransactionId)
+		return false;
+	if (xattrs->xmin != FrozenTransactionId)
 	{
-		if (xattrs->xmin == InvalidTransactionId)
-			return false;
-		if (xattrs->xmin != FrozenTransactionId)
+		for (int i=0; i < xstate->nParallelCurrentXids; i++)
 		{
-			for (int i=0; i < xstate->nParallelCurrentXids; i++)
-			{
-				if (xattrs->xmin == xstate->parallelCurrentXids[i])
-					goto xmin_is_visible;
-			}
-			return false;
+			if (xattrs->xmin == xstate->parallelCurrentXids[i])
+				goto xmin_is_visible;
 		}
+		return false;
 	}
 xmin_is_visible:
 	if (xattrs->xmax == InvalidTransactionId)
@@ -726,106 +725,6 @@ __gpuscan_load_source_row(kern_context *kcxt,
 	/* move to the next depth if more than 32 htuples were fetched */
 	return (WARP_WRITE_POS(wp,0) >= WARP_READ_POS(wp,0) + get_local_size() ? 1 : 0);
 }
-
-#if 0
-/*
- * __gpuscan_load_source_column (KDS_FORMAT_COLUMN)
- */
-INLINE_FUNCTION(GpuCacheSysattr *)
-kds_column_get_sysattr(const kern_data_store *kds, uint32_t rowid)
-{
-	const kern_colmeta *cmeta = &kds->colmeta[kds->nr_colmeta - 1];
-	GpuCacheSysattr	   *base;
-
-	assert(!cmeta->attbyval &&
-		   cmeta->attalign == sizeof(uint32_t) &&
-		   cmeta->attlen == sizeof(GpuCacheSysattr) &&
-		   cmeta->nullmap_offset == 0);
-	base = (GpuCacheSysattr *)
-		((char *)kds + cmeta->values_offset);
-	if (rowid < kds->column_nrooms)
-		return &base[rowid];
-	return NULL;
-}
-
-STATIC_FUNCTION(bool)
-kds_column_check_visibility(kern_context *kcxt,
-							const kern_data_store *kds,
-							uint32_t rowid)
-{
-}
-
-STATIC_FUNCTION(int)
-__gpuscan_load_source_column(kern_context *kcxt,
-							 kern_warp_context *wp,
-							 const kern_data_store *kds_src,
-							 const kern_data_extra *kds_extra,
-							 const kern_expression *kexp_load_vars,
-							 const kern_expression *kexp_scan_quals,
-							 const kern_expression *kexp_move_vars,
-							 char *dst_kvecs_buffer)
-{
-	uint32_t	count;
-	uint32_t	index;
-	uint32_t	wr_pos;
-	bool		is_valid = false;
-
-	/* fetch next blockSize tuples */
-	index = get_global_size() * wp->smx_row_count + get_global_base();
-	if (index >= kds_src->nitems)
-	{
-		if (get_local_id() == 0)
-			wp->scan_done = 1;
-		return 1;
-	}
-	index += get_local_id();
-
-	/*
-	 * fetch the outer tuple to scan
-	 */
-	if (index < kds_src->nitems &&
-		kds_column_check_visibility(kcxt, kds_src, index))
-	{
-		if (ExecLoadVarsOuterColumn(kcxt,
-									kexp_load_vars,
-									kexp_scan_quals,
-									kds_src,
-									kds_extra,
-									index))
-			is_valid = true;
-	}
-	/* error checks */
-	if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
-		return -1;
-	/*
-	 * save the private kvars slot on the combination buffer (depth=0)
-	 */
-	wr_pos = WARP_WRITE_POS(wp,0);
-	wr_pos += pgstrom_stair_sum_binary(is_valid, &count);
-	if (is_valid)
-	{
-		if (!ExecMoveKernelVariables(kcxt,
-									 kexp_move_vars,
-									 dst_kvecs_buffer,
-									 (wr_pos % KVEC_UNITSZ)))
-		{
-			assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
-		}
-	}
-	/* error checks */
-	if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
-		return -1;
-	/* make forward read/write pointer */
-	if (get_local_id() == 0)
-	{
-		wp->smx_row_count++;
-		WARP_WRITE_POS(wp,0) += count;
-	}
-	__syncthreads();
-	/* move to the next depth if more than 32 htuples were fetched */
-	return (WARP_WRITE_POS(wp,0) >= WARP_READ_POS(wp,0) + get_local_size() ? 1 : 0);
-}
-#endif
 
 PUBLIC_FUNCTION(int)
 execGpuScanLoadSource(kern_context *kcxt,
@@ -937,8 +836,7 @@ __apply_one_insert_log(kern_context *kcxt,
 	}
 	dst_hitem = (kern_hashitem *)((char *)&kds_gc->kds
 								  + kds_gc->kds.length
-								  - __usage
-								  - required);
+								  - __usage);
 	memcpy(&dst_hitem->t, src_titem, src_titem->t_len);
 	KERN_TUPITEM_SET_ROWID(&dst_hitem->t, __rowid);
 	hslot = KDS_GET_HASHSLOT(&kds_gc->kds, dst_hitem->t.hash);
@@ -1074,19 +972,29 @@ kern_gpucache_compaction(kern_gpucache_data_store *comp,
 		 index < kds_src->nitems;
 		 index += get_global_size())
 	{
-		kern_hashitem *hitem = KDS_GET_HASHITEM(kds_src, index);
-
-		if (hitem)
+		kern_tupitem *titem = KDS_GET_TUPITEM(kds_src, index);
+		if (titem)
 		{
-			kern_tupitem_xact_attrs *xattrs = KERN_TUPITEM_GET_XACT_ATTRS(&hitem->t);
-
+			const kern_tupitem_xact_attrs *xattrs
+				= KERN_TUPITEM_GET_XACT_ATTRS(titem);
 			if (xattrs &&
 				xattrs->xmin != InvalidTransactionId &&
 				xattrs->xmax != FrozenTransactionId)
 			{
-				if (!__apply_one_insert_log(&kcxt, comp, &hitem->t))
+				if (!__apply_one_insert_log(&kcxt, comp, titem))
 					break;		/* overflow */
 			}
 		}
+	}
+	/*
+	 * The compaction process can fail only when the buffer runs out of space.
+	 * Therefore, __KDS_CHECK_OVERFLOW always returns false.
+	 */
+	if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
+	{
+		if (get_local_id() == 0)
+			assert(!__KDS_CHECK_OVERFLOW(&comp->kds,
+										 __volatileRead(comp->kds.nitems),
+										 __volatileRead(comp->kds.usage)));
 	}
 }

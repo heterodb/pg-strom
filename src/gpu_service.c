@@ -4047,11 +4047,11 @@ gpuservHandleGpuTaskExec(gpuContext *gcontext,
 	if (!kds_src)
 	{
 		assert(xcmd->tag == XpuCommandTag__XpuTaskExecGpuCache);
-		kds_src = gpuCacheGetKdsBuffer(gcontext,
-									   xcmd->u.gc_task.database_oid,
-									   xcmd->u.gc_task.table_oid,
-									   xcmd->u.gc_task.table_sig);
-		if (!kds_src)
+		m_kds_src = gpuCacheGetKdsBuffer(gcontext,
+										 xcmd->u.gc_task.database_oid,
+										 xcmd->u.gc_task.table_oid,
+										 xcmd->u.gc_task.table_sig);
+		if (!m_kds_src)
 		{
 			gpuClientELog(gclient, "GPU-Cache not found (database_oid: %u, table_oid: %u, table_sig: %08x)",
 						  xcmd->u.gc_task.database_oid,

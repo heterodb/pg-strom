@@ -809,6 +809,7 @@ __gpuCacheSetupCacheLog(GpuCacheDesc *gc_desc, Relation rel)
 						  KDS_FORMAT_HASH);
 	gc_log->kds_head.table_oid = gc_desc->table_oid;
 	gc_log->kds_head.hash_nslots = hash_nslots;
+	gc_log->kds_head.length = gpucache_sz;
 
 	gpuCacheSendTxLog(gc_desc, -1, &gc_log->c);
 }
@@ -1260,7 +1261,6 @@ pgstrom_gpucache_sync_trigger(PG_FUNCTION_ARGS)
 		if (!TRIGGER_FIRED_AFTER(trigdata->tg_event))
 			elog(ERROR, "%s: must be declared as AFTER ROW trigger",
 				 trigdata->tg_trigger->tgname);
-
 		gc_desc = lookupGpuCacheDesc(trigdata->tg_relation);
 		if (!gc_desc)
 			goto bailout;
@@ -1298,7 +1298,7 @@ pgstrom_gpucache_sync_trigger(PG_FUNCTION_ARGS)
 			 trigdata->tg_event);
 	}
 bailout:
-	PG_RETURN_POINTER(trigdata->tg_trigtuple);
+	PG_RETURN_POINTER(NULL);
 }
 
 PG_FUNCTION_INFO_V1(pgstrom_gpucache_apply_redo);
@@ -1376,16 +1376,9 @@ pgstromGpuCacheExecInit(pgstromTaskScanState *ptss)
 	if (pgstrom_enable_gpucache)
 	{
 		GpuCacheDesc *gc_desc = lookupGpuCacheDesc(ptss->scan_rel);
-		uint32_t	phase;
 
-		if (gc_desc)
-		{
-			phase = pg_atomic_read_u32(&gc_desc->gc_sstate->phase);
-			if (phase == GPUCACHE_PHASE__NOT_BUILT ||
-				phase == GPUCACHE_PHASE__NOW_LOADING ||
-				phase == GPUCACHE_PHASE__IS_READY)
-				ptss->gpucache_desc = gc_desc;
-		}
+		if (gc_desc && __gpuCacheInitialLoad(gc_desc, ptss->scan_rel))
+			ptss->gpucache_desc = gc_desc;
 	}
 	return (ptss->gpucache_desc != NULL);
 }
@@ -1411,20 +1404,26 @@ pgstromScanChunkGpuCache(pgstromTaskState *pts,
 				 RelationGetRelationName(ptss->scan_rel));
 		resetStringInfo(&pts->xcmd_buf);
 		memset(&__xcmd, 0, sizeof(__xcmd));
-		__xcmd.magic = XpuCommandMagicNumber;
-		__xcmd.tag   = XpuCommandTag__XpuTaskExecGpuCache;
+		__xcmd.magic  = XpuCommandMagicNumber;
+		__xcmd.tag    = XpuCommandTag__XpuTaskExecGpuCache;
+		__xcmd.length = offsetof(XpuCommand, u.gc_task) + sizeof(kern_exec_task_gpucache);
 		__xcmd.u.gc_task.t.scan_relidx = ptss->scan_relidx;
 		__xcmd.u.gc_task.database_oid = MyDatabaseId;
 		__xcmd.u.gc_task.table_oid    = gc_desc->table_oid;
 		__xcmd.u.gc_task.table_sig    = gc_desc->table_sig;
 		__xcmd.u.gc_task.cuda_dindex  = gc_desc->pindex[gpucache_count];
-		appendBinaryStringInfo(&pts->xcmd_buf, &__xcmd,
-							   offsetof(XpuCommand, u.gc_task.data));
+		appendBinaryStringInfo(&pts->xcmd_buf, &__xcmd, __xcmd.length);
+
 		xcmd_iov->iov_base = pts->xcmd_buf.data;
 		xcmd_iov->iov_len  = pts->xcmd_buf.len;
 		*xcmd_iovcnt = 1;
 
 		return (XpuCommand *)pts->xcmd_buf.data;
+	}
+	else if (gpucache_count == gc_desc->nr_gpus)
+	{
+		/* move to the next relation */
+		pts->curr_scan_rel++;
 	}
 	return NULL;
 }
@@ -1462,15 +1461,21 @@ pgstromGpuCacheExplain(pgstromTaskScanState *ptss,
 					   const char *prefix)
 {
 	GpuCacheDesc *gc_desc = ptss->gpucache_desc;
+	char	label[100];
 	char	buf[1024];
 
 	if (gc_desc)
 	{
+		if (!prefix)
+			snprintf(label, sizeof(label), "GPU-Cache");
+		else
+			snprintf(label, sizeof(label), "GPU-Cache [%s]", prefix);
+
 		snprintf(buf, sizeof(buf),
-				 "GPU-Cache [cache-sz: %s, gpumask: %08lx]",
+				 "cache-sz: %s, gpumask: %08lx",
 				 format_bytesz(gc_desc->gpucache_sz),
 				 gc_desc->gpumask);
-		ExplainPropertyText(prefix, buf, es);
+		ExplainPropertyText(label, buf, es);
 	}
 }
 
@@ -2347,6 +2352,8 @@ again:
 	}
 	else
 	{
+		gc_mstate->nitems = 0;
+		gc_mstate->usage  = 0;
 		retval = true;
 	}
 out:
@@ -2670,15 +2677,14 @@ bailout:
 /*
  * gpuCacheGetKdsBuffer
  */
-kern_data_store *
+CUdeviceptr
 gpuCacheGetKdsBuffer(gpuContext *gcontext,
 					 uint32_t database_oid,
 					 uint32_t table_oid,
 					 uint32_t table_sig)
 {
 	kern_gpucache_master_state *gc_mstate;
-	kern_data_store *kds = NULL;
-
+	CUdeviceptr	m_kds = 0UL;
 again:
 	pthreadRWLockReadLock(&gcontext->gpucache_rwlock);
 	gc_mstate = gcontext->gpucache_master_state;
@@ -2705,14 +2711,14 @@ again:
 				kds_gc->table_oid    == table_oid &&
 				kds_gc->table_sig    == table_sig)
 			{
-				kds = &kds_gc->kds;
+				m_kds = (CUdeviceptr)&kds_gc->kds;
 				break;
 			}
 		}
 	}
-	if (!kds)
+	if (m_kds == 0UL)
 		pthreadRWLockUnlock(&gcontext->gpucache_rwlock);
-	return kds;
+	return m_kds;
 }
 
 /*

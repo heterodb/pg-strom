@@ -144,8 +144,40 @@ kern_extract_minimal_tuple(kern_context *kcxt,
 	/* assign NULL if system columns */
 	while (kvload_nitems > 0 && vl_desc->vl_resno < 0)
 	{
-		if (!__extract_heap_tuple_attr(kcxt, vl_desc->vl_slot_id, NULL))
-			return false;
+		uint16_t	slot_id = vl_desc->vl_slot_id;
+
+		if (slot_id < kcxt->kvars_nslots)
+		{
+			const kern_tupitem_xact_attrs *xattr;
+			const void	   *addr = NULL;
+
+			switch (vl_desc->vl_resno)
+			{
+				case SelfItemPointerAttributeNumber:
+					xattr = KERN_TUPITEM_GET_XACT_ATTRS(titem);
+					if (xattr)
+						addr = &xattr->ctid;
+					break;
+				case MinTransactionIdAttributeNumber:
+					xattr = KERN_TUPITEM_GET_XACT_ATTRS(titem);
+					if (xattr)
+						addr = &xattr->xmin;
+					break;
+				case MaxTransactionIdAttributeNumber:
+					xattr = KERN_TUPITEM_GET_XACT_ATTRS(titem);
+					if (xattr)
+						addr = &xattr->xmax;
+					break;
+				case TableOidAttributeNumber:
+					addr = &kds->table_oid;
+					break;
+				default:
+					STROM_ELOG(kcxt, "not a supported system attribute reference");
+					return false;
+			}
+			if (!__extract_heap_tuple_attr(kcxt, slot_id, (const char *)addr))
+				return false;
+		}
 		vl_desc++;
 		kvload_nitems--;
 	}
