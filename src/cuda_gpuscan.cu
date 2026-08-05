@@ -990,11 +990,11 @@ kern_gpucache_compaction(kern_gpucache_data_store *comp,
 	 * The compaction process can fail only when the buffer runs out of space.
 	 * Therefore, __KDS_CHECK_OVERFLOW always returns false.
 	 */
-	if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
+	if (__syncthreads_count(kcxt.errcode != ERRCODE_STROM_SUCCESS) > 0)
 	{
 		if (get_local_id() == 0)
 			assert(!__KDS_CHECK_OVERFLOW(&comp->kds,
-										 __volatileRead(comp->kds.nitems),
-										 __volatileRead(comp->kds.usage)));
+										 __volatileRead(&comp->kds.nitems),
+										 __volatileRead(&comp->kds.usage)));
 	}
 }

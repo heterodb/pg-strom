@@ -118,6 +118,7 @@
 #include "utils/guc.h"
 #include "utils/inet.h"
 #include "utils/inval.h"
+#include "utils/json.h"
 #include "utils/jsonb.h"
 #include "utils/lsyscache.h"
 #include "utils/pg_locale.h"
