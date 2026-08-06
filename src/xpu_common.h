@@ -1268,13 +1268,12 @@ INLINE_FUNCTION(kern_tupitem_xact_attrs *)
 KERN_TUPITEM_GET_XACT_ATTRS(const kern_tupitem *titem)
 {
 	kern_tupitem_xact_attrs *xattr = NULL;
+
 	if (titem->has_xact_attrs)
 	{
 		assert((uintptr_t)titem == MAXALIGN((uintptr_t)titem));
-		xattr = (kern_tupitem_xact_attrs *)((char *)titem
-											+ titem->t_hoff
-											- sizeof(kern_tupitem_xact_attrs)
-											- MINIMAL_TUPLE_OFFSET);
+		xattr = (kern_tupitem_xact_attrs *)
+			(KERN_TUPITEM_GET_PAYLOAD(titem) - sizeof(kern_tupitem_xact_attrs));
 		assert((char *)xattr >= (char *)titem->t_bits +
 			   ((titem->t_infomask & HEAP_HASNULL) != 0
 				? BITMAPLEN(titem->t_infomask2 & HEAP_NATTS_MASK) : 0));

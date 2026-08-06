@@ -921,7 +921,7 @@ __setupGpuCacheTupleItem(StringInfo buf,
 
 			if (!VARATT_NOT_PAD_BYTE((char *)tuple + hoff))
 				hoff = TYPEALIGN(alignval, hoff);
-			addr = (char *)tuple + hoff;
+			addr = (char *)tuple->t_data + hoff;
 			hoff += VARSIZE_ANY(addr);
 
 			datum = pg_detoast_datum_packed(addr);

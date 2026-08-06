@@ -821,9 +821,10 @@ __apply_one_insert_log(kern_context *kcxt,
 					   kern_gpucache_data_store *kds_gc,
 					   const kern_tupitem *src_titem)
 {
-	size_t		required = MAXALIGN(offsetof(kern_hashitem, t) + src_titem->t_len);
-	uint64_t	__rowid = __atomic_add_uint32(&kds_gc->kds.nitems, 1);
-	uint32_t	__usage = __atomic_add_uint64(&kds_gc->kds.usage, required);
+	uint64_t	required = MAXALIGN(offsetof(kern_hashitem, t) + src_titem->t_len);
+	uint32_t	__rowid = __atomic_add_uint32(&kds_gc->kds.nitems, 1);
+	uint64_t	__usage = __atomic_add_uint64(&kds_gc->kds.usage, required);
+	uint64_t	offset = __usage + required;
 	uint64_t   *hslot;
 	kern_hashitem *dst_hitem;
 
@@ -836,13 +837,14 @@ __apply_one_insert_log(kern_context *kcxt,
 	}
 	dst_hitem = (kern_hashitem *)((char *)&kds_gc->kds
 								  + kds_gc->kds.length
-								  - __usage);
+								  - offset);
 	memcpy(&dst_hitem->t, src_titem, src_titem->t_len);
 	KERN_TUPITEM_SET_ROWID(&dst_hitem->t, __rowid);
 	hslot = KDS_GET_HASHSLOT(&kds_gc->kds, dst_hitem->t.hash);
-	dst_hitem->next = __atomic_exchange_uint64(hslot, __usage);
+	dst_hitem->next = __atomic_exchange_uint64(hslot, offset);
 	__threadfence();
-	KDS_GET_ROWINDEX(&kds_gc->kds)[__rowid] = (__usage - offsetof(kern_hashitem, t));
+	KDS_GET_ROWINDEX(&kds_gc->kds)[__rowid] = (offset - offsetof(kern_hashitem, t));
+	assert(KDS_GET_TUPITEM(&kds_gc->kds, __rowid) == &dst_hitem->t);
 	return true;
 }
 
