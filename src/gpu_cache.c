@@ -868,6 +868,7 @@ __setupGpuCacheTupleItem(StringInfo buf,
 						 TransactionId xmax)
 {
 	TupleDesc	tupdesc = RelationGetDescr(rel);
+	HeapTupleHeader htup = tuple->t_data;
 	uint8_t	   *nullmap = NULL;
 	int			nattrs = Min(HeapTupleHeaderGetNatts(tuple->t_data), tupdesc->natts);
 	int			base = buf->len;
@@ -881,7 +882,7 @@ __setupGpuCacheTupleItem(StringInfo buf,
 	/* allocation of the header portion first */
 	if (HeapTupleHasNulls(tuple))
 	{
-		nullmap = tuple->t_data->t_bits;
+		nullmap = htup->t_bits;
 		head_sz = MAXALIGN(offsetof(kern_tupitem, t_bits)
 						   + BITMAPLEN(nattrs)
 						   + sizeof(kern_tupitem_xact_attrs));
@@ -895,7 +896,7 @@ __setupGpuCacheTupleItem(StringInfo buf,
 	memset(buf->data + buf->len, 0, head_sz);
 	buf->len += head_sz;
 	/* deploy the payload first */
-	hoff = tuple->t_data->t_hoff;
+	hoff = htup->t_hoff;
 	for (int j=0; j < nattrs; j++)
 	{
 		Form_pg_attribute attr = TupleDescAttr(tupdesc, j);
@@ -911,7 +912,7 @@ __setupGpuCacheTupleItem(StringInfo buf,
 			diff = TYPEALIGN(alignval, buf->len) - buf->len;
 			if (diff > 0)
 				appendBinaryStringInfo(buf, (char *)&zero, diff);
-			appendBinaryStringInfo(buf, (char *)tuple->t_data + hoff, attr->attlen);
+			appendBinaryStringInfo(buf, (char *)htup + hoff, attr->attlen);
 			hoff += attr->attlen;
 		}
 		else if (attr->attlen == -1)
@@ -919,9 +920,9 @@ __setupGpuCacheTupleItem(StringInfo buf,
 			struct varlena *datum;
 			void	   *addr;
 
-			if (!VARATT_NOT_PAD_BYTE((char *)tuple + hoff))
+			if (!VARATT_NOT_PAD_BYTE((char *)htup + hoff))
 				hoff = TYPEALIGN(alignval, hoff);
-			addr = (char *)tuple->t_data + hoff;
+			addr = (char *)htup + hoff;
 			hoff += VARSIZE_ANY(addr);
 
 			datum = pg_detoast_datum_packed(addr);
@@ -951,7 +952,7 @@ __setupGpuCacheTupleItem(StringInfo buf,
 	tupitem->hash  = getCtidHash(&tuple->t_self);
 	tupitem->has_xact_attrs = true;
 	tupitem->t_infomask2 = nattrs;
-	tupitem->t_infomask  = tuple->t_data->t_infomask;
+	tupitem->t_infomask  = htup->t_infomask;
 	tupitem->t_hoff = head_sz + MINIMAL_TUPLE_OFFSET;
 	if (nullmap)
 		memcpy(tupitem->t_bits, nullmap, BITMAPLEN(nattrs));
@@ -1683,7 +1684,7 @@ pgstromScanChunkGpuCache(pgstromTaskState *pts,
 
 		return (XpuCommand *)pts->xcmd_buf.data;
 	}
-	else if (gpucache_count == gc_desc->nr_gpus)
+	else
 	{
 		/* move to the next relation */
 		pts->curr_scan_rel++;
@@ -1715,7 +1716,13 @@ void
 pgstromGpuCacheShutdownDSM(pgstromTaskScanState *ptss,
 						   pgstromSharedScanState *psss)
 {
-	/* do nothing */
+	if (ptss->gpucache_scan_count)
+	{
+		uint32_t	ival = pg_atomic_read_u32(ptss->gpucache_scan_count);
+
+		pg_atomic_write_u32(&ptss->__gpucache_count_data, ival);
+		ptss->gpucache_scan_count = &ptss->__gpucache_count_data;
+	}
 }
 
 void

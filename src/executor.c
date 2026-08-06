@@ -2147,13 +2147,12 @@ pgstromSharedStateInitDSM(CustomScanState *node,
 		{
 			if (!heap_rel)
 				heap_rel = ptss->scan_rel;
+			pgstromGpuCacheInitDSM(ptss, psss);
 			if (ptss->brin_state)
 				dsm_addr += pgstromBrinIndexInitDSM(ptss->brin_state, psss);
 			else
 				dsm_addr += MAXALIGN(sizeof(pgstromSharedScanState));
 			psss->scan_block_nums = RelationGetNumberOfBlocks(ptss->scan_rel);
-			if (ptss->gpucache_desc)
-				pgstromGpuCacheInitDSM(ptss, psss);
 		}
 	}
 	/* inner-rel's shared state */
@@ -2216,6 +2215,7 @@ pgstromSharedStateAttachDSM(CustomScanState *node,
 		{
 			if (!heap_rel)
 				heap_rel = ptss->scan_rel;
+			pgstromGpuCacheAttachDSM(ptss, ptss->dsm);
 			if (ptss->brin_state)
 				dsm_addr += pgstromBrinIndexAttachDSM(ptss->brin_state, ptss->dsm);
 			else
