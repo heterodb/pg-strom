@@ -990,12 +990,12 @@ __assignArrowStatsBinaryOne(MinMaxStatDatum *stats,
 													CStringGetDatum(__max_token),
 													ObjectIdGetDatum(InvalidOid),
 													Int32GetDatum(-1));
-				if (VARSIZE(__min) <= sizeof(NumericData) &&
-					VARSIZE(__max) <= sizeof(NumericData))
+				if (VARSIZE(DatumGetPointer(__min)) <= sizeof(NumericData) &&
+					VARSIZE(DatumGetPointer(__max)) <= sizeof(NumericData))
 				{
 					stats->isnull = false;
-					memcpy(&stats->min.numeric, DatumGetPointer(__min), VARSIZE(__min));
-					memcpy(&stats->max.numeric, DatumGetPointer(__max), VARSIZE(__max));
+					memcpy(&stats->min.numeric, DatumGetPointer(__min), VARSIZE(DatumGetPointer(__min)));
+					memcpy(&stats->max.numeric, DatumGetPointer(__max), VARSIZE(DatumGetPointer(__max)));
 				}
 				else
 				{
@@ -3885,7 +3885,7 @@ __arrowKdsAssignVirtualColumns(kern_data_store *kds,
 		{
 			appendBinaryLargeStringInfo(chunk_buffer,
 										DatumGetPointer(virtual_datum),
-										VARSIZE_ANY(virtual_datum));
+										VARSIZE_ANY(DatumGetPointer(virtual_datum)));
 		}
 		else
 		{
@@ -4858,7 +4858,7 @@ pg_array_arrow_ref(kern_data_store *kds,
 		}
 		else if (smeta->attlen == -1)
 		{
-			int32_t		vl_len = VARSIZE(datum);
+			int32_t		vl_len = VARSIZE(DatumGetPointer(datum));
 
 			if (nullmap)
 				nullmap[i>>3] |= (1<<(i&7));

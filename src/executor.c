@@ -737,8 +737,8 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 
 		Assert((pp_info->xpu_task_flags & DEVTASK__SELECT_INTO_DIRECT) != 0);
 		session->select_into_pathname =
-			__appendBinaryStringInfo(&buf, VARDATA_ANY(pathname),
-									 VARSIZE_ANY_EXHDR(pathname));
+			__appendBinaryStringInfo(&buf, VARDATA_ANY(DatumGetPointer(pathname)),
+									 VARSIZE_ANY_EXHDR(DatumGetPointer(pathname)));
 		appendStringInfoChar(&buf, '\0');
 
 		/* length and block_offset must be set on allocation time */

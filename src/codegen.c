@@ -628,7 +628,7 @@ devtype_bytea_hash(bool isnull, Datum value)
 {
 	if (isnull)
 		return 0;
-	return hash_any((unsigned char *)VARDATA_ANY(value), VARSIZE_ANY_EXHDR(value));
+	return hash_any((unsigned char *)VARDATA_ANY(DatumGetPointer(value)), VARSIZE_ANY_EXHDR(DatumGetPointer(value)));
 }
 
 static uint32_t
@@ -636,7 +636,7 @@ devtype_text_hash(bool isnull, Datum value)
 {
 	if (isnull)
 		return 0;
-	return hash_any((unsigned char *)VARDATA_ANY(value), VARSIZE_ANY_EXHDR(value));
+	return hash_any((unsigned char *)VARDATA_ANY(DatumGetPointer(value)), VARSIZE_ANY_EXHDR(DatumGetPointer(value)));
 }
 
 static uint32_t
@@ -644,8 +644,8 @@ devtype_bpchar_hash(bool isnull, Datum value)
 {
 	if (!isnull)
 	{
-		char   *s = VARDATA_ANY(value);
-		int		sz = VARSIZE_ANY_EXHDR(value);
+		char   *s = VARDATA_ANY(DatumGetPointer(value));
+		int		sz = VARSIZE_ANY_EXHDR(DatumGetPointer(value));
 
 		sz = bpchartruelen(s, sz);
 		return hash_any((unsigned char *)s, sz);
@@ -826,7 +826,7 @@ devtype_jsonb_hash(bool isnull, Datum value)
 {
 	if (!isnull)
 	{
-		JsonbContainer *jc = (JsonbContainer *) VARDATA_ANY(value);
+		JsonbContainer *jc = (JsonbContainer *) VARDATA_ANY(DatumGetPointer(value));
 
 		return __devtype_jsonb_hash(jc);
 	}
@@ -852,7 +852,7 @@ devtype_cube_hash(bool isnull, Datum value)
 {
 	if (isnull)
 		return 0;
-	return hash_any((unsigned char *)VARDATA_ANY(value), VARSIZE_ANY_EXHDR(value));
+	return hash_any((unsigned char *)VARDATA_ANY(DatumGetPointer(value)), VARSIZE_ANY_EXHDR(DatumGetPointer(value)));
 }
 
 /*
@@ -1691,7 +1691,7 @@ codegen_const_expression(codegen_context *context,
 			else if (con->constlen == -1)
 				appendBinaryStringInfo(buf,
 									   DatumGetPointer(con->constvalue),
-									   VARSIZE_ANY(con->constvalue));
+									   VARSIZE_ANY(DatumGetPointer(con->constvalue)));
 			else
 				elog(ERROR, "unsupported type length: %d", con->constlen);
 		}
@@ -2577,7 +2577,7 @@ try_casewhen_expression_by_hashed_array(codegen_context *context,
 				else
 					appendBinaryStringInfo(&temp,
 										   DatumGetPointer(e_con->constvalue),
-										   VARSIZE_ANY(e_con->constvalue));
+										   VARSIZE_ANY(DatumGetPointer(e_con->constvalue)));
 			}
 			/* result */
 			if (!r_con->constisnull)
@@ -2594,7 +2594,7 @@ try_casewhen_expression_by_hashed_array(codegen_context *context,
 				else
 					appendBinaryStringInfo(&temp,
 										   DatumGetPointer(r_con->constvalue),
-										   VARSIZE_ANY(r_con->constvalue));
+										   VARSIZE_ANY(DatumGetPointer(r_con->constvalue)));
 			}
 		}
 		/* default value, if any */
@@ -2612,7 +2612,7 @@ try_casewhen_expression_by_hashed_array(codegen_context *context,
 				else
 					offset = __appendBinaryStringInfo(&temp,
 													  DatumGetPointer(d_con->constvalue),
-													  VARSIZE_ANY(d_con->constvalue));
+													  VARSIZE_ANY(DatumGetPointer(d_con->constvalue)));
 			}
 			kexp->u.haop.default_offset = offset;
 		}
@@ -2859,7 +2859,7 @@ __build_hashed_array_op_expression(codegen_context *context,
 				if (dtype_e->type_byval)
 					appendBinaryStringInfo(&temp, &datum, dtype_e->type_length);
 				else
-					appendBinaryStringInfo(&temp, DatumGetPointer(datum), VARSIZE_ANY(datum));
+					appendBinaryStringInfo(&temp, DatumGetPointer(datum), VARSIZE_ANY(DatumGetPointer(datum)));
 			}
 			/* value (bool has character alignment) */
 			appendStringInfoChar(&temp, true);
