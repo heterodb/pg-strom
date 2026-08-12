@@ -1008,6 +1008,7 @@ pgstrom_copy_pathnode(const Path *pathnode)
 				b->subpath = pgstrom_copy_pathnode(a->subpath);
 				return &b->path;
 			}
+#if PG_VERSION_NUM < 190000
 		case T_UpperUniquePath:
 			{
 				UpperUniquePath *a = (UpperUniquePath *)pathnode;
@@ -1015,6 +1016,7 @@ pgstrom_copy_pathnode(const Path *pathnode)
 				b->subpath = pgstrom_copy_pathnode(a->subpath);
 				return &b->path;
 			}
+#endif
 		case T_AggPath:
 			{
 				AggPath		   *a = (AggPath *)pathnode;
