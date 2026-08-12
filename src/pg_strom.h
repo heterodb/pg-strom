@@ -69,6 +69,7 @@
 #include "common/hashfn.h"
 #include "common/int.h"
 #include "common/md5.h"
+#include "executor/instrument.h"
 #include "executor/nodeIndexscan.h"
 #include "executor/nodeSubplan.h"
 #include "foreign/fdwapi.h"
