@@ -442,7 +442,7 @@ __relScanDirectCachedBlock(pgstromTaskState *pts,
 								RBM_NORMAL,
 								hscan_strategy);
 	/* prune the old items, if any */
-	heap_page_prune_opt(relation, buffer);
+	pgstrom_heap_page_prune_opt(relation, buffer);
 	/* let's check tuples visibility for each */
 	LockBuffer(buffer, BUFFER_LOCK_SHARE);
 	spage = (Page) BufferGetPage(buffer);

@@ -139,6 +139,24 @@ typedef Node *(*tree_mutator_callback) (Node *node, void *context);
 #endif
 
 /*
+ * MEMO: PostgreSQL v19 adds a reusable visibility-map buffer and a read-only
+ * hint to heap_page_prune_opt().
+ */
+static inline void
+pgstrom_heap_page_prune_opt(Relation relation, Buffer buffer)
+{
+#if PG_VERSION_NUM < 190000
+	heap_page_prune_opt(relation, buffer);
+#else
+	Buffer		vmbuffer = InvalidBuffer;
+
+	heap_page_prune_opt(relation, buffer, &vmbuffer, false);
+	if (BufferIsValid(vmbuffer))
+		ReleaseBuffer(vmbuffer);
+#endif
+}
+
+/*
  * MEMO: PostgreSQL v18 removed lc_collate_is_c() that is a checker function
  * to determine the collation is simple enough.
  *
