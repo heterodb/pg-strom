@@ -4794,7 +4794,7 @@ pg_array_arrow_ref(kern_data_store *kds,
 	ArrayType  *res;
 	size_t		sz;
 	uint32_t	i, nitems = end - start;
-	bits8	   *nullmap = NULL;
+	uint8	   *nullmap = NULL;
 	size_t		usage, __usage;
 
 	/* sanity checks */
@@ -7035,7 +7035,6 @@ pgstrom_init_arrow_fdw(void)
 	shmem_startup_next = shmem_startup_hook;
 	shmem_startup_hook = pgstrom_startup_arrow_fdw;
 }
-
 
 
 
