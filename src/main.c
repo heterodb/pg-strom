@@ -613,7 +613,11 @@ static PlannedStmt *
 pgstrom_post_planner(Query *parse,
 					 const char *query_string,
 					 int cursorOptions,
-					 ParamListInfo boundParams)
+					 ParamListInfo boundParams
+#if PG_VERSION_NUM >= 190000
+					 , ExplainState *es
+#endif
+	)
 {
 	HTAB	   *saved_ppinfo_htable = pgstrom_ppinfo_htable;
 	PlannedStmt *pstmt;
@@ -626,7 +630,11 @@ pgstrom_post_planner(Query *parse,
 		pstmt = planner_hook_next(parse,
 								  query_string,
 								  cursorOptions,
-								  boundParams);
+								  boundParams
+#if PG_VERSION_NUM >= 190000
+								  , es
+#endif
+								  );
 		/* remove dummy plan & push-down Result + GpuPreAgg */
 		pgstrom_removal_dummy_plans(pstmt, &pstmt->planTree);
 		foreach (lc, pstmt->subplans)
