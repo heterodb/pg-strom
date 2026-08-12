@@ -1641,6 +1641,34 @@ execInnerPreloadOneDepth(MemoryContext memcxt,
 /*
  * innerPreloadSetupGiSTIndex
  */
+typedef struct
+{
+	BlockNumber	blkno;
+	uint32			offno;
+} GistPageParent;
+
+StaticAssertDecl(sizeof(GistPageParent) == sizeof(PageXLogRecPtr),
+				 "GiST parent metadata must fit in pd_lsn");
+
+static inline GistPageParent
+GistPageGetParent(PageHeader hpage)
+{
+	GistPageParent	parent;
+
+	memcpy(&parent, &hpage->pd_lsn, sizeof(parent));
+	return parent;
+}
+
+static inline void
+GistPageSetParent(PageHeader hpage,
+				  BlockNumber parent_blkno,
+				  OffsetNumber parent_offno)
+{
+	GistPageParent	parent = {parent_blkno, parent_offno};
+
+	memcpy(&hpage->pd_lsn, &parent, sizeof(parent));
+}
+
 static void
 __innerPreloadSetupGiSTIndexWalker(Relation i_rel,
 								   char *base,
@@ -1653,12 +1681,14 @@ __innerPreloadSetupGiSTIndexWalker(Relation i_rel,
 	{
 		Page			page = (Page)(base + BLCKSZ * blkno);
 		PageHeader		hpage = (PageHeader) page;
+#ifdef USE_ASSERT_CHECKING
+		GistPageParent parent = GistPageGetParent(hpage);
+#endif
 		OffsetNumber	i, maxoff;
 
-		Assert(hpage->pd_lsn.xlogid == InvalidBlockNumber &&
-			   hpage->pd_lsn.xrecoff == InvalidOffsetNumber);
-		hpage->pd_lsn.xlogid = parent_blkno;
-		hpage->pd_lsn.xrecoff = parent_offno;
+		Assert(parent.blkno == InvalidBlockNumber &&
+			   parent.offno == InvalidOffsetNumber);
+		GistPageSetParent(hpage, parent_blkno, parent_offno);
 		if (!GistPageIsLeaf(page))
 		{
 			maxoff = PageGetMaxOffsetNumber(page);
@@ -1930,8 +1960,9 @@ again:
 					hpage = KDS_BLOCK_PGPAGE(kds, k);
 
 					memcpy(hpage, page, BLCKSZ);
-					hpage->pd_lsn.xlogid = InvalidBlockNumber;
-					hpage->pd_lsn.xrecoff = InvalidOffsetNumber;
+					GistPageSetParent(hpage,
+									  InvalidBlockNumber,
+									  InvalidOffsetNumber);
 					KDS_BLOCK_BLCKNR(kds, k) = k;
 
 					UnlockReleaseBuffer(buffer);
