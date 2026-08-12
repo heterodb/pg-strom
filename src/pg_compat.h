@@ -157,6 +157,19 @@ pgstrom_heap_page_prune_opt(Relation relation, Buffer buffer)
 }
 
 /*
+ * MEMO: PostgreSQL v19 widened BufferDesc.state and its BM_* flags to 64bit.
+ */
+static inline uint64
+pgstrom_buffer_state(BufferDesc *buf_desc)
+{
+#if PG_VERSION_NUM < 190000
+	return pg_atomic_read_u32(&buf_desc->state);
+#else
+	return pg_atomic_read_u64(&buf_desc->state);
+#endif
+}
+
+/*
  * MEMO: PostgreSQL v18 removed lc_collate_is_c() that is a checker function
  * to determine the collation is simple enough.
  *
