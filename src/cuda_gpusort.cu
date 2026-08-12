@@ -1437,7 +1437,7 @@ kern_buffer_simple_limit(kern_data_store *kds_final, uint64_t old_length)
 		}
 		__syncthreads();
 		/* put tuples on the destination */
-		offset += base_usage + tupsz;
+		offset += base_usage;
 		if (tupsz > 0)
 		{
 			kern_tupitem   *__titem = (kern_tupitem *)
@@ -1637,7 +1637,7 @@ kern_gpusort_consolidate_buffer(kern_data_store *kds_dst,
 		__syncthreads();
 		/* put tuples on the destination */
 		row_id += base_rowid;
-		offset += base_usage + tupsz;
+		offset += base_usage;
 		if (tupsz > 0)
 		{
 			kern_tupitem   *__titem = (kern_tupitem *)
