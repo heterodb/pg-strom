@@ -130,6 +130,15 @@ typedef Node *(*tree_mutator_callback) (Node *node, void *context);
 #endif
 
 /*
+ * MEMO: PostgreSQL v19 adds user-specified ScanOptions to table_beginscan()
+ * and table_beginscan_parallel().
+ */
+#if PG_VERSION_NUM < 190000
+#define table_beginscan(a,b,c,d,e)			table_beginscan((a),(b),(c),(d))
+#define table_beginscan_parallel(a,b,c)		table_beginscan_parallel((a),(b))
+#endif
+
+/*
  * MEMO: PostgreSQL v18 removed lc_collate_is_c() that is a checker function
  * to determine the collation is simple enough.
  *

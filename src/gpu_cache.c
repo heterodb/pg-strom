@@ -1200,7 +1200,7 @@ __gpuCacheInitialLoadMain(GpuCacheDesc *gc_desc, Relation rel)
 	TableScanDesc	hscan;
 	HeapTuple		tuple;
 
-	hscan = table_beginscan(rel, SnapshotAny, 0, NULL);
+	hscan = table_beginscan(rel, SnapshotAny, 0, NULL, SO_NONE);
 	while ((tuple = heap_getnext(hscan, ForwardScanDirection)) != NULL)
 	{
 		TransactionId	xmin, xmax;
