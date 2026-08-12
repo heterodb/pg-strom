@@ -6916,7 +6916,8 @@ pgstrom_startup_arrow_fdw(void)
 	Assert(!found);
 
 	memset(arrow_metadata_cache, 0, sizeof(arrowMetadataCacheHead));
-	LWLockInitialize(&arrow_metadata_cache->mutex, LWLockNewTrancheId());
+	LWLockInitialize(&arrow_metadata_cache->mutex,
+					 pgstrom_new_lwlock_tranche("arrowMetadataCache"));
 	SpinLockInit(&arrow_metadata_cache->lru_lock);
 	dlist_init(&arrow_metadata_cache->lru_list);
 	dlist_init(&arrow_metadata_cache->free_blocks);
@@ -7035,7 +7036,6 @@ pgstrom_init_arrow_fdw(void)
 	shmem_startup_next = shmem_startup_hook;
 	shmem_startup_hook = pgstrom_startup_arrow_fdw;
 }
-
 
 
 

@@ -170,6 +170,22 @@ pgstrom_buffer_state(BufferDesc *buf_desc)
 }
 
 /*
+ * MEMO: PostgreSQL v19 makes LWLockNewTrancheId() register the tranche name.
+ */
+static inline int
+pgstrom_new_lwlock_tranche(const char *tranche_name)
+{
+#if PG_VERSION_NUM < 190000
+	int			tranche_id = LWLockNewTrancheId();
+
+	LWLockRegisterTranche(tranche_id, tranche_name);
+	return tranche_id;
+#else
+	return LWLockNewTrancheId(tranche_name);
+#endif
+}
+
+/*
  * MEMO: PostgreSQL v18 removed lc_collate_is_c() that is a checker function
  * to determine the collation is simple enough.
  *
