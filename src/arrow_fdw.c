@@ -2021,7 +2021,7 @@ __arrowFieldTypeToPGType(const ArrowField *field,
 	ArrowTypeOptions attopts;
 
 	memset(&attopts, 0, sizeof(ArrowTypeOptions));
-	attopts.align = ALIGNOF_LONG;	/* some data types expand the alignment */
+	attopts.align = MAXIMUM_ALIGNOF;	/* some data types expand the alignment */
 	switch (t->node.tag)
 	{
 		case ArrowNodeTag__Int:
@@ -7035,8 +7035,6 @@ pgstrom_init_arrow_fdw(void)
 	shmem_startup_next = shmem_startup_hook;
 	shmem_startup_hook = pgstrom_startup_arrow_fdw;
 }
-
-
 
 
 
