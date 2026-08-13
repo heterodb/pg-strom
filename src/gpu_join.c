@@ -2194,7 +2194,7 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 			 */
 			if (--ps_state->preload_nr_scanning == 0)
 				pthreadCondBroadcast(&ps_state->preload_cond);
-			/* Falls through. */
+			__attribute__((fallthrough));
 		case INNER_PHASE__SETUP_BUFFERS:
 			/*
 			 * Wait for completion of other workers that still scan
@@ -2301,7 +2301,7 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 									&ps_state->preload_mutex);
 				}
             }
-            /* Falls through. */
+			__attribute__((fallthrough));
         case INNER_PHASE__GPUJOIN_EXEC:
 			/*
 			 * If some worker processes comes into the inner-preload routine
