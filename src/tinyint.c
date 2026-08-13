@@ -13,7 +13,7 @@
 
 #define DatumGetInt8(x)			((int8) (x))
 #define PG_GETARG_INT8(x)		DatumGetInt8(PG_GETARG_DATUM(x))
-#define PG_RETURN_INT8(x)		return Int8GetDatum(x)
+#define PG_RETURN_INT8(x)		return ((Datum)(int8)(x))
 
 /*
  * Type input / output functions

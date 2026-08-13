@@ -990,12 +990,12 @@ __assignArrowStatsBinaryOne(MinMaxStatDatum *stats,
 													CStringGetDatum(__max_token),
 													ObjectIdGetDatum(InvalidOid),
 													Int32GetDatum(-1));
-				if (VARSIZE(__min) <= sizeof(NumericData) &&
-					VARSIZE(__max) <= sizeof(NumericData))
+				if (VARSIZE(DatumGetPointer(__min)) <= sizeof(NumericData) &&
+					VARSIZE(DatumGetPointer(__max)) <= sizeof(NumericData))
 				{
 					stats->isnull = false;
-					memcpy(&stats->min.numeric, DatumGetPointer(__min), VARSIZE(__min));
-					memcpy(&stats->max.numeric, DatumGetPointer(__max), VARSIZE(__max));
+					memcpy(&stats->min.numeric, DatumGetPointer(__min), VARSIZE(DatumGetPointer(__min)));
+					memcpy(&stats->max.numeric, DatumGetPointer(__max), VARSIZE(DatumGetPointer(__max)));
 				}
 				else
 				{
@@ -2021,7 +2021,7 @@ __arrowFieldTypeToPGType(const ArrowField *field,
 	ArrowTypeOptions attopts;
 
 	memset(&attopts, 0, sizeof(ArrowTypeOptions));
-	attopts.align = ALIGNOF_LONG;	/* some data types expand the alignment */
+	attopts.align = MAXIMUM_ALIGNOF;	/* some data types expand the alignment */
 	switch (t->node.tag)
 	{
 		case ArrowNodeTag__Int:
@@ -3885,7 +3885,7 @@ __arrowKdsAssignVirtualColumns(kern_data_store *kds,
 		{
 			appendBinaryLargeStringInfo(chunk_buffer,
 										DatumGetPointer(virtual_datum),
-										VARSIZE_ANY(virtual_datum));
+										VARSIZE_ANY(DatumGetPointer(virtual_datum)));
 		}
 		else
 		{
@@ -4794,7 +4794,7 @@ pg_array_arrow_ref(kern_data_store *kds,
 	ArrayType  *res;
 	size_t		sz;
 	uint32_t	i, nitems = end - start;
-	bits8	   *nullmap = NULL;
+	uint8	   *nullmap = NULL;
 	size_t		usage, __usage;
 
 	/* sanity checks */
@@ -4858,7 +4858,7 @@ pg_array_arrow_ref(kern_data_store *kds,
 		}
 		else if (smeta->attlen == -1)
 		{
-			int32_t		vl_len = VARSIZE(datum);
+			int32_t		vl_len = VARSIZE(DatumGetPointer(datum));
 
 			if (nullmap)
 				nullmap[i>>3] |= (1<<(i&7));
@@ -6916,7 +6916,8 @@ pgstrom_startup_arrow_fdw(void)
 	Assert(!found);
 
 	memset(arrow_metadata_cache, 0, sizeof(arrowMetadataCacheHead));
-	LWLockInitialize(&arrow_metadata_cache->mutex, LWLockNewTrancheId());
+	LWLockInitialize(&arrow_metadata_cache->mutex,
+					 pgstrom_new_lwlock_tranche("arrowMetadataCache"));
 	SpinLockInit(&arrow_metadata_cache->lru_lock);
 	dlist_init(&arrow_metadata_cache->lru_list);
 	dlist_init(&arrow_metadata_cache->free_blocks);
@@ -7035,10 +7036,6 @@ pgstrom_init_arrow_fdw(void)
 	shmem_startup_next = shmem_startup_hook;
 	shmem_startup_hook = pgstrom_startup_arrow_fdw;
 }
-
-
-
-
 
 
 

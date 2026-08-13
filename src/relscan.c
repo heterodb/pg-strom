@@ -442,7 +442,7 @@ __relScanDirectCachedBlock(pgstromTaskState *pts,
 								RBM_NORMAL,
 								hscan_strategy);
 	/* prune the old items, if any */
-	heap_page_prune_opt(relation, buffer);
+	pgstrom_heap_page_prune_opt(relation, buffer);
 	/* let's check tuples visibility for each */
 	LockBuffer(buffer, BUFFER_LOCK_SHARE);
 	spage = (Page) BufferGetPage(buffer);
@@ -523,7 +523,7 @@ __relScanDirectCheckBufferClean(SMgrRelation smgr, BlockNumber block_num)
 	LWLock	   *bufLock;
 	Buffer		buffer;
 	BufferDesc *bufDesc;
-	uint32_t	bufState;
+	uint64		bufState;
 
 	smgr_init_buffer_tag(&bufTag, smgr, MAIN_FORKNUM, block_num);
 	bufHash = BufTableHashCode(&bufTag);
@@ -538,7 +538,7 @@ __relScanDirectCheckBufferClean(SMgrRelation smgr, BlockNumber block_num)
 		return true;		/* OK, block is not buffered */
 	}
 	bufDesc = GetBufferDescriptor(buffer);
-	bufState = pg_atomic_read_u32(&bufDesc->state);
+	bufState = pgstrom_buffer_state(bufDesc);
 	LWLockRelease(bufLock);
 
 	return (bufState & BM_DIRTY) == 0;
