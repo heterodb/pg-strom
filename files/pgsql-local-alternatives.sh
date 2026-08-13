@@ -1,6 +1,6 @@
 #!/bin/sh
 
-PG_MAJOR_VERSIONS="15 16 17 18"
+PG_MAJOR_VERSIONS="17 18 19"
 PG_COMMANDS="postgres pg_ctl psql initdb pg_dump pg_dumpall pg_restore pg_config pg_isready createdb createuser dropdb dropuser clusterdb reindexdb vacuumdb pgbench"
 
 # cleanup first
