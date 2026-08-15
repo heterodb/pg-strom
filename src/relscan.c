@@ -442,7 +442,7 @@ __relScanDirectCachedBlock(pgstromTaskState *pts,
 								RBM_NORMAL,
 								hscan_strategy);
 	/* prune the old items, if any */
-	pgstrom_heap_page_prune_opt(relation, buffer);
+	heap_page_prune_opt(relation, buffer, &ptss->heap_vm_buffer, true);
 	/* let's check tuples visibility for each */
 	LockBuffer(buffer, BUFFER_LOCK_SHARE);
 	spage = (Page) BufferGetPage(buffer);
@@ -538,7 +538,14 @@ __relScanDirectCheckBufferClean(SMgrRelation smgr, BlockNumber block_num)
 		return true;		/* OK, block is not buffered */
 	}
 	bufDesc = GetBufferDescriptor(buffer);
-	bufState = pgstrom_buffer_state(bufDesc);
+	/*
+	 * MEMO: PostgreSQL v19 redefined BufferDesc.state as pg_atomic_uint64, from 32bit.
+	 */
+#if PG_VERSION_NUM < 190000
+	bufState = pg_atomic_read_u32(&bufDesc->state);
+#else
+	bufState = pg_atomic_read_u64(&bufDesc->state);
+#endif
 	LWLockRelease(bufLock);
 
 	return (bufState & BM_DIRTY) == 0;

@@ -1349,7 +1349,7 @@ kern_windowrank_finalize(kern_data_store *kds_final,
 			base_usage = __atomic_add_uint64(&kds_final->usage,  total_sz);
 		__syncthreads();
 		/* put tuples on the destination */
-		offset += base_usage;
+		offset += base_usage + tupsz;
 		if (tupsz > 0)
 		{
 			kern_tupitem   *__titem = (kern_tupitem *)
@@ -1360,9 +1360,7 @@ kern_windowrank_finalize(kern_data_store *kds_final,
 			memcpy(__titem, titem, titem->t_len);
 			KERN_TUPITEM_SET_ROWID(__titem, __index);
 			__threadfence();
-			KDS_GET_ROWINDEX(kds_final)[__index] = ((char *)kds_final
-													+ kds_final->length
-													- (char *)__titem);
+			KDS_GET_ROWINDEX(kds_final)[__index] = offset;
 		}
 		__syncthreads();
 	}
@@ -1373,6 +1371,33 @@ kern_windowrank_finalize(kern_data_store *kds_final,
 /*
  * Simple GPU-Sort + LIMIT clause
  */
+KERNEL_FUNCTION(void)
+kern_buffer_estimate_limit(kern_data_store *kds_final)
+{
+	uint32_t	base;
+	int64_t		my_usage = 0;
+	int64_t		total_usage;
+
+	assert(kds_final->format == KDS_FORMAT_ROW ||
+		   kds_final->format == KDS_FORMAT_HASH);
+	for (base = get_global_base();
+		 base < kds_final->nitems;
+		 base += get_global_size())
+	{
+		uint32_t	index = base + get_local_id();
+
+		if (index < kds_final->nitems)
+		{
+			const kern_tupitem *titem = KDS_GET_TUPITEM(kds_final, index);
+
+			my_usage += MAXALIGN(titem->t_len);
+		}
+	}
+	pgstrom_stair_sum_int64(my_usage, &total_usage);
+	if (get_local_id() == 0 && total_usage > 0)
+		__atomic_add_uint64(&kds_final->usage, total_usage);
+}
+
 KERNEL_FUNCTION(void)
 kern_buffer_simple_limit(kern_data_store *kds_final, uint64_t old_length)
 {
@@ -1404,7 +1429,12 @@ kern_buffer_simple_limit(kern_data_store *kds_final, uint64_t old_length)
 		/* allocation of the destination buffer */
 		offset = pgstrom_stair_sum_uint64(tupsz, &total_sz);
 		if (get_local_id() == 0)
+		{
 			base_usage = __atomic_add_uint64(&kds_final->usage,  total_sz);
+			assert(__KDS_CHECK_OVERFLOW(kds_final,
+										kds_final->nitems,
+										base_usage + total_sz));
+		}
 		__syncthreads();
 		/* put tuples on the destination */
 		offset += base_usage;

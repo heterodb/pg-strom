@@ -2687,7 +2687,7 @@ tryGpuSortWithLimitPath(PlannerInfo *root,
 	switch (path->type)
 	{
 		case T_LimitPath: {
-			LimitPath  *lpath = (LimitPath *)lpath;
+			LimitPath  *lpath = (LimitPath *)path;
 
 			if (extra->limit_needed &&
 				extra->limit_tuples > 0.0)
@@ -2791,7 +2791,8 @@ tryGpuSortWithLimitPath(PlannerInfo *root,
 				if (pp_info->gpusort_keys_expr == NIL ||
 					pp_info->gpusort_keys_kind == NIL)
 					return NULL;	/* no sort */
-				if (pp_info->final_nrows <= extra->limit_tuples)
+				if (extra->limit_tuples < 0.0 ||
+					extra->limit_tuples > (double)INT_MAX)
 					return NULL;	/* makes no sense */
 				/* duplicate CustomPath */
 				cpath = pmemdup(cpath, sizeof(CustomPath));

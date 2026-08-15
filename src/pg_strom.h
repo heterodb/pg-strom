@@ -824,6 +824,7 @@ struct gpuContext
 	CUfunction		cufn_gpusort_partition_buffer;
 	CUfunction		cufn_gpusort_prep_buffer;
 	CUfunction		cufn_gpusort_exec_bitonic;
+	CUfunction		cufn_kbuf_estimate_limit;
 	CUfunction		cufn_kbuf_simple_limit;
 	CUfunction		cufn_kbuf_partitioning;
 	CUfunction		cufn_kbuf_reconstruction;

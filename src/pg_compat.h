@@ -232,6 +232,41 @@ CreateTupleDescTruncatedCopy(TupleDesc __tupdesc, int natts)
 #endif
 
 /*
+ * MEMO: PostgreSQL v19 changed LWLockNewTrancheId() to take 'name' argument.
+ * It is equivalent to the combination of LWLockNewTrancheId() and
+ * LWLockRegisterTranche() in the previous versions.
+ */
+#if PG_VERSION_NUM < 190000
+static inline int
+__LWLockNewTrancheId(const char *name)
+{
+	int		tranche_id = LWLockNewTrancheId();
+
+	LWLockRegisterTranche(tranche_id, name);
+
+	return tranche_id;
+}
+#define LWLockNewTrancheId(name)			__LWLockNewTrancheId(name)
+#endif
+
+/*
+ * MEMO: PostgreSQL v19 adds user-specified ScanOptions to table_beginscan()
+ * and table_beginscan_parallel().
+ */
+#if PG_VERSION_NUM < 190000
+#define table_beginscan(a,b,c,d,e)			table_beginscan((a),(b),(c),(d))
+#define table_beginscan_parallel(a,b,c)		table_beginscan_parallel((a),(b))
+#endif
+
+/*
+ * MEMO: PostgreSQL v19 adds a reusable visibility-map buffer and a read-only
+ * hint to heap_page_prune_opt().
+ */
+#if PG_VERSION_NUM < 190000
+#define heap_page_prune_opt(a,b,c,d)		heap_page_prune_opt((a),(b))
+#endif
+
+/*
  * MEMO: CUDA 13.0 changed the following APIs. The existing _v2 APIs were renamed
  * to the primary one, and legacy interfaces were deprecated.
  * - cuMemPrefetchAsync

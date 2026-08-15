@@ -5093,11 +5093,66 @@ __gpuservSortingWithSimpleLimit(gpuClient *gclient,
 								kern_data_store *kds_final)
 {
 	uint64_t	old_length = kds_final->length;
+	uint64_t	old_usage  = kds_final->usage;
+	int64_t		limit_count = session->gpusort_limit_count;
+	size_t		head_sz;
 	int			grid_sz;
 	int			block_sz;
 	void	   *kern_args[4];
 	CUresult	rc;
 
+	if (kds_final->nitems <= limit_count)
+		return true;	/* nothing to do */
+	/* check whether the kern_buffer_simple_limit makes overflow or not */
+	head_sz = (char *)(KDS_GET_ROWINDEX(kds_final) + limit_count) - (char *)kds_final;
+	if (head_sz + 2 * old_usage > old_length)
+	{
+		rc = gpuOptimalBlockSize(&grid_sz,
+								 &block_sz,
+								 gcontext->cufn_kbuf_estimate_limit, 0);
+		if (rc != CUDA_SUCCESS)
+		{
+			gpuClientELog(gclient, "failed on gpuOptimalBlockSize: %s",
+						  cuStrError(rc));
+			return false;
+		}
+		kds_final->nitems = limit_count;
+		kds_final->usage  = 0;
+		/* launch kernel */
+		grid_sz = Min(grid_sz, (kds_final->nitems + block_sz - 1) / block_sz);
+		kern_args[0] = &kds_final;
+
+		rc = cuLaunchKernel(gcontext->cufn_kbuf_estimate_limit,
+							grid_sz, 1, 1,
+							block_sz, 1, 1,
+							0,
+							MY_STREAM_PER_THREAD,
+							kern_args,
+							NULL);
+		if (rc != CUDA_SUCCESS)
+		{
+			gpuClientELog(gclient, "failed on cuLaunchKernel: %s",
+						  cuStrError(rc));
+			return false;
+		}
+		rc = cuStreamSynchronize(MY_STREAM_PER_THREAD);
+		if (rc != CUDA_SUCCESS)
+		{
+			gpuClientELog(gclient, "failed on cuStreamSynchronize: %s",
+						  cuStrError(rc));
+			return false;
+		}
+		/*
+		 * In case when kern_buffer_simple_limit makes buffer overflow,
+		 * it is a simple workaround not to run this compaction steps,
+		 * and CPU fetches whole of the buffer.
+		 * It consumes a little bit larger network traffic over the UNIX
+		 * domain socket, much economic solution.
+		 */
+		if (head_sz + kds_final->usage + old_usage > old_length)
+			return true;
+	}
+	/* ok, run the compaction by LIMIT clause */
 	rc = gpuOptimalBlockSize(&grid_sz,
 							 &block_sz,
 							 gcontext->cufn_kbuf_simple_limit, 0);
@@ -5108,8 +5163,8 @@ __gpuservSortingWithSimpleLimit(gpuClient *gclient,
 		return false;
 	}
 	/* reset kds_final buffer */
-	kds_final->length = kds_final->length - kds_final->usage;
-	kds_final->nitems = Min(kds_final->nitems, session->gpusort_limit_count);
+	kds_final->length = old_length - old_usage;
+	kds_final->nitems = limit_count;
 	kds_final->usage  = 0;
 	/* launch kernel */
 	grid_sz = Min(grid_sz, (kds_final->nitems + block_sz - 1) / block_sz);
@@ -6217,6 +6272,8 @@ gpuservSetupGpuModule(gpuContext *gcontext)
 								  cufn_gpusort_prep_buffer);
 	__GPU_KERNEL_RESOLVE_FUNCTION(kern_gpusort_exec_bitonic,
 								  cufn_gpusort_exec_bitonic);
+	__GPU_KERNEL_RESOLVE_FUNCTION(kern_buffer_estimate_limit,
+								  cufn_kbuf_estimate_limit);
 	__GPU_KERNEL_RESOLVE_FUNCTION(kern_buffer_simple_limit,
 								  cufn_kbuf_simple_limit);
 	__GPU_KERNEL_RESOLVE_FUNCTION(kern_buffer_partitioning,
