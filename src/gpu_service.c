@@ -844,6 +844,7 @@ __rebuild_gpu_fatbin_file(const char *fatbin_dir,
 						 " --maxrregcount=%d"
 						 " --source-in-ptx -lineinfo"
 						 " -I. -I%s "
+						 " -DPG_VERSION_NUM=%d "
 						 " -DHAVE_FLOAT2 "
 						 " -DCUDA_MAXTHREADS_PER_BLOCK=%u "
 #ifdef WITH_POSTGIS
@@ -856,6 +857,7 @@ __rebuild_gpu_fatbin_file(const char *fatbin_dir,
 						 pgstrom_cuda_toolkit_basedir,
 						 CUDA_MAXREGCOUNT,
 						 PGINCLUDEDIR,
+						 PG_VERSION_NUM,
 						 CUDA_MAXTHREADS_PER_BLOCK,
 						 tok,
 						 PGSHAREDIR, tok, tok);

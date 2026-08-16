@@ -151,9 +151,19 @@ xpu_date_arrow_datum_store(kern_context *kcxt,
 #define TZ_STRLEN_MAX	255
 #endif
 
+/*
+ * PostgreSQL v19 changed ttinfo.tt_utoff from int32 to int_fast32_t.
+ * It is an 8-byte integer on the supported 64-bit platforms.
+ */
+#if PG_VERSION_NUM >= 190000
+typedef int64_t		pg_tz_utoff_t;
+#else
+typedef int32_t		pg_tz_utoff_t;
+#endif
+
 struct pg_tz_ttinfo
 {								/* time type information */
-	int32_t		tt_utoff;		/* UT offset in seconds */
+	pg_tz_utoff_t tt_utoff;		/* UT offset in seconds */
 	bool		tt_isdst;		/* used to set tm_isdst */
 	int32_t		tt_desigidx;	/* abbreviation list index */
 	bool		tt_ttisstd;		/* transition is std time */
