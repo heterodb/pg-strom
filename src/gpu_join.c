@@ -1037,6 +1037,21 @@ GpuJoinAddCustomPath(PlannerInfo *root,
 /*
  * pgstrom_build_tlist_dev
  */
+static bool
+__pgstrom_equal_input_expression(Node *a, Node *b)
+{
+	if (IsA(a, Aggref) && IsA(b, Aggref))
+	{
+		Aggref *aa = copyObject((Aggref *)a);
+		Aggref *bb = copyObject((Aggref *)b);
+
+		aa->aggno = bb->aggno = -1;
+		aa->aggtransno = bb->aggtransno = -1;
+		return equal(aa, bb);
+	}
+	return equal(a, b);
+}
+
 static List *
 __pgstrom_build_tlist_dev_expr(List *tlist_dev,
 							   Node *node,
@@ -1071,10 +1086,11 @@ __pgstrom_build_tlist_dev_expr(List *tlist_dev,
 		resno = 1;
 		foreach (lc2, reltarget->exprs)
 		{
-			if (equal(node, lfirst(lc2)))
+			if (__pgstrom_equal_input_expression(node, lfirst(lc2)))
 				goto found;
 			resno++;
 		}
+		depth++;
 	}
 	depth = -1;
 	resno = -1;
@@ -1086,6 +1102,7 @@ found:
 	 * All the GPU kernel doing is simple copy.
 	 */
 	if (IsA(node, Var) ||
+		(depth > 0 && IsA(node, Aggref)) ||
 		pgstrom_xpu_expression((Expr *)node,
 							   xpu_task_flags,
 							   base_relid,
@@ -1117,6 +1134,35 @@ found:
 	return tlist_dev;
 }
 
+/*
+ * __pgstrom_is_inner_path_target
+ *
+ * True if the expression is already computed by one of the inner paths.
+ * Such an expression only needs to be copied by the device projection,
+ * regardless of whether the expression itself is executable on the device.
+ */
+static bool
+__pgstrom_is_inner_path_target(Node *node, List *inner_target_list)
+{
+	ListCell   *lc1;
+
+	if (!IsA(node, Aggref))
+		return false;
+
+	foreach (lc1, inner_target_list)
+	{
+		PathTarget *reltarget = lfirst(lc1);
+		ListCell   *lc2;
+
+		foreach (lc2, reltarget->exprs)
+		{
+			if (__pgstrom_equal_input_expression(node, lfirst(lc2)))
+				return true;
+		}
+	}
+	return false;
+}
+
 static void
 pgstrom_build_join_tlist_dev(codegen_context *context,
 							 PlannerInfo *root,
@@ -1141,7 +1187,9 @@ pgstrom_build_join_tlist_dev(codegen_context *context,
 			TargetEntry *tle = lfirst(lc);
 
 			context->top_expr = tle->expr;
-			if (contain_var_clause((Node *)tle->expr))
+			if (contain_var_clause((Node *)tle->expr) ||
+				__pgstrom_is_inner_path_target((Node *)tle->expr,
+										   inner_target_list))
 				tlist_dev = __pgstrom_build_tlist_dev_expr(tlist_dev,
 														   (Node *)tle->expr,
 														   context->xpu_task_flags,
@@ -1167,7 +1215,8 @@ pgstrom_build_join_tlist_dev(codegen_context *context,
 			Node   *node = lfirst(lc);
 
 			context->top_expr = (Expr *)node;
-			if (contain_var_clause(node))
+			if (contain_var_clause(node) ||
+				__pgstrom_is_inner_path_target(node, inner_target_list))
 				tlist_dev = __pgstrom_build_tlist_dev_expr(tlist_dev,
 														   node,
 														   context->xpu_task_flags,
