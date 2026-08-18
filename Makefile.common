@@ -9,8 +9,7 @@ GITHASH_IF_NOT_GIVEN := HEAD
 PG_MAJORVERSION := $(shell $(PG_CONFIG) --version | sed 's/\./ /g' | awk '{print $$2}')
 PG_MINORVERSION := $(shell $(PG_CONFIG) --version | sed 's/\./ /g' | awk '{print $$3}')
 PG_INCLUDEDIR_SERVER := $(shell $(PG_CONFIG) --includedir-server)
-PG_VERSION_NUM := $(shell awk '/^#define PG_VERSION_NUM / { print $$3 }' \
-				$(PG_INCLUDEDIR_SERVER)/pg_config.h)
+PG_VERSION_NUM := $(shell printf '%d%04d' $(PG_MAJORVERSION) $(PG_MINORVERSION))
 
 #
 # PG-Strom version signature
