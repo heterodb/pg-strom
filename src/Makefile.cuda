@@ -37,6 +37,7 @@ endif
 
 # flags to build GPU libraries
 __NVCC_CFLAGS += -I $(shell $(PG_CONFIG) --includedir-server) \
+                 -DPG_VERSION_NUM=$(PG_VERSION_NUM)      \
                  --maxrregcount=$(MAXREGCOUNT)           \
                  --source-in-ptx -lineinfo               \
                  -DHAVE_FLOAT2                           \
