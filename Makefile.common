@@ -6,10 +6,11 @@ GITHASH_IF_NOT_GIVEN := HEAD
 #
 # PostgreSQL major version
 #
-PG_MAJORVERSION := $(shell $(PG_CONFIG) --version | sed 's/\./ /g' | awk '{print $$2}')
-PG_MINORVERSION := $(shell $(PG_CONFIG) --version | sed 's/\./ /g' | awk '{print $$3}')
 PG_INCLUDEDIR_SERVER := $(shell $(PG_CONFIG) --includedir-server)
-PG_VERSION_NUM := $(shell printf '%d%04d' $(PG_MAJORVERSION) $(PG_MINORVERSION))
+__PG_CONFIG_H   := $(PG_INCLUDEDIR_SERVER)/pg_config.h
+PG_MAJORVERSION := $(shell grep '^#define PG_MAJORVERSION_NUM' $(__PG_CONFIG_H) | awk '{print $$3}')
+PG_MINORVERSION := $(shell grep '^#define PG_MINORVERSION_NUM' $(__PG_CONFIG_H) | awk '{print $$3}')
+PG_VERSION_NUM  := $(shell grep '^#define PG_VERSION_NUM'      $(__PG_CONFIG_H) | awk '{print $$3}')
 
 #
 # PG-Strom version signature
