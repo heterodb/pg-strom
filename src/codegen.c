@@ -61,6 +61,10 @@ static struct {
 };
 
 static void	__appendKernExpMagicAndLength(StringInfo buf, int head_pos);
+static int	__codegen_kvdef_expression(codegen_context *context,
+									   StringInfo buf,
+									   codegen_kvar_defitem *kvdef,
+									   int curr_depth);
 static int	codegen_expression_walker(codegen_context *context,
 									  StringInfo buf,
 									  int curr_depth,
@@ -1374,7 +1378,7 @@ __assign_codegen_kvar_defitem_subfields(codegen_kvar_defitem *kvdef)
 }
 
 /*
- * equalVar - compares two Var nodes except for varnullingrels
+ * equalExpr - compares two expression nodes except for varnullingrels of Var
  *
  * NOTE: Var-nodes in the reltarget of input-paths are not normalized
  * to this level of GpuJoin, so it may have different varnullingrels
@@ -1382,7 +1386,7 @@ __assign_codegen_kvar_defitem_subfields(codegen_kvar_defitem *kvdef)
  * here to compare Var-nodes.
  */
 static inline bool
-equalVar(const void *__a, const void *__b)
+equalExpr(const void *__a, const void *__b)
 {
 	if (IsA(__a, Var) && IsA(__b, Var))
 	{
@@ -1398,17 +1402,17 @@ equalVar(const void *__a, const void *__b)
 			return true;
 		}
 	}
-	return false;
+	return equal(__a, __b);
 }
 
 /*
- * lookup_input_varnode_defitem
+ * lookup_input_expression_defitem
  */
 static codegen_kvar_defitem *
-lookup_input_varnode_defitem(codegen_context *context,
-							 Var *var,
-							 int curr_depth,
-							 bool allows_host_only_types)
+lookup_input_expression_defitem(codegen_context *context,
+								Expr *expr,
+								int curr_depth,
+								bool allows_host_only_types)
 {
 	codegen_kvar_defitem *kvdef;
 	int			depth, resno;
@@ -1421,15 +1425,17 @@ lookup_input_varnode_defitem(codegen_context *context,
 	int32_t		kv_xdatum_sizeof;
 	int32_t		kv_kvec_sizeof;
 
-	if (!IsA(var, Var))
-		return NULL;
-
-	if (var->varno == context->base_relid)
+	if (IsA(expr, Var))
 	{
-		depth = 0;
-		resno = var->varattno;
-		Assert(resno != InvalidAttrNumber);
-		goto found;
+		Var	   *var = (Var *)expr;
+
+		if (var->varno == context->base_relid)
+		{
+			depth = 0;
+			resno = var->varattno;
+			Assert(resno != InvalidAttrNumber);
+			goto found;
+		}
 	}
 
 	for (depth = 1; depth <= context->num_inner_rels; depth++)
@@ -1439,7 +1445,7 @@ lookup_input_varnode_defitem(codegen_context *context,
 		resno = 1;
 		foreach (lc, target->exprs)
 		{
-			if (equalVar(var, lfirst(lc)))
+			if (equalExpr(expr, lfirst(lc)))
 				goto found;
 			resno++;
 		}
@@ -1453,14 +1459,14 @@ found:
 		if (kvdef->kv_depth == depth &&
 			kvdef->kv_resno == resno)
 		{
-			Assert(equalVar(var, kvdef->kv_expr));
+			Assert(equalExpr(expr, kvdef->kv_expr));
 			kvdef->kv_maxref = Max(kvdef->kv_maxref, curr_depth);
 			return kvdef;
 		}
 	}
 
 	/* attach new one */
-	kv_type_oid = exprType((Node *)var);
+	kv_type_oid = exprType((Node *)expr);
 	if (!__assign_codegen_kvar_defitem_type_params(kv_type_oid,
 												   &kv_type_code,
 												   &kv_type_byval,
@@ -1485,7 +1491,7 @@ found:
 	kvdef->kv_typlen      = kv_type_length;
 	kvdef->kv_xdatum_sizeof = kv_xdatum_sizeof;
 	kvdef->kv_kvec_sizeof = kv_kvec_sizeof;
-	kvdef->kv_expr        = (Expr *)var;
+	kvdef->kv_expr        = expr;
 	__assign_codegen_kvar_defitem_subfields(kvdef);
 	context->kvecs_usage += KVEC_ALIGN(kvdef->kv_kvec_sizeof);
 	context->kvars_deflist = lappend(context->kvars_deflist, kvdef);
@@ -1506,17 +1512,21 @@ __try_inject_temporary_expression(codegen_context *context,
 	codegen_kvar_defitem *kvdef;
 	kern_expression kexp;
 	ListCell   *lc;
+	bool		simple_input_refs = false;
 	int			pos = -1;
 
 	/*
-	 * When 'expr' is simple Var-reference on the input relations,
+	 * When 'expr' is a simple reference of the input relation's target-list,
 	 * we don't need to inject expression node here.
 	 */
-	kvdef = lookup_input_varnode_defitem(context, (Var *)expr,
-										 curr_depth,
-										 allows_host_only_types);
+	kvdef = lookup_input_expression_defitem(context, expr,
+											curr_depth,
+											allows_host_only_types);
 	if (kvdef)
+	{
+		simple_input_refs = true;
 		goto found;
+	}
 
 	/*
 	 * Try to find out the expression which already injected to the
@@ -1571,7 +1581,9 @@ found:
 	kexp.u.save.sv_slot_id   = kvdef->kv_slot_id;
 	if (buf)
 		pos = __appendBinaryStringInfo(buf, &kexp, kexp.args_offset);
-	if (codegen_expression_walker(context, buf, curr_depth, expr) < 0)
+	if (simple_input_refs)
+		__codegen_kvdef_expression(context, buf, kvdef, curr_depth);
+	else if (codegen_expression_walker(context, buf, curr_depth, expr) < 0)
 		return NULL;
 	if (buf)
 		__appendKernExpMagicAndLength(buf, pos);
@@ -1791,17 +1803,11 @@ found:
 }
 
 static int
-codegen_var_expression(codegen_context *context,
-					   StringInfo buf,
-					   int curr_depth,
-					   Var *var)
+__codegen_kvdef_expression(codegen_context *context,
+						   StringInfo buf,
+						   codegen_kvar_defitem *kvdef,
+						   int curr_depth)
 {
-	codegen_kvar_defitem *kvdef;
-
-	kvdef = lookup_input_varnode_defitem(context,
-										 var,
-										 curr_depth,
-										 false);
 	if (buf)
 	{
 		kern_expression kexp;
@@ -1828,6 +1834,20 @@ codegen_var_expression(codegen_context *context,
 		__appendKernExpMagicAndLength(buf, pos);
 	}
 	return 0;
+}
+
+static int
+codegen_var_expression(codegen_context *context,
+					   StringInfo buf,
+					   int curr_depth,
+					   Var *var)
+{
+	codegen_kvar_defitem *kvdef
+		= lookup_input_expression_defitem(context,
+										  (Expr *)var,
+										  curr_depth,
+										  false);
+	return __codegen_kvdef_expression(context, buf, kvdef, curr_depth);
 }
 
 static int

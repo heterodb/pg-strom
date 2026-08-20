@@ -1075,6 +1075,7 @@ __pgstrom_build_tlist_dev_expr(List *tlist_dev,
 				goto found;
 			resno++;
 		}
+		depth++;
 	}
 	depth = -1;
 	resno = -1;
@@ -1086,6 +1087,7 @@ found:
 	 * All the GPU kernel doing is simple copy.
 	 */
 	if (IsA(node, Var) ||
+		(depth > 0 && IsA(node, Aggref)) ||
 		pgstrom_xpu_expression((Expr *)node,
 							   xpu_task_flags,
 							   base_relid,
@@ -1117,6 +1119,45 @@ found:
 	return tlist_dev;
 }
 
+/*
+ * gpujoin_is_simple_input_expression
+ *
+ * Prior to PostgreSQL v19, the inputs to a JOIN could only be SCAN nodes or other
+ * JOIN nodes. Therefore, when constructing the target list for GPU-Join, it was
+ * sufficient to determine only whether Vars were present.
+ * However, Eager Aggregation, introduced in PostgreSQL v19, performs an optimization
+ * that pushes Partial Aggregation down below the JOIN in order to reduce the number
+ * of rows processed by the JOIN. As a result, when the output of Partial Aggregation
+ * is passed through as-is, the target list of GPU-Join may contain Aggref nodes.
+ *
+ * TODO: If GPU-PreAgg is inserted instead, this target list will likely contain SQL
+ * functions that reference Partial Aggregation values.
+ */
+static bool
+gpujoin_is_simple_input_expression(PlannerInfo *root,
+								   List *inner_target_list,
+								   Node *node)
+{
+#if PG_VERSION_NUM >= 190000
+	if (IsA(node, Aggref))
+	{
+		ListCell   *lc1, *lc2;
+
+		foreach (lc1, inner_target_list)
+		{
+			PathTarget *reltarget = lfirst(lc1);
+
+			foreach (lc2, reltarget->exprs)
+			{
+				if (equal(node, lfirst(lc2)))
+					return true;
+			}
+		}
+	}
+#endif
+	return contain_var_clause(node);
+}
+
 static void
 pgstrom_build_join_tlist_dev(codegen_context *context,
 							 PlannerInfo *root,
@@ -1141,7 +1182,9 @@ pgstrom_build_join_tlist_dev(codegen_context *context,
 			TargetEntry *tle = lfirst(lc);
 
 			context->top_expr = tle->expr;
-			if (contain_var_clause((Node *)tle->expr))
+			if (gpujoin_is_simple_input_expression(root,
+												   inner_target_list,
+												   (Node *)tle->expr))
 				tlist_dev = __pgstrom_build_tlist_dev_expr(tlist_dev,
 														   (Node *)tle->expr,
 														   context->xpu_task_flags,
@@ -1167,7 +1210,9 @@ pgstrom_build_join_tlist_dev(codegen_context *context,
 			Node   *node = lfirst(lc);
 
 			context->top_expr = (Expr *)node;
-			if (contain_var_clause(node))
+			if (gpujoin_is_simple_input_expression(root,
+												   inner_target_list,
+												   node))
 				tlist_dev = __pgstrom_build_tlist_dev_expr(tlist_dev,
 														   node,
 														   context->xpu_task_flags,
