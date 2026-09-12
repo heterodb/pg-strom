@@ -1006,7 +1006,7 @@ process_one_parquet_file(arrowReadableFile arrow_input_file, const char *filenam
 		}
 #else
 		{
-			status = arrow_reader->ReadRowGroup(k, &table);
+			arrow::Status	status = arrow_reader->ReadRowGroup(k, &table);
 			if (!status.ok())
 				Elog("failed on parquet::arrow::FileReader::ReadRowGroup(%d): %s",
 					 k, status.ToString().c_str());
