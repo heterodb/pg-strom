@@ -2841,6 +2841,7 @@ typedef struct {
 	uint32_t	kds_src_pathname;	/* offset to const char *pathname */
 	uint32_t	kds_src_iovec;		/* offset to strom_io_vector */
 	uint32_t	kds_src_offset;		/* offset to kds_src */
+	gpumask_t	optimal_gpus;		/* schedulable GPUs in this task */
 	char		data[1]				__MAXALIGNED__;
 } kern_exec_task;
 
@@ -2906,6 +2907,7 @@ typedef struct
 	uint32_t	magic;
 	uint32_t	tag;
 	uint64_t	length;
+	gpumask_t	gpumask;
 	void	   *priv;
 	dlist_node	chain;
 	union {
@@ -3302,7 +3304,7 @@ SESSION_SELECT_INTO_PROJDESC(const kern_session_info *session)
 				if (temp->length <= offset)								\
 				{														\
 					assert(temp->magic == XpuCommandMagicNumber);		\
-					xcmd = __XPU_PREFIX##AllocCommand(priv, temp->length); \
+					xcmd = __XPU_PREFIX##AllocCommand(priv, temp);		\
 					if (!xcmd)											\
 					{													\
 						fprintf(stderr, "[%s] out of memory (sz=%lu): %m\n", \
@@ -3322,7 +3324,7 @@ SESSION_SELECT_INTO_PROJDESC(const kern_session_info *session)
 				}														\
 				else													\
 				{														\
-					curr = __XPU_PREFIX##AllocCommand(priv, temp->length); \
+					curr = __XPU_PREFIX##AllocCommand(priv, temp);		\
 					if (!curr)											\
 					{													\
 						fprintf(stderr, "[%s] out of memory (sz=%lu): %m\n", \

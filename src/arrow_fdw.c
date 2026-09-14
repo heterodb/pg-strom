@@ -96,6 +96,7 @@ typedef struct ArrowFileState
 {
 	const char *filename;
 	struct stat	stat_buf;
+	gpumask_t	optimal_gpus;
 	ArrowMetadataVersion version; /* used to determine whether Arrow or Parquet */
 	int			parquet_cache; /* foreign-table option */
 	List	   *rb_list;	/* list of RecordBatchState */
@@ -3006,12 +3007,17 @@ BuildArrowFileState(Relation frel,
 	struct stat		stat_buf;
 	List		   *virtual_sources = NIL;
 	ListCell	   *lc1, *lc2;
+	gpumask_t		optimal_gpus;
 	int				j;
 
 	if (stat(filename, &stat_buf) != 0)
 		elog(ERROR, "failed on stat('%s'): %m", filename);
+	optimal_gpus = GetOptimalGpuForFile(filename);
+	if (optimal_gpus == INVALID_GPUMASK)
+		optimal_gpus = 0;
 	af_state = palloc0(offsetof(ArrowFileState, attrs[tupdesc->natts]));
 	af_state->filename = pstrdup(filename);
+	af_state->optimal_gpus = optimal_gpus;
 	memcpy(&af_state->stat_buf, &stat_buf, sizeof(struct stat));
 	af_state->parquet_cache = parquet_cache;
 	af_state->ncols = tupdesc->natts;
@@ -5149,26 +5155,8 @@ __arrowFdwExecInit(ScanState *ss,
 		if (af_state)
 		{
 			rb_nrooms += list_length(af_state->rb_list);
-			if (ptss)
-			{
-				gpumask_t	__optimal_gpus = GetOptimalGpuForFile(fname);
+			optimal_gpus |= af_state->optimal_gpus;
 
-				if (__optimal_gpus == INVALID_GPUMASK)
-					__optimal_gpus = 0;
-				if (af_states_list == NIL)
-				{
-					optimal_gpus = __optimal_gpus;
-					if (optimal_gpus == 0)
-						__Debug("foreign-table='%s' arrow-file='%s' has no schedulable GPUs", RelationGetRelationName(frel), fname);
-				}
-				else
-				{
-					__optimal_gpus &= optimal_gpus;
-					if (optimal_gpus != __optimal_gpus)
-						__Debug("foreign-table='%s' arrow-file='%s' reduced GPUs-Set %08lx -> %08lx", RelationGetRelationName(frel), fname, optimal_gpus, __optimal_gpus);
-					optimal_gpus = __optimal_gpus;
-				}
-			}
 			af_states_list = lappend(af_states_list, af_state);
 		}
 	}
@@ -5334,11 +5322,11 @@ pgstromScanChunkArrowFdw(pgstromTaskState *pts,
 	xcmd->magic  = XpuCommandMagicNumber;
 	xcmd->tag    = XpuCommandTag__XpuTaskExec;
 	xcmd->length = chunk_buffer->len;
+	xcmd->gpumask = af_state->optimal_gpus;
 	xcmd->u.task.scan_relidx      = ptss->scan_relidx;
 	xcmd->u.task.kds_src_pathname = kds_src_pathname;
 	xcmd->u.task.kds_src_iovec    = kds_src_iovec;
 	xcmd->u.task.kds_src_offset   = kds_src_offset;
-
 	xcmd_iov->iov_base = xcmd;
 	xcmd_iov->iov_len  = xcmd->length;
 	*xcmd_iovcnt = 1;

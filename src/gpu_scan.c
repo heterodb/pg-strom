@@ -188,7 +188,7 @@ __gpuScanBuildPlanInfo(PlannerInfo *root,
 		else if (baseRelHasGpuCache(root, __rel))
 		{
 			/* assume GPU-Cache is available */
-			avg_page_cost = 1.0;
+			avg_page_cost = 0.0;
 		}
 		else if (GetOptimalGpuForBaseRel(root, __rel) != 0UL)
 		{

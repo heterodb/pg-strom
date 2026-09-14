@@ -357,6 +357,7 @@ struct kern_gpucache_data_store {
 	uint32_t		table_sig;
 	uint32_t		dead_items_nums;
 	uint64_t		dead_items_sz;
+	uint64_t		consumed;		//tentative workaround for issue #1060
 	kern_data_store	kds __MAXALIGNED__;
 };
 typedef struct kern_gpucache_data_store	kern_gpucache_data_store;

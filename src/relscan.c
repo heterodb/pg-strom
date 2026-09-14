@@ -590,6 +590,7 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 	memset(xcmd, 0, offsetof(XpuCommand, u.task.data));
 	xcmd->magic = XpuCommandMagicNumber;
 	xcmd->tag   = XpuCommandTag__XpuTaskExec;
+	xcmd->gpumask = ptss->optimal_gpus;
 	xcmd->u.task.scan_relidx = ptss->scan_relidx;
 	xcmd->u.task.kds_src_offset = offsetof(XpuCommand, u.task.data);
 	kds = __XCMD_GET_KDS_SRC(&pts->xcmd_buf);

@@ -988,11 +988,15 @@ __gpuCacheInsertLog(GpuCacheDesc *gc_desc,
 	ins->table_sig = gc_desc->table_sig;
 	pindex = gc_desc->pindex[ins->tupitem.hash % gc_desc->nr_gpus];
 	/* also write out pending ctid */
-	pci.tag = 'I';
-	pci.pindex = pindex;
-	memcpy(&pci.ctid, &tuple->t_self, sizeof(ItemPointerData));
-	appendBinaryStringInfo(&gc_desc->buf, &pci, sizeof(pci));
-	gc_desc->nitems++;
+	if (xmin != FrozenTransactionId ||
+		xmax != InvalidTransactionId)
+	{
+		pci.tag = 'I';
+		pci.pindex = pindex;
+		memcpy(&pci.ctid, &tuple->t_self, sizeof(ItemPointerData));
+		appendBinaryStringInfo(&gc_desc->buf, &pci, sizeof(pci));
+		gc_desc->nitems++;
+	}
 	/* write to the pipe */
 	gpuCacheSendTxLog(gc_desc, pindex, &ins->c);
 	pfree(buf.data);
@@ -1642,7 +1646,10 @@ pgstromGpuCacheExecInit(pgstromTaskScanState *ptss)
 		GpuCacheDesc *gc_desc = lookupGpuCacheDesc(ptss->scan_rel);
 
 		if (gc_desc && __gpuCacheInitialLoad(gc_desc, ptss->scan_rel))
+		{
 			ptss->gpucache_desc = gc_desc;
+			ptss->optimal_gpus = gc_desc->gpumask;
+		}
 	}
 	return (ptss->gpucache_desc != NULL);
 }
@@ -1662,6 +1669,7 @@ pgstromScanChunkGpuCache(pgstromTaskState *pts,
 	if (gpucache_count < gc_desc->nr_gpus)
 	{
 		XpuCommand	__xcmd;
+		int			__cuda_dindex = gc_desc->pindex[gpucache_count];
 
 		if (!__gpuCacheInitialLoad(gc_desc, ptss->scan_rel))
 			elog(ERROR, "gpucache: corrupted GPU-Cache for '%s'",
@@ -1671,11 +1679,12 @@ pgstromScanChunkGpuCache(pgstromTaskState *pts,
 		__xcmd.magic  = XpuCommandMagicNumber;
 		__xcmd.tag    = XpuCommandTag__XpuTaskExecGpuCache;
 		__xcmd.length = offsetof(XpuCommand, u.gc_task) + sizeof(kern_exec_task_gpucache);
+		__xcmd.gpumask = (1UL << __cuda_dindex);
 		__xcmd.u.gc_task.t.scan_relidx = ptss->scan_relidx;
 		__xcmd.u.gc_task.database_oid = MyDatabaseId;
 		__xcmd.u.gc_task.table_oid    = gc_desc->table_oid;
 		__xcmd.u.gc_task.table_sig    = gc_desc->table_sig;
-		__xcmd.u.gc_task.cuda_dindex  = gc_desc->pindex[gpucache_count];
+		__xcmd.u.gc_task.cuda_dindex  = __cuda_dindex;
 		appendBinaryStringInfo(&pts->xcmd_buf, &__xcmd, __xcmd.length);
 
 		xcmd_iov->iov_base = pts->xcmd_buf.data;

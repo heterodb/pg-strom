@@ -42,9 +42,9 @@ static dlist_head		xpu_connections_list;
  * Worker thread to receive response messages
  */
 static void *
-__xpuConnectAllocCommand(void *__priv, size_t sz)
+__xpuConnectAllocCommand(void *__priv, XpuCommand *xcmd)
 {
-	return malloc(sz);
+	return malloc(xcmd->length);
 }
 
 static void
@@ -1508,10 +1508,7 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 				 RelationGetRelationName(scan_rel));
 		}
 		/* update optimal-gpus */
-		if (dindex == 0)
-			optimal_gpus  = ptss->optimal_gpus;
-		else
-			optimal_gpus &= ptss->optimal_gpus;
+		optimal_gpus |= ptss->optimal_gpus;
 
 		dindex++;
 	}

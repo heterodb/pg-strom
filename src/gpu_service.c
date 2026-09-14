@@ -2951,10 +2951,11 @@ typedef struct
 } gpuServXpuCommandPacked;
 
 static void *
-__gpuServiceAllocCommand(void *__priv, size_t sz)
+__gpuServiceAllocCommand(void *__priv, XpuCommand *xcmd)
 {
 	gpuClient	   *gclient = (gpuClient *)__priv;
 	gpuMemChunk	   *chunk;
+	size_t			sz = xcmd->length;
 	gpuServXpuCommandPacked *packed;
 
 	sz += offsetof(gpuServXpuCommandPacked, xcmd);
@@ -2977,15 +2978,17 @@ __gpuServiceAllocCommand(void *__priv, size_t sz)
 		 */
 		gpuContext *gcontext = NULL;
 		uint32_t	gcontext_count = 0;
+		gpumask_t	gpumask = xcmd->gpumask;
 		dlist_iter	iter;
 
+		if (gpumask == 0)
+			gpumask = GetSystemAvailableGpus();
 		dlist_foreach(iter, &gpuserv_gpucontext_list)
 		{
 			gpuContext *__gcontext = dlist_container(gpuContext, chain, iter.cur);
-			int64_t		__mask = (1UL << __gcontext->cuda_dindex);
 			uint32_t	__count;
 
-			if ((gclient->optimal_gpus & __mask) == 0)
+			if ((__gcontext->cuda_dmask & gpumask) == 0)
 				continue;
 			__count = pg_atomic_read_u32(&__gcontext->num_commands);
 			if (!gcontext || __count < gcontext_count)
@@ -2996,8 +2999,7 @@ __gpuServiceAllocCommand(void *__priv, size_t sz)
 		}
 		if (!gcontext)
 		{
-			gpuClientELog(gclient, "No GPUs are available (optimal_gpus=%08lx)",
-						  gclient->optimal_gpus);
+			gpuClientELog(gclient, "No GPUs are available (optimal_gpus=%08lx)", gpumask);
 			return NULL;
 		}
 		chunk = __gpuMemAllocCommon(&gcontext->pool_managed, sz);
