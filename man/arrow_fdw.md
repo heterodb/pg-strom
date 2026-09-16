@@ -155,6 +155,11 @@ Arrow_Fdwは以下のオプションに対応しています。
 :   
 :   このオプションには面白い使い方があり、ワイルドカードの`${KEY}`や`@\{KEY}`でマッチしたファイル名の一部分を、仮想列として参照することができます。詳しくは、'''Arrow_Fdwの仮想列'''を参照してください。
 
+`on_missing_fields=(null|error)`
+:   外部テーブルの列に対応するフィールドがArrow/Parquetファイル上に見つからなかった場合の挙動を指定します。
+:   `null`の場合、存在しないフィールドをマッピングした列は常にNULLを返します。`error`の場合、存在しないフィールドをマッピングするとエラーを返します。
+:   デフォルトは`null`です。ただし、列オプション`on_missing_field`が指定された場合は列オプションを優先します。
+
 ####カラムに対するオプション
 
 `field=FIELD`
@@ -170,9 +175,12 @@ Arrow_Fdwは以下のオプションに対応しています。
 :   ArrowファイルのCustomMetadataには、スキーマ（PostgreSQLのテーブルに相当）に埋め込まれるものと、フィールド（PostgreSQLの列に相当）に埋め込まれるものの二種類があります。
 :   例えば、`lo_orderdate.max_values`のように、KEY値の前に`.`文字で区切られたフィールド名を記述する事で、フィールドに埋め込まれたCustomMetadataを参照する事が出来ます。フィールド名がない場合は、スキーマに埋め込まれたKEY-VALUEペアであるとして扱われます。
 
-`virtual_metadata_split=KEY`
-:   そのカラムが仮想列である事を指定します。`KEY`はArrowファイルのCustomMetadataフィールドに埋め込まれたKEY-VALUEペアを指定します。指定したKEY-VALUEペアが見つからない場合、このカラムはNULL値を返します。
 :    `virtual_metadata`との違いは、CustomMetadataフィールドの値をデリミタ（`,`）で区切り、それを個々のRecord Batchに先頭から順に当てはめて行くことです。例えば、指定したCustomMetadataの値が`Tokyo,Osaka,Kyoto,Yokohama`であった場合、RecordBatch-0から読み出した行では`'Tokyo'`が、RecordBatch-1から読み出した行では`'Osaka'`が、RecordBatch-2から読み出した行では`'Osaka'`がこの仮想列の値として表示されます。
+
+`on_missing_field=(null|error)`
+:   外部テーブルの列に対応するフィールドがArrow/Parquetファイル上に見つからなかった場合の挙動を指定します。表オプション`on_missing_fields`でも指定できますが、列ごとに異なるポリシーを設定可能です。
+:   `null`の場合、存在しないフィールドをマッピングした列は常にNULLを返します。`error`の場合、存在しないフィールドをマッピングするとエラーを返します。
+:   デフォルトでは表オプション`on_missing_fields`の設定を踏襲します。
 }
 @en{
 Arrow_Fdw supports the options below.
@@ -204,6 +212,11 @@ Arrow_Fdw supports the options below.
 :   
 :   An interesting use of this option is to refer to a portion of a file name matched by the wildcard `${KEY}` or `@\{KEY}` as a virtual column. For more information, see the '''Arrow_Fdw virtual column''' section below.
 
+on_missing_fields=(null|error)
+:   Specifies the behavior when a field corresponding to a foreign table column cannot be found in the Arrow/Parquet file.
+:   If set to `null`, a column mapped to a missing field always returns NULL. If set to `error`, attempting to map a column to a missing field raises an error.
+:   The default is `null`. However, if `on_missing_field` column option is specified, the column-level option takes precedence.
+
 ####Foreign Column Options
 
 `field=FIELD`
@@ -219,9 +232,10 @@ Arrow_Fdw supports the options below.
 :   There are two types of CustomMetadata in Arrow files: embedded in the schema (corresponding to a PostgreSQL table) and embedded in the field (corresponding to a PostgreSQL column).
 :   For example, you can reference CustomMetadata embedded in a field by writing the field name separated by the `.` character before the KEY value, such as `lo_orderdate.max_values`. If there is no field name, it will be treated as a KEY-VALUE pair embedded in the schema.
 
-`virtual_metadata_split=KEY`
-:   It specifies that the column is a virtual column. `KEY` specifies the KEY-VALUE pair embedded in the CustomMetadata field of the Arrow file. If the specified KEY-VALUE pair is not found, this column returns a NULL value.
-:   The difference from `virtual_metadata` is that the values of the CustomMetadata field are separated by a delimiter(`,`) and applied to each Record Batch in order from the beginning. For example, if the specified CustomMetadata value is `Tokyo,Osaka,Kyoto,Yokohama`, the row read from RecordBatch-0 will display `'Tokyo'`, the row read from RecordBatch-1 will display `'Osaka'`, and the row read from RecordBatch-2 will display `'Osaka'` as the value of this virtual column.
+on_missing_field=(null|error)
+: Specifies the behavior when a field corresponding to a foreign table column cannot be found in the Arrow/Parquet file. This behavior can also be specified using the on_missing_fields table option, but this column option allows a different policy to be configured for each column.
+: If set to null, a column mapped to a missing field always returns NULL. If set to error, attempting to map a column to a missing field raises an error.
+: By default, the setting of the on_missing_fields table option is inherited.
 }
 
 @ja:###データ型の対応

@@ -4,6 +4,7 @@
 #include <strings.h>
 #include <unistd.h>
 
+/* static variables */
 static const char *known_langs[] = {
 	"en",	/* default */
 	"ja",
@@ -15,6 +16,9 @@ static const char *known_langs[] = {
 	"pt",
 	NULL
 };
+static const char *filename = NULL;
+static const char *outfile = NULL;
+static const char *lang = NULL;
 
 static void
 parse_i18n(FILE *filp, FILE *fout, const char *lang)
@@ -42,12 +46,14 @@ parse_i18n(FILE *filp, FILE *fout, const char *lang)
 
 					if (depth > 0)
 					{
-						fprintf(stderr, "%d: cannot use i18n line in block\n", lineno);
+						fprintf(stderr, "%s:%d cannot use i18n line in block\n",
+								filename, lineno);
 						break;
 					}
 					if (!meet_newline)
 					{
-						fprintf(stderr, "%d: i18n line is available only line-head\n", lineno);
+						fprintf(stderr, "%s:%d i18n line is available only line-head\n",
+								filename, lineno);
 						break;
 					}
 					buf[i] = '\0';
@@ -69,8 +75,8 @@ parse_i18n(FILE *filp, FILE *fout, const char *lang)
 				{
 					if (depth > 0)
 					{
-						fprintf(stderr, "%d: cannot nest i18n blocks\n",
-								lineno);
+						fprintf(stderr, "%s:%d cannot nest i18n blocks\n",
+								filename, lineno);
 						break;
 					}
 					buf[i] = '\0';
@@ -131,9 +137,6 @@ parse_i18n(FILE *filp, FILE *fout, const char *lang)
 
 int main(int argc, char *argv[])
 {
-	const char *lang = NULL;
-	const char *filename = NULL;
-	const char *outfile = NULL;
 	int		i, c;
 	FILE   *filp;
 	FILE   *fout = stdout;
@@ -189,7 +192,10 @@ int main(int argc, char *argv[])
 
 	/* default: stdin */
 	if (!filename)
+	{
 		filp = stdin;
+		filename = "[STDIN]";	/* for error message */
+	}
 	else
 	{
 		filp = fopen(filename, "rb");
@@ -206,7 +212,10 @@ int main(int argc, char *argv[])
 
 	/* default: stdout */
 	if (!outfile)
+	{
 		fout = stdout;
+		outfile = "[STDOUT]";	/* for error message */
+	}
 	else
 	{
 		fout = fopen(outfile, "wb");
@@ -218,7 +227,7 @@ int main(int argc, char *argv[])
 	}
 	parse_i18n(filp, fout, lang);
 
-	if (filename)
+	if (filp != stdin)
 		fclose(filp);
 
 	return 0;

@@ -3082,9 +3082,10 @@ BuildArrowFileState(Relation frel,
 			af_state->attrs[j].virtual_isnull = true;
 			af_state->attrs[j].virtual_datum = 0;
 		}
-		else if (strncmp(sfield, "field:", 6) == 0)
+		else if (strncmp(sfield, "field-missing-null:", 19) == 0 ||
+				 strncmp(sfield, "field-missing-fail:", 19) == 0)
 		{
-			const char *field_name = sfield + 6;
+			const char *field_name = (sfield + 19);
 			int			field_index = -1;
 
 			for (int k=0; k < rb_state->nfields; k++)
@@ -3108,18 +3109,25 @@ BuildArrowFileState(Relation frel,
 				}
 			}
 			if (field_index < 0)
-				elog(ERROR, "arrow_fdw: foreign table '%s' of '%s' could not find out the field '%s' on the arrow file '%s'",
-					 NameStr(attr->attname),
-					 RelationGetRelationName(frel),
-					 field_name,
-					 filename);
-			af_state->attrs[j].field_index = field_index;
-			af_state->attrs[j].virtual_isnull = true;
-			af_state->attrs[j].virtual_datum = 0;
+			{
+				if (strncmp(sfield, "field-missing-fail:", 19) == 0)
+					elog(ERROR, "arrow_fdw: foreign table '%s' of '%s' could not find out the field '%s' on the arrow file '%s'",
+						 NameStr(attr->attname),
+						 RelationGetRelationName(frel),
+						 field_name,
+						 filename);
+				af_state->attrs[j].field_index = __FIELD_INDEX_SPECIAL__VIRTUAL_PER_FILE;
+				af_state->attrs[j].virtual_isnull = true;
+				af_state->attrs[j].virtual_datum = 0;
+			}
+			else
+			{
+				af_state->attrs[j].field_index = field_index;
 
-			if (bms_is_member(field_index, stat_arrow_attrs))
-				stat_pg_attrs = bms_add_member(stat_pg_attrs, attr->attnum -
-											   FirstLowInvalidHeapAttributeNumber);
+				if (bms_is_member(field_index, stat_arrow_attrs))
+					stat_pg_attrs = bms_add_member(stat_pg_attrs, attr->attnum -
+												   FirstLowInvalidHeapAttributeNumber);
+			}
 		}
 		else if (vsource && (strncmp(sfield, "virtual:", 8) == 0 ||
 							 strncmp(sfield, "metadata:", 9) == 0))
@@ -3367,7 +3375,8 @@ static List *
 arrowFdwExtractFilesList(List *options_list,
 						 List **p_virtAttrsList,
 						 int *p_parallel_nworkers,
-						 int *p_parquet_cache)
+						 int *p_parquet_cache,
+						 char *p_on_missing_fields)
 {
 	List	   *filesList = NIL;
 	char	   *dir_path = NULL;
@@ -3375,6 +3384,7 @@ arrowFdwExtractFilesList(List *options_list,
 	char	   *pattern = NULL;
 	int			parallel_nworkers = -1;
 	int			parquet_cache = -1;
+	char		on_missing_fields = 'n';	/* default: as-null */
 	ListCell   *lc;
 
 	foreach (lc, options_list)
@@ -3441,6 +3451,17 @@ arrowFdwExtractFilesList(List *options_list,
 			else
 				parquet_cache = 0;
 		}
+		else if (strcmp(defel->defname, "on_missing_fields") == 0)
+		{
+			const char *sval = defGetString(defel);
+
+			if (strcmp(sval, "error") == 0)
+				on_missing_fields = 'e';
+			else if (strcmp(sval, "null") == 0)
+				on_missing_fields = 'n';
+			else
+				elog(ERROR, "arrow: 'on_missing_fields' must be either 'error' or 'null'");
+		}
 		else
 			elog(ERROR, "arrow: unknown option (%s)", defel->defname);
 	}
@@ -3495,6 +3516,8 @@ arrowFdwExtractFilesList(List *options_list,
 		*p_parallel_nworkers = parallel_nworkers;
 	if (p_parquet_cache)
 		*p_parquet_cache = parquet_cache;
+	if (p_on_missing_fields)
+		*p_on_missing_fields = on_missing_fields;
 	return filesList;
 }
 
@@ -3502,12 +3525,14 @@ arrowFdwExtractFilesList(List *options_list,
  * arrowFdwExtractSourceFields
  */
 static List *
-arrowFdwExtractSourceFields(Relation frel)
+arrowFdwExtractSourceFields(Relation frel, char on_missing_fields)
 {
 	Oid			frelid = RelationGetRelid(frel);
 	TupleDesc	tupdesc = RelationGetDescr(frel);
 	List	   *results = NIL;
 
+	/* default missing fields policy */
+	assert(on_missing_fields == 'e' || on_missing_fields == 'n');
 	for (int j=0; j < tupdesc->natts; j++)
 	{
 		Form_pg_attribute attr = TupleDescAttr(tupdesc, j);
@@ -3517,6 +3542,7 @@ arrowFdwExtractSourceFields(Relation frel)
 		const char *virtual_key = NULL;
 		const char *virtual_metadata = NULL;
 		const char *virtual_metadata_split = NULL;
+		char		__on_missing_field = on_missing_fields;	/* default */
 
 		if (attr->attisdropped)
 		{
@@ -3538,6 +3564,17 @@ arrowFdwExtractSourceFields(Relation frel)
 				virtual_metadata = strVal(defel->arg);
 			else if (strcmp(defel->defname, "virtual_metadata_split") == 0)
 				virtual_metadata_split = strVal(defel->arg);
+			else if (strcmp(defel->defname, "on_missing_field") == 0)
+			{
+				const char *sval = strVal(defel->arg);
+
+				if (strcmp(sval, "null") == 0)
+					__on_missing_field = 'n';
+				else if (strcmp(sval, "error") == 0)
+					__on_missing_field = 'e';
+				else
+					elog(ERROR, "arrow_fdw: column option 'on_missing_field' must be either 'null' or 'error', but '%s' was supplied", sval);
+			}
 			else
 			{
 				elog(ERROR, "unknown foreign table options in '%s' of '%s'",
@@ -3561,7 +3598,10 @@ arrowFdwExtractSourceFields(Relation frel)
 		{
 			if (!field_name)
 				field_name = NameStr(attr->attname);
-			results = lappend(results, psprintf("field:%s", field_name));
+			results = lappend(results,
+							  psprintf(__on_missing_field == 'n'
+									   ? "field-missing-null:%s"
+									   : "field-missing-fail:%s", field_name));
 		}
 	}
 	return results;
@@ -4222,6 +4262,7 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 	double			allvisfrac = 0.0;
 	int				parallel_nworkers;
 	int				parquet_cache;
+	char			on_missing_fields;
 
 	/* columns to be referenced */
 	referenced = pickup_outer_referenced(root, baserel);
@@ -4236,8 +4277,9 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 	filesList = arrowFdwExtractFilesList(ft->options,
 										 &virtualColumnsList,
 										 &parallel_nworkers,
-										 &parquet_cache);
-	sourceFields = arrowFdwExtractSourceFields(frel);
+										 &parquet_cache,
+										 &on_missing_fields);
+	sourceFields = arrowFdwExtractSourceFields(frel, on_missing_fields);
 	forboth (lc1, filesList,
 			 lc2, virtualColumnsList)
 	{
@@ -5112,6 +5154,7 @@ __arrowFdwExecInit(ScanState *ss,
 	Bitmapset	   *stat_attrs = NULL;
 	gpumask_t		optimal_gpus = 0UL;
 	bool			whole_row_ref = false;
+	char			on_missing_fields;
 	List		   *filesList;
 	List		   *sourceFields;
 	List		   *virtualColumnsList;
@@ -5138,8 +5181,10 @@ __arrowFdwExecInit(ScanState *ss,
 
 	/* setup ArrowFileState */
 	filesList = arrowFdwExtractFilesList(ft->options,
-										 &virtualColumnsList, NULL, NULL);
-	sourceFields = arrowFdwExtractSourceFields(frel);
+										 &virtualColumnsList,
+										 NULL, NULL,
+										 &on_missing_fields);
+	sourceFields = arrowFdwExtractSourceFields(frel, on_missing_fields);
 	forboth (lc1, filesList,
 			 lc2, virtualColumnsList)
 	{
@@ -5850,10 +5895,13 @@ ArrowAcquireSampleRows(Relation relation,
 	int64			count_nrows = 0;
 	int				nsamples_min = nrooms / 100;
 	int				nitems = 0;
+	char			on_missing_fields;
 
 	filesList = arrowFdwExtractFilesList(ft->options,
-										 &virtualColumnsList, NULL, NULL);
-	sourceFields = arrowFdwExtractSourceFields(relation);
+										 &virtualColumnsList,
+										 NULL, NULL,
+										 &on_missing_fields);
+	sourceFields = arrowFdwExtractSourceFields(relation, on_missing_fields);
 	forboth (lc1, filesList,
 			 lc2, virtualColumnsList)
 	{
@@ -5919,7 +5967,8 @@ ArrowAnalyzeForeignTable(Relation frel,
 	size_t			totalpages = 0;
 
 	filesList = arrowFdwExtractFilesList(ft->options,
-										 &virtualColumnsList, NULL, NULL);
+										 &virtualColumnsList,
+										 NULL, NULL, NULL);
 	foreach (lc, filesList)
 	{
 		const char	   *fname = strVal(lfirst(lc));
@@ -6025,7 +6074,8 @@ ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 			break;
 	}
 	filesList = arrowFdwExtractFilesList(stmt->options,
-										 &virtualColumnsList, NULL, NULL);
+										 &virtualColumnsList,
+										 NULL, NULL, NULL);
 	if (filesList == NIL)
 		ereport(ERROR,
 				(errmsg("No valid apache arrow files are specified"),
@@ -6387,7 +6437,7 @@ pgstrom_arrow_fdw_validator(PG_FUNCTION_ARGS)
 
 		filesList = arrowFdwExtractFilesList(options,
 											 &virtualColumnsList,
-											 NULL, NULL);
+											 NULL, NULL, NULL);
 		foreach (lc, filesList)
 		{
 			const char *fname = strVal(lfirst(lc));
@@ -6421,6 +6471,14 @@ pgstrom_arrow_fdw_validator(PG_FUNCTION_ARGS)
 				meet_virtual_metadata = true;
 			else if (strcmp(defel->defname, "virtual_metadata_split") == 0)
 				meet_virtual_metadata_split = true;
+			else if (strcmp(defel->defname, "on_missing_field") == 0)
+			{
+				const char *sval = strVal(defel->arg);
+
+				if (strcmp(sval, "null") != 0 &&
+					strcmp(sval, "error") != 0)
+					elog(ERROR, "arrow_fdw: column option 'on_missing_field' must be either 'error' or 'null', but '%s' was supplied", sval);
+			}
 			else
 			{
 				elog(ERROR, "arrow_fdw: column option '%s' is unknown",
@@ -6514,11 +6572,13 @@ pgstrom_arrow_fdw_precheck_schema(PG_FUNCTION_ARGS)
 		List	   *filesList;
 		List	   *sourceFields;
 		List	   *virtualColumnsList;
+		char		on_missing_fields;
 
 		filesList = arrowFdwExtractFilesList(ft->options,
 											 &virtualColumnsList,
-											 NULL, NULL);
-		sourceFields = arrowFdwExtractSourceFields(frel);
+											 NULL, NULL,
+											 &on_missing_fields);
+		sourceFields = arrowFdwExtractSourceFields(frel, on_missing_fields);
 		forboth (lc1, filesList,
 				 lc2, virtualColumnsList)
 		{
@@ -6655,7 +6715,7 @@ static dlist_head *
 __setup_arrow_fdw_metadata_info(Oid frelid)
 {
 	ForeignTable   *ft = GetForeignTable(frelid);
-	List		   *filesList = arrowFdwExtractFilesList(ft->options, NULL, NULL, NULL);
+	List		   *filesList = arrowFdwExtractFilesList(ft->options, NULL, NULL, NULL, NULL);
 	ListCell	   *lc;
 	dlist_head	   *md_info_dlist = palloc(sizeof(dlist_head));
 

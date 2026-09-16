@@ -307,7 +307,7 @@ setupParquetFileReferenced(const kern_data_store *kds_head,
 			continue;
 		if (field_index < manifest.schema_fields.size())
 		{
-			__setupParquetFileReferenced(manifest.schema_fields[j], referenced);
+			__setupParquetFileReferenced(manifest.schema_fields[field_index], referenced);
 			revmap.push_back(j);
 		}
 		else

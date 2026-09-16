@@ -254,6 +254,10 @@ OPTIONS (file '/path/to/logdata.arrow');
 </dd>
 <dd></dd>
 <dd>このオプションには面白い使い方があり、ワイルドカードの<code>${KEY}</code>や<code>@{KEY}</code>でマッチしたファイル名の一部分を、仮想列として参照することができます。詳しくは、'''Arrow_Fdwの仮想列'''を参照してください。</dd>
+<dt><code>on_missing_fields=(null|error)</code></dt>
+<dd>外部テーブルの列に対応するフィールドがArrow/Parquetファイル上に見つからなかった場合の挙動を指定します。</dd>
+<dd><code>null</code>の場合、存在しないフィールドをマッピングした列は常にNULLを返します。<code>error</code>の場合、存在しないフィールドをマッピングするとエラーを返します。</dd>
+<dd>デフォルトは<code>null</code>です。ただし、列オプション<code>on_missing_field</code>が指定された場合は列オプションを優先します。</dd>
 </dl>
 <h4 id="_6">カラムに対するオプション</h4>
 <dl>
@@ -267,9 +271,11 @@ OPTIONS (file '/path/to/logdata.arrow');
 <dd>そのカラムが仮想列である事を指定します。<code>KEY</code>はArrowファイルのCustomMetadataフィールドに埋め込まれたKEY-VALUEペアを指定します。指定したKEY-VALUEペアが見つからない場合、このカラムはNULL値を返します。</dd>
 <dd>ArrowファイルのCustomMetadataには、スキーマ（PostgreSQLのテーブルに相当）に埋め込まれるものと、フィールド（PostgreSQLの列に相当）に埋め込まれるものの二種類があります。</dd>
 <dd>例えば、<code>lo_orderdate.max_values</code>のように、KEY値の前に<code>.</code>文字で区切られたフィールド名を記述する事で、フィールドに埋め込まれたCustomMetadataを参照する事が出来ます。フィールド名がない場合は、スキーマに埋め込まれたKEY-VALUEペアであるとして扱われます。</dd>
-<dt><code>virtual_metadata_split=KEY</code></dt>
-<dd>そのカラムが仮想列である事を指定します。<code>KEY</code>はArrowファイルのCustomMetadataフィールドに埋め込まれたKEY-VALUEペアを指定します。指定したKEY-VALUEペアが見つからない場合、このカラムはNULL値を返します。</dd>
 <dd><code>virtual_metadata</code>との違いは、CustomMetadataフィールドの値をデリミタ（<code>,</code>）で区切り、それを個々のRecord Batchに先頭から順に当てはめて行くことです。例えば、指定したCustomMetadataの値が<code>Tokyo,Osaka,Kyoto,Yokohama</code>であった場合、RecordBatch-0から読み出した行では<code>'Tokyo'</code>が、RecordBatch-1から読み出した行では<code>'Osaka'</code>が、RecordBatch-2から読み出した行では<code>'Osaka'</code>がこの仮想列の値として表示されます。</dd>
+<dt><code>on_missing_field=(null|error)</code></dt>
+<dd>外部テーブルの列に対応するフィールドがArrow/Parquetファイル上に見つからなかった場合の挙動を指定します。表オプション<code>on_missing_fields</code>でも指定できますが、列ごとに異なるポリシーを設定可能です。</dd>
+<dd><code>null</code>の場合、存在しないフィールドをマッピングした列は常にNULLを返します。<code>error</code>の場合、存在しないフィールドをマッピングするとエラーを返します。</dd>
+<dd>デフォルトでは表オプション<code>on_missing_fields</code>の設定を踏襲します。</dd>
 </dl>
 <h3 id="_7">データ型の対応</h3>
 <p>Arrow形式のデータ型と、PostgreSQLのデータ型は以下のように対応しています。</p>

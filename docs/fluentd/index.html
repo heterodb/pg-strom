@@ -333,9 +333,6 @@ If a file with the same name exists, an attempt will be made to create a file wi
 <dt><code>ts_column</code> [type: <code>String</code> / default: unspecified]</dt>
 <dd>Specify a column name to set the timestamp value of the log passed from Fluentd (not from <code>record</code>).</dd>
 <dd>This parameter is usually a date-time type such as <code>Timestamp</code>, and the <code>stat_enabled</code> attribute should also be specified to achieve fast search.</dd>
-<dt><code>tag_column</code> [type: <code>String</code> / default: unspecified]</dt>
-<dd>Specify a column name to set the tag value of the log passed from Fluentd (not from <code>record</code>).</dd>
-<dd>This parameter is usually a string type such as <code>utf8</code>.</dd>
 <dt><code>format</code> [type: <code>String</code> / default: <code>arrow</code>]</dt>
 <dd>Specify the file format to be written by the <code>fluent-plugin-arrow-file</code>.</dd>
 <dd>

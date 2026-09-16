@@ -254,6 +254,10 @@ OPTIONS (file '/path/to/logdata.arrow');
 </dd>
 <dd></dd>
 <dd>An interesting use of this option is to refer to a portion of a file name matched by the wildcard <code>${KEY}</code> or <code>@{KEY}</code> as a virtual column. For more information, see the '''Arrow_Fdw virtual column''' section below.</dd>
+<dt>on_missing_fields=(null|error)</dt>
+<dd>Specifies the behavior when a field corresponding to a foreign table column cannot be found in the Arrow/Parquet file.</dd>
+<dd>If set to <code>null</code>, a column mapped to a missing field always returns NULL. If set to <code>error</code>, attempting to map a column to a missing field raises an error.</dd>
+<dd>The default is <code>null</code>. However, if <code>on_missing_field</code> column option is specified, the column-level option takes precedence.</dd>
 </dl>
 <h4 id="foreign-column-options">Foreign Column Options</h4>
 <dl>
@@ -267,9 +271,10 @@ OPTIONS (file '/path/to/logdata.arrow');
 <dd>It specifies that the column is a virtual column. <code>KEY</code> specifies a KEY-VALUE pair embedded in the CustomMetadata field of the Arrow file. If the specified KEY-VALUE pair is not found, the column returns a NULL value.</dd>
 <dd>There are two types of CustomMetadata in Arrow files: embedded in the schema (corresponding to a PostgreSQL table) and embedded in the field (corresponding to a PostgreSQL column).</dd>
 <dd>For example, you can reference CustomMetadata embedded in a field by writing the field name separated by the <code>.</code> character before the KEY value, such as <code>lo_orderdate.max_values</code>. If there is no field name, it will be treated as a KEY-VALUE pair embedded in the schema.</dd>
-<dt><code>virtual_metadata_split=KEY</code></dt>
-<dd>It specifies that the column is a virtual column. <code>KEY</code> specifies the KEY-VALUE pair embedded in the CustomMetadata field of the Arrow file. If the specified KEY-VALUE pair is not found, this column returns a NULL value.</dd>
-<dd>The difference from <code>virtual_metadata</code> is that the values of the CustomMetadata field are separated by a delimiter(<code>,</code>) and applied to each Record Batch in order from the beginning. For example, if the specified CustomMetadata value is <code>Tokyo,Osaka,Kyoto,Yokohama</code>, the row read from RecordBatch-0 will display <code>'Tokyo'</code>, the row read from RecordBatch-1 will display <code>'Osaka'</code>, and the row read from RecordBatch-2 will display <code>'Osaka'</code> as the value of this virtual column.</dd>
+<dt>on_missing_field=(null|error)</dt>
+<dd>Specifies the behavior when a field corresponding to a foreign table column cannot be found in the Arrow/Parquet file. This behavior can also be specified using the on_missing_fields table option, but this column option allows a different policy to be configured for each column.</dd>
+<dd>If set to null, a column mapped to a missing field always returns NULL. If set to error, attempting to map a column to a missing field raises an error.</dd>
+<dd>By default, the setting of the on_missing_fields table option is inherited.</dd>
 </dl>
 <h3 id="data-type-mapping">Data type mapping</h3>
 <p>Arrow data types are mapped on PostgreSQL data types as follows.</p>

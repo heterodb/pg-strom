@@ -300,16 +300,6 @@ If a file with the same name exists, an attempt will be made to create a file wi
 :    This parameter is usually a date-time type such as `Timestamp`, and the `stat_enabled` attribute should also be specified to achieve fast search.
 }
 @ja{
-`tag_column` [type: `String` / default: なし]
-:    指定した列の値を（`record`連想配列からではなく）Fluentdから渡されたログのタグ値より取得します。
-:    通常、このオプションで指定する列は`Utf8`などの文字列型を持っています。
-}
-@en{
-`tag_column` [type: `String` / default: unspecified]
-:    Specify a column name to set the tag value of the log passed from Fluentd (not from `record`).
-:    This parameter is usually a string type such as `utf8`.
-}
-@ja{
 `format` [type: `String` / default: `arrow`]
 :    `fluent-plugin-arrow-file`が出力するファイル形式を設定します。
 :    `arrow`を指定するとApache Arrow形式に、`parquet`を指定するとApache Parquet形式となります。

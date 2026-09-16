@@ -327,9 +327,6 @@ arrow-fileプラグインは、Bufferプラグインから渡されるデータ�
 <dt><code>ts_column</code> [type: <code>String</code> / default: なし]</dt>
 <dd>指定した列の値を（<code>record</code>連想配列からではなく）Fluentdから渡されたログのタイムスタンプ値より取得します。</dd>
 <dd>通常、このオプションで指定する列は<code>Timestamp</code>などの日付時刻型を持っており、また<code>stat_enabled</code>属性と併用することで検索処理の高速化が期待できます。</dd>
-<dt><code>tag_column</code> [type: <code>String</code> / default: なし]</dt>
-<dd>指定した列の値を（<code>record</code>連想配列からではなく）Fluentdから渡されたログのタグ値より取得します。</dd>
-<dd>通常、このオプションで指定する列は<code>Utf8</code>などの文字列型を持っています。</dd>
 <dt><code>format</code> [type: <code>String</code> / default: <code>arrow</code>]</dt>
 <dd><code>fluent-plugin-arrow-file</code>が出力するファイル形式を設定します。</dd>
 <dd><code>arrow</code>を指定するとApache Arrow形式に、<code>parquet</code>を指定するとApache Parquet形式となります。</dd>
