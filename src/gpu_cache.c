@@ -50,7 +50,6 @@ typedef struct
 {
 	pg_atomic_uint32 maintenance;
 	pthread_mutex_t hash_mutex;
-	gpumask_t	req_apply_redo;
 	dlist_head	free_list;
 	dlist_head	hash_slots[GPUCACHE_STATE_HASH_NSLOTS];
 	struct {
@@ -826,29 +825,6 @@ __gpuCacheSetupCacheLog(GpuCacheDesc *gc_desc, Relation rel)
 }
 
 /*
- * __gpuCacheEraseCacheLog
- */
-static void
-__gpuCacheEraseCacheLog(GpuCacheDesc *gc_desc)
-{
-	GpuCacheLogEraseCache gc_log;
-
-	memset(&gc_log, 0, sizeof(GpuCacheLogEraseCache));
-	gc_log.c.type = GCACHE_TX_LOG__ERASE_CACHE;
-	gc_log.c.length = sizeof(GpuCacheLogEraseCache);
-	gc_log.database_oid = MyDatabaseId;
-	gc_log.table_oid = gc_desc->table_oid;
-	gc_log.table_sig = gc_desc->table_sig;
-	/* mark this GPU-Cache is corrupted */
-	if (gc_desc->gc_sstate)
-	{
-		pg_atomic_write_u32(&gc_desc->gc_sstate->phase,
-							GPUCACHE_PHASE__IS_CORRUPTED);
-	}
-	gpuCacheSendTxLog(gc_desc, -1, &gc_log.c);
-}
-
-/*
  * getCtidHash
  */
 static inline uint32_t
@@ -1201,6 +1177,7 @@ __initialLoadVisibilityCheck(HeapTuple tuple,
 static void
 __gpuCacheInitialLoadMain(GpuCacheDesc *gc_desc, Relation rel)
 {
+	GpuCacheSharedState *gc_sstate = gc_desc->gc_sstate;
 	TableScanDesc	hscan;
 	HeapTuple		tuple;
 
@@ -1212,8 +1189,14 @@ __gpuCacheInitialLoadMain(GpuCacheDesc *gc_desc, Relation rel)
 		CHECK_FOR_INTERRUPTS();
 		if (!__initialLoadVisibilityCheck(tuple, &xmin, &xmax))
 			continue;
-
 		__gpuCacheInsertLog(gc_desc, rel, tuple, xmin, xmax);
+
+		/*
+		 * break initial loading if someone (maybe GPU service) marked
+		 * this GPU-Cache as corrupted.
+		 */
+		if (pg_atomic_read_u32(&gc_sstate->phase) != GPUCACHE_PHASE__NOW_LOADING)
+			break;
 	}
 	table_endscan(hscan);
 }
@@ -1321,22 +1304,8 @@ PG_FUNCTION_INFO_V1(pgstrom_gpucache_apply_redo);
 PUBLIC_FUNCTION(Datum)
 pgstrom_gpucache_apply_redo(PG_FUNCTION_ARGS)
 {
-	bool	apply_redo_done = false;
-
-	pthreadMutexLock(&gpucache_shared_head->hash_mutex);
-	gpucache_shared_head->req_apply_redo |= GetSystemAvailableGpus();
 	pg_atomic_fetch_and_u32(&gpucache_shared_head->maintenance, 1);
-	pthreadMutexUnlock(&gpucache_shared_head->hash_mutex);
-	/* wait for completion */
-	while (!apply_redo_done)
-	{
-		pthreadMutexLock(&gpucache_shared_head->hash_mutex);
-		if (gpucache_shared_head->req_apply_redo == 0)
-			apply_redo_done = true;
-		pthreadMutexUnlock(&gpucache_shared_head->hash_mutex);
-		CHECK_FOR_INTERRUPTS();
-		pg_usleep(10000L);
-	}
+
 	PG_RETURN_VOID();
 }
 
@@ -1344,35 +1313,23 @@ PG_FUNCTION_INFO_V1(pgstrom_gpucache_compaction);
 PUBLIC_FUNCTION(Datum)
 pgstrom_gpucache_compaction(PG_FUNCTION_ARGS)
 {
-	GpuCacheDesc *gc_desc;
 	Oid			table_oid = PG_GETARG_OID(0);
 	Relation	rel;
+	GpuCacheDesc *gc_desc;
 
 	rel = relation_open(table_oid, AccessShareLock);
 	gc_desc = lookupGpuCacheDesc(rel);
-	if (!gc_desc)
+	if (gc_desc)
 	{
-		 elog(NOTICE, "GPU-Cache for '%s' is not built, so compaction is not necessary",
-			  RelationGetRelationName(rel));
-	}
-	else
-	{
-		bool	compaction_done = false;
-
 		pthreadMutexLock(&gpucache_shared_head->hash_mutex);
 		gc_desc->gc_sstate->req_compaction |= gc_desc->gpumask;
 		pg_atomic_fetch_and_u32(&gpucache_shared_head->maintenance, 1);
 		pthreadMutexUnlock(&gpucache_shared_head->hash_mutex);
-		/* wait for completion */
-		while (!compaction_done)
-		{
-			pthreadMutexLock(&gpucache_shared_head->hash_mutex);
-			if (gc_desc->gc_sstate->req_compaction == 0)
-				compaction_done = true;
-			pthreadMutexUnlock(&gpucache_shared_head->hash_mutex);
-			CHECK_FOR_INTERRUPTS();
-			pg_usleep(10000L);
-		}
+	}
+	else
+	{
+		 elog(NOTICE, "GPU-Cache for '%s' is not built, so compaction is not necessary",
+			  RelationGetRelationName(rel));
 	}
 	relation_close(rel, AccessShareLock);
 	PG_RETURN_VOID();
@@ -1382,51 +1339,26 @@ PG_FUNCTION_INFO_V1(pgstrom_gpucache_recovery);
 PUBLIC_FUNCTION(Datum)
 pgstrom_gpucache_recovery(PG_FUNCTION_ARGS)
 {
-	GpuCacheDesc *gc_desc;
 	Oid			table_oid = PG_GETARG_OID(0);
 	Relation	rel;
+	GpuCacheDesc *gc_desc;
 
 	rel = relation_open(table_oid, AccessShareLock);
 	gc_desc = lookupGpuCacheDesc(rel);
-	if (!gc_desc)
+	if (gc_desc)
 	{
-		elog(NOTICE, "GPU-Cache for '%s' is not built, so recovery is not necessary",
-			 RelationGetRelationName(rel));
-	}
-	else
-	{
-		uint32_t	phase;
-		bool		recovery_done = false;
-
 		pthreadMutexLock(&gpucache_shared_head->hash_mutex);
-		phase = pg_atomic_read_u32(&gc_desc->gc_sstate->phase);
-		if (phase == GPUCACHE_PHASE__NOT_BUILT ||
-			phase == GPUCACHE_PHASE__NOW_LOADING ||
-			phase == GPUCACHE_PHASE__IS_READY)
-		{
-			elog(NOTICE, "GPU-Cache for '%s' is not corrupted, so recovery is not necessary",
-				 RelationGetRelationName(rel));
-			recovery_done = true;
-		}
-		else
+		if (pg_atomic_read_u32(&gc_desc->gc_sstate->phase) == GPUCACHE_PHASE__IS_CORRUPTED)
 		{
 			gc_desc->gc_sstate->req_recovery |= gc_desc->gpumask;
 			pg_atomic_fetch_and_u32(&gpucache_shared_head->maintenance, 1);
 		}
-		pthreadMutexUnlock(&gpucache_shared_head->hash_mutex);
-		/* wait for completion */
-		while (!recovery_done)
+		else
 		{
-			pthreadMutexLock(&gpucache_shared_head->hash_mutex);
-			phase = pg_atomic_read_u32(&gc_desc->gc_sstate->phase);
-			if (phase == GPUCACHE_PHASE__NOT_BUILT ||
-				phase == GPUCACHE_PHASE__NOW_LOADING ||
-				phase == GPUCACHE_PHASE__IS_READY)
-				recovery_done = true;
-			pthreadMutexUnlock(&gpucache_shared_head->hash_mutex);
-			CHECK_FOR_INTERRUPTS();
-			pg_usleep(10000L);
+			elog(NOTICE, "GPU-Cache for '%s' is not corrupted, so recovery is not necessary",
+				 RelationGetRelationName(rel));
 		}
+		pthreadMutexUnlock(&gpucache_shared_head->hash_mutex);
 	}
 	relation_close(rel, AccessShareLock);
 	PG_RETURN_VOID();
@@ -2028,7 +1960,23 @@ releaseGpuCacheDesc(GpuCacheDesc *gc_desc, bool normal_commit)
 		? gc_desc->drop_on_commit
 		: gc_desc->drop_on_rollback)
 	{
-		__gpuCacheEraseCacheLog(gc_desc);
+		/*
+		 * Release the GPU-Cache. If GpuCacheSharedState does not exist in shared
+		 * memory, the GPU-Cache is considered corrupted, and the GPU-Cache residing
+		 * in GPU memory will be discarded by the next maintenance task.
+		 *
+		 * Increment maintenance to ensure that the maintenance task is launched.
+		 */
+		GpuCacheSharedState *gc_sstate = gc_desc->gc_sstate;
+
+		pthreadMutexLock(&gpucache_shared_head->hash_mutex);
+		dlist_delete(&gc_sstate->chain);
+		dlist_push_tail(&gpucache_shared_head->free_list, &gc_sstate->chain);
+		pthreadMutexUnlock(&gpucache_shared_head->hash_mutex);
+		pg_atomic_fetch_and_u32(&gpucache_shared_head->maintenance, 1);
+
+		hash_search(gpucache_table_desc_htab,
+					gc_desc, HASH_REMOVE, NULL);
 	}
 	else
 	{
@@ -2476,8 +2424,9 @@ gpuCacheExecCompactionNoLock(gpuContext *gcontext)
 		{
 			size_t	threshold = (double)curr->kds.length * compaction_ratio;
 			size_t	consumed  = (offsetof(kern_gpucache_data_store, kds) +
-								 sizeof(uint64_t) * (curr->kds.hash_nslots +
-													curr->kds.nitems) + curr->kds.usage);
+								 KDS_HEAD_LENGTH(&curr->kds) +
+								 sizeof(uint64_t) * curr->kds.hash_nslots +
+								 curr->consumed);
 			size_t	deadspace = (curr->dead_items_nums * sizeof(uint64_t) +
 								 curr->dead_items_sz);
 
@@ -2552,58 +2501,27 @@ gpuCacheExecCompactionNoLock(gpuContext *gcontext)
  */
 static void
 gpuCacheMaintenanceCompaction(gpuContext *gcontext,
-							  GpuCacheSharedState *gc_sstate)
+							  GpuCacheSharedState *gc_sstate,
+							  kern_gpucache_data_store *curr,
+							  kern_gpucache_data_store **p_prev)
 {
-	if (gcontext->gpucache_master_state)
-	{
-		kern_gpucache_master_state *gc_mstate = gcontext->gpucache_master_state;
-		kern_gpucache_data_store *curr;
-		kern_gpucache_data_store *prev = NULL;
-		uint32_t	hindex
-			= gpuCacheSharedStateHashIndex(gc_sstate->database_oid,
-										   gc_sstate->table_oid,
-										   gc_sstate->table_sig);
-		curr = gc_mstate->hslots[hindex];
-		while (curr)
-		{
-			kern_gpucache_data_store *next = curr->next;
-			CUresult	rc;
+	kern_gpucache_data_store *comp = gpuCacheExecCompactionOne(gcontext, curr);
+	CUresult	rc;
 
-			if (curr->database_oid == gc_sstate->database_oid &&
-				curr->table_oid    == gc_sstate->table_oid &&
-				curr->table_sig    == gc_sstate->table_sig)
-			{
-				kern_gpucache_data_store *comp
-					= gpuCacheExecCompactionOne(gcontext, curr);
-				if (comp)
-				{
-					/* compaction done, replaced */
-					assert(comp->next == next);
-					rc = cuMemFree((CUdeviceptr)curr);
-					if (rc != CUDA_SUCCESS)
-						__GC_LOG("failed on cuMemFree: %s", cuStrError(rc));
-					if (prev)
-						prev->next = comp;
-					else
-						gc_mstate->hslots[hindex] = comp;
-					prev = comp;
-				}
-				else
-				{
-					/* failed on compaction */
-					pg_atomic_write_u32(&gc_sstate->phase,
-										GPUCACHE_PHASE__IS_CORRUPTED);
-					rc = cuMemFree((CUdeviceptr)curr);
-					if (rc != CUDA_SUCCESS)
-						__GC_LOG("failed on cuMemFree: %s", cuStrError(rc));
-					if (prev)
-						prev->next = next;
-					else
-						gc_mstate->hslots[hindex] = next;
-				}
-			}
-			curr = next;
-		}
+	if (comp)
+	{
+		/* compaction done, to be replaced */
+		assert(comp->next == curr->next);
+		rc = cuMemFree((CUdeviceptr)curr);
+		if (rc != CUDA_SUCCESS)
+			__GC_LOG("failed on cuMemFree: %s", cuStrError(rc));
+		*p_prev = comp;
+	}
+	else
+	{
+		/* failed on compaction */
+		pg_atomic_write_u32(&gc_sstate->phase,
+							GPUCACHE_PHASE__IS_CORRUPTED);
 	}
 }
 
@@ -2614,40 +2532,41 @@ gpuCacheMaintenanceCompaction(gpuContext *gcontext,
  */
 static void
 gpuCacheMaintenanceRecovery(gpuContext *gcontext,
-							GpuCacheSharedState *gc_sstate)
+							GpuCacheSharedState *gc_sstate,
+							kern_gpucache_data_store *curr,
+							kern_gpucache_data_store **p_prev)
 {
-	kern_gpucache_master_state *gc_mstate = gcontext->gpucache_master_state;
+	kern_gpucache_data_store *temp;
+	size_t		length = (offsetof(kern_gpucache_data_store, kds) + curr->kds.length);
+	CUresult	rc;
 
-	if (gc_mstate)
+	rc = cuMemAllocManaged((CUdeviceptr *)&temp, length,
+						   CU_MEM_ATTACH_GLOBAL);
+	if (rc != CUDA_SUCCESS)
 	{
-		kern_gpucache_data_store *curr;
-		kern_gpucache_data_store *prev = NULL;
-		uint32_t	hindex
-			= gpuCacheSharedStateHashIndex(gc_sstate->database_oid,
-										   gc_sstate->table_oid,
-										   gc_sstate->table_sig);
-		curr = gc_mstate->hslots[hindex];
-		while (curr)
-		{
-			kern_gpucache_data_store *next = curr->next;
-			CUresult	rc;
-
-			if (curr->database_oid == gc_sstate->database_oid &&
-				curr->table_oid    == gc_sstate->table_oid &&
-				curr->table_sig    == gc_sstate->table_sig)
-			{
-				/* release the buffer */
-				rc = cuMemFree((CUdeviceptr)curr);
-				if (rc != CUDA_SUCCESS)
-					 __GC_LOG("failed on cuMemFree: %s", cuStrError(rc));
-				if (prev)
-					prev->next = next;
-				else
-					gc_mstate->hslots[hindex] = next;
-			}
-			curr = next;
-		}
+		__GC_LOG("out of managed memory");
+		return;
 	}
+	/* make an empty KDS */
+	temp->next            = curr->next;
+	temp->database_oid    = curr->database_oid;
+	temp->table_oid       = curr->table_oid;
+	temp->table_sig       = curr->table_sig;
+	temp->dead_items_nums = 0;
+	temp->dead_items_sz   = 0;
+	temp->consumed        = 0;
+	memcpy(&temp->kds,
+		   &curr->kds,
+		   KDS_HEAD_LENGTH(&curr->kds));
+	temp->kds.nitems      = 0;	/* reset */
+	temp->kds.usage       = 0;	/* reset */
+	/* replace */
+	*p_prev = temp;
+	rc = cuMemFree((CUdeviceptr)curr);
+	if (rc != CUDA_SUCCESS)
+		__GC_LOG("failed on cuMemFree: %s", cuStrError(rc));
+	/* reset phase */
+	pg_atomic_write_u32(&gc_sstate->phase, GPUCACHE_PHASE__NOT_BUILT);
 }
 
 /*
@@ -2676,6 +2595,7 @@ gpuCacheFlushPendingLogs(gpuContext *gcontext)
 	pthreadRWLockWriteLock(&gcontext->gpucache_rwlock);
 	gc_mstate = gcontext->gpucache_master_state;
 again:
+	memset(&gc_mstate->kerror, 0, sizeof(kern_errorbuf));
 	for (int phase=1; phase <= 3; phase++)
 	{
 		kern_args[0] = &gc_mstate;
@@ -2790,50 +2710,6 @@ gpuCacheProcessSetupCacheLog(gpuContext *gcontext, GpuCacheLogSetupCache *log)
 }
 
 /*
- * gpuCacheProcessEraseCacheLog
- */
-static bool
-gpuCacheProcessEraseCacheLog(gpuContext *gcontext, GpuCacheLogEraseCache *log)
-{
-	kern_gpucache_data_store *kds_curr, *kds_prev;
-	kern_gpucache_master_state *gc_mstate;
-	uint32_t	hindex;
-	CUresult	rc;
-
-	if (!gpuCacheFlushPendingLogs(gcontext))
-		return false;
-	hindex = gpuCacheSharedStateHashIndex(log->database_oid,
-										  log->table_oid,
-										  log->table_sig);
-	pthreadRWLockWriteLock(&gcontext->gpucache_rwlock);
-	gc_mstate = (kern_gpucache_master_state *)gcontext->gpucache_master_state;
-	for (kds_curr = gc_mstate->hslots[hindex], kds_prev = NULL;
-		 kds_curr != NULL;
-		 kds_prev = kds_curr, kds_curr = kds_curr->next)
-	{
-		if (kds_curr->database_oid == log->database_oid &&
-			kds_curr->table_oid    == log->table_oid &&
-			kds_curr->table_sig    == log->table_sig)
-		{
-			if (!kds_prev)
-				gc_mstate->hslots[hindex] = kds_curr->next;
-			else
-				kds_prev->next = kds_curr->next;
-
-			rc = cuMemFree((CUdeviceptr)kds_curr);
-			if (rc != CUDA_SUCCESS)
-				__GC_LOG("failed on cuMemFree: %s", cuStrError(rc));
-			goto found;
-		}
-	}
-	__GC_LOG("ERASE-CACHE no GPU-Cache buffer found for database=%u table=%u/%08x",
-			 log->database_oid, log->table_oid, log->table_sig);
-found:
-	pthreadRWLockUnlock(&gcontext->gpucache_rwlock);
-	return true;
-}
-
-/*
  * gpuCacheProcessRedoLog
  */
 static bool
@@ -2893,26 +2769,11 @@ gpuCacheProcessOneRedoLog(gpuContext *gcontext, GpuCacheLogCommon *log)
 {
 	if (!gpuCacheAllocMasterState(gcontext))
 		return false;
-	switch (log->type)
+	if (log->type == GCACHE_TX_LOG__SETUP_CACHE)
 	{
-		case GCACHE_TX_LOG__SETUP_CACHE:
-			return gpuCacheProcessSetupCacheLog(gcontext,
-												(GpuCacheLogSetupCache *)log);
-		case GCACHE_TX_LOG__ERASE_CACHE:
-			return gpuCacheProcessEraseCacheLog(gcontext,
-												(GpuCacheLogEraseCache *)log);
-		case GCACHE_TX_LOG__INSERT:
-		case GCACHE_TX_LOG__DELETE:
-		case GCACHE_TX_LOG__COMMIT_INS:
-		case GCACHE_TX_LOG__COMMIT_DEL:
-		case GCACHE_TX_LOG__ABORT_INS:
-		case GCACHE_TX_LOG__ABORT_DEL:
-			return gpuCacheProcessRedoLog(gcontext, log);
-		default:
-			__GC_LOG("unknown GPU-Cache log type: %08x", log->type);
-			break;
+		return gpuCacheProcessSetupCacheLog(gcontext, (GpuCacheLogSetupCache *)log);
 	}
-	return false;
+	return gpuCacheProcessRedoLog(gcontext, log);
 }
 
 /*
@@ -2921,37 +2782,61 @@ gpuCacheProcessOneRedoLog(gpuContext *gcontext, GpuCacheLogCommon *log)
 static void
 gpuCacheMaintenanceHandler(gpuContext *gcontext)
 {
-	gpumask_t	cuda_dmask = gcontext->cuda_dmask;
-	dlist_iter	iter;
-
+	/* force to flush pending redo logs */
+	(void)gpuCacheFlushPendingLogs(gcontext);
+	/* walk on the GPU-Caches for each*/
 	pthreadRWLockWriteLock(&gcontext->gpucache_rwlock);
-	pthreadMutexLock(&gpucache_shared_head->hash_mutex);
-	if ((gpucache_shared_head->req_apply_redo & cuda_dmask) != 0)
+	if (gcontext->gpucache_master_state)
 	{
-		gpuCacheFlushPendingLogs(gcontext);
-		gpucache_shared_head->req_apply_redo &= ~cuda_dmask;
-	}
-	for (int k=0; k < GPUCACHE_STATE_HASH_NSLOTS; k++)
-	{
-		dlist_foreach(iter, &gpucache_shared_head->hash_slots[k])
+		kern_gpucache_master_state *gc_mstate = gcontext->gpucache_master_state;
+
+		for (int hindex=0; hindex < GPUCACHE_KDS_HASH_NSLOTS; hindex++)
 		{
-			GpuCacheSharedState *gc_sstate = dlist_container(GpuCacheSharedState,
-															 chain, iter.cur);
-			if ((gc_sstate->req_recovery & cuda_dmask) != 0)
+			kern_gpucache_data_store *curr = gc_mstate->hslots[hindex];
+			kern_gpucache_data_store **p_prev = &gc_mstate->hslots[hindex];
+
+			while (curr)
 			{
-				gpuCacheMaintenanceRecovery(gcontext, gc_sstate);
-				gc_sstate->req_recovery &= ~cuda_dmask;
-				if (gc_sstate->req_recovery == 0)
-					pg_atomic_write_u32(&gc_sstate->phase, GPUCACHE_PHASE__NOT_BUILT);
-			}
-			if ((gc_sstate->req_compaction & cuda_dmask) != 0)
-			{
-				gpuCacheMaintenanceCompaction(gcontext, gc_sstate);
-				gc_sstate->req_compaction &= ~cuda_dmask;
+				kern_gpucache_data_store *next = curr->next;
+				dlist_iter	iter;
+				CUresult	rc;
+
+				pthreadMutexLock(&gpucache_shared_head->hash_mutex);
+				dlist_foreach(iter, &gpucache_shared_head->hash_slots[hindex])
+				{
+					GpuCacheSharedState *gc_sstate = dlist_container(GpuCacheSharedState,
+																	 chain, iter.cur);
+					if (gc_sstate->database_oid == curr->database_oid &&
+						gc_sstate->table_oid    == curr->table_oid &&
+						gc_sstate->table_sig    == curr->table_sig)
+					{
+						if ((gc_sstate->req_compaction & gcontext->cuda_dmask) != 0)
+						{
+							if (pg_atomic_read_u32(&gc_sstate->phase) == GPUCACHE_PHASE__IS_READY)
+								gpuCacheMaintenanceCompaction(gcontext, gc_sstate, curr, p_prev);
+							gc_sstate->req_compaction &= ~gcontext->cuda_dmask;
+						}
+						if ((gc_sstate->req_recovery & gcontext->cuda_dmask) != 0)
+						{
+							if (pg_atomic_read_u32(&gc_sstate->phase) == GPUCACHE_PHASE__IS_CORRUPTED)
+								gpuCacheMaintenanceRecovery(gcontext, gc_sstate, curr, p_prev);
+							gc_sstate->req_recovery &= ~gcontext->cuda_dmask;
+						}
+						p_prev = &curr->next;
+						goto found;
+					}
+				}
+				/* drop GPU-Cache, if table is dropped or altered */
+				rc = cuMemFree((CUdeviceptr)curr);
+				if (rc != CUDA_SUCCESS)
+					__GC_LOG("failed on cuMemFree: %s", cuStrError(rc));
+				*p_prev = next;
+			found:
+				pthreadMutexUnlock(&gpucache_shared_head->hash_mutex);
+				curr = next;
 			}
 		}
 	}
-	pthreadMutexUnlock(&gpucache_shared_head->hash_mutex);
 	pthreadRWLockUnlock(&gcontext->gpucache_rwlock);
 }
 

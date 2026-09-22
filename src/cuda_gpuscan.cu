@@ -825,14 +825,12 @@ __apply_one_insert_log(kern_context *kcxt,
 	uint64_t	required = hitem_sz + sizeof(uint64_t);
 	uint64_t	consumed = __atomic_add_uint64(&kds_gc->consumed, required);
 
-	if (KDS_HEAD_LENGTH(&kds_gc->kds) +
-		sizeof(uint64_t) * kds_gc->kds.hash_nslots +
-		consumed + required > kds_gc->kds.length)
+	consumed += (KDS_HEAD_LENGTH(&kds_gc->kds) +
+				 sizeof(uint64_t) * kds_gc->kds.hash_nslots);
+	if (consumed + required > kds_gc->kds.length)
 	{
-		if (KDS_HEAD_LENGTH(&kds_gc->kds) +
-			sizeof(uint64_t) * kds_gc->kds.hash_nslots +
-			consumed <= kds_gc->kds.length)
-			STROM_ELOG(kcxt, "gpucache: out of kds buffer");
+		if (consumed <= kds_gc->kds.length)
+			SUSPEND_NO_SPACE(kcxt, "gpucache: out of kds buffer");
 		return false;	/* overflow */
 	}
 	else
@@ -869,6 +867,20 @@ gpucache_apply_insert_logs(kern_context *kcxt,
 		__apply_one_insert_log(kcxt, kds_gc, &log->tupitem);
 }
 
+#define __gpucache_update_delete_stats(a,b)
+#define __gpucache_update_commit_ins_stats(a,b)
+#define __gpucache_update_abort_ins_stats(a,b)
+#define __gpucache_update_abort_del_stats(a,b)
+INLINE_FUNCTION(void)
+__gpucache_update_commit_del_stats(kern_gpucache_data_store *kds_gcm,
+								   kern_hashitem *hitem)
+{
+	__atomic_add_uint32(&kds_gcm->dead_items_nums, 1);
+	__atomic_add_uint64(&kds_gcm->dead_items_sz,
+						sizeof(uint64_t) +		/* row-index */
+						offsetof(kern_hashitem, t) + hitem->t.t_len);
+}
+
 #define __GPUCACHE_APPLY_SIMPLE_LOGS_TEMPLATE(NAME,TYPE,FIELD,VALUE)	\
 	STATIC_FUNCTION(void)												\
 	gpucache_apply_##NAME##_logs(kern_context *kcxt,					\
@@ -898,6 +910,7 @@ gpucache_apply_insert_logs(kern_context *kcxt,
 			if (ItemPointerEquals(&xattrs->ctid, &log->ctid))			\
 			{															\
 				xattrs->FIELD = VALUE;									\
+				__gpucache_update_##NAME##_stats(kds_gc,hitem);			\
 			}															\
 		}																\
 	}
