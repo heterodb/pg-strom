@@ -366,6 +366,7 @@ typedef struct {
 	/* <-- 16kB --> */
 	kern_errorbuf	kerror;
 	size_t			length;
+	uint64_t		last_maintain_ts;
 	uint32_t		nitems;
 	uint32_t		usage;
 	uint32_t		log_items[1];
