@@ -1349,7 +1349,7 @@ kern_windowrank_finalize(kern_data_store *kds_final,
 			base_usage = __atomic_add_uint64(&kds_final->usage,  total_sz);
 		__syncthreads();
 		/* put tuples on the destination */
-		offset += base_usage + tupsz;
+		offset += base_usage;
 		if (tupsz > 0)
 		{
 			kern_tupitem   *__titem = (kern_tupitem *)
