@@ -295,7 +295,7 @@ setupParquetFileReferenced(const kern_data_store *kds_head,
 						   bool consider_cached_chunks,
 						   std::vector<void *> &parquet_cached_chunks,
 						   std::vector<int> &referenced,
-						   std::vector<int> &revmap)
+						   std::vector<int> &source_fields)
 {
 	for (int j=0; j < kds_head->ncols; j++)
 	{
@@ -308,13 +308,20 @@ setupParquetFileReferenced(const kern_data_store *kds_head,
 		if (field_index < manifest.schema_fields.size())
 		{
 			__setupParquetFileReferenced(manifest.schema_fields[field_index], referenced);
-			revmap.push_back(j);
 		}
 		else
 		{
 			__Elog("not compatible Schema: field index %d out of range [%ld]",
 				   field_index, manifest.schema_fields.size());
 		}
+	}
+	/* the source field to column index mapping */
+	{
+		auto	rv = manifest.GetFieldIndices(referenced);
+		if (!rv.ok())
+			__Elog("failed on parquet::arrow::SchemaManifest::.GetFieldIndices: %s",
+				   rv.status().ToString().c_str());
+		source_fields = std::move(rv).ValueOrDie();
 	}
 }
 
@@ -746,6 +753,43 @@ simple_buffer:
 }
 
 /*
+ * reuseArrowColumnBuffer
+ *
+ * It is corner case handling - when a particular physical arrow/parquet field is
+ * mapped on multiple PostgreSQL columns, and referenced together, we don't need
+ * to load the identical ColumnChunk twice. So, second or later references reuse
+ * the ColumnChunk already loaded by the first one.
+ */
+static void
+reuseArrowColumnBuffer(kern_data_store *kds,
+					   kern_colmeta *cmeta,
+					   const kern_colmeta *first)
+{
+	/* check physical type compatibility */
+	if (cmeta->attbyval != first->attbyval ||
+		cmeta->attalign != first->attalign ||
+		cmeta->attlen   != first->attlen   ||
+		cmeta->num_subattrs != first->num_subattrs ||
+		memcmp(&cmeta->attopts, &first->attopts, sizeof(ArrowTypeOptions)) != 0)
+	{
+		__Elog("not a compatible column maps same arrow/parquet field");
+	}
+
+	cmeta->nullmap_offset = first->nullmap_offset;
+	cmeta->nullmap_length = first->nullmap_length;
+	cmeta->values_offset  = first->values_offset;
+	cmeta->values_length  = first->values_length;
+	cmeta->extra_offset   = first->extra_offset;
+	cmeta->extra_length   = first->extra_length;
+	for (int k=0; k < cmeta->num_subattrs; k++)
+	{
+		reuseArrowColumnBuffer(kds,
+							   &kds->colmeta[cmeta->idx_subattrs + k],
+							   &kds->colmeta[first->idx_subattrs + k]);
+	}
+}
+
+/*
  * __parquetReadOneRowGroupFullyCached
  *
  * Fully cached version of RowGroup reader. It returns KDS buffer of GPU raw memory.
@@ -800,7 +844,7 @@ __parquetReadOneRowGroupFullyCached(const kern_data_store *kds_head,
 										m_offset,
 										p_npages_direct_read,
 										p_npages_vfs_read);
-			if (nbytes < 0)
+		if (nbytes < 0)
 			__Elog("failed on parquetCacheReadChunks");
 		kds_host->usage += nbytes;
 		(*p_ncaches_parquet_load)++;
@@ -820,7 +864,7 @@ __parquetReadOneRowGroupFullyCached(const kern_data_store *kds_head,
  */
 static kern_data_store *
 parquetReadArrowTableSimple(std::shared_ptr<arrow::Table> table,
-							std::vector<int> &revmap,
+							std::vector<int> &souce_fields,
 							const kern_data_store *kds_head,
 							const struct stat *pq_fstat,
 							void *(*malloc_cpu_callback)(void *malloc_private,
@@ -853,24 +897,44 @@ parquetReadArrowTableSimple(std::shared_ptr<arrow::Table> table,
 		__Elog("out of memory");
 	memcpy(kds, kds_head, kds_headsz);
 	kds->usage = ARROW_ALIGN(kds_headsz);
-	for (int j=0; j < table->num_columns(); j++)
+	for (int k=0; k < table->num_columns(); k++)
 	{
-		auto	carray = table->column(j);
-		auto	cmeta = &kds->colmeta[revmap[j]];
+		auto	carray = table->column(k);
+		auto	field_id = souce_fields[k];
+
 		/* number of items must be identical */
-		if (j == 0)
+		if (k == 0)
 			kds->nitems = carray->length();
 		else if (kds->nitems != carray->length())
 			__Elog("number of elements mismatch");
 		/* chunked-array must be single array */
 		assert(carray->num_chunks() <= 1);
 		if (carray->num_chunks() > 0)
-			fillupArrowColumnBuffer(kds, cmeta,
-									0UL,
-									carray->chunk(0),
-									pq_fstat);
-		/* ok, update stats */
-		(*p_nchunks_parquet_read)++;
+		{
+			const kern_colmeta *first = NULL;
+
+			for (int j=0; j < kds->ncols; j++)
+			{
+				auto	cmeta = &kds->colmeta[j];
+
+				if (cmeta->field_index != field_id)
+					continue;
+				if (!first)
+				{
+					fillupArrowColumnBuffer(kds, cmeta,
+											0UL,
+											carray->chunk(0),
+											pq_fstat);
+					first = cmeta;
+				}
+				else
+				{
+					reuseArrowColumnBuffer(kds, cmeta, first);
+				}
+			}
+			/* ok, update stats */
+			(*p_nchunks_parquet_read)++;
+		}
 	}
 	assert(kds->usage <= kds_length);
 	kds->format = KDS_FORMAT_ARROW;
@@ -881,7 +945,7 @@ parquetReadArrowTableSimple(std::shared_ptr<arrow::Table> table,
 
 static kern_data_store *
 parquetReadArrowTableWithCache(std::shared_ptr<arrow::Table> table,
-							   std::vector<int> &revmap,
+							   std::vector<int> &source_fields,
 							   const kern_data_store *kds_head,
 							   const struct stat *pq_fstat,
 							   std::vector<void *> &parquet_cached_chunks,
@@ -932,24 +996,44 @@ parquetReadArrowTableWithCache(std::shared_ptr<arrow::Table> table,
 		__Elog("out of memory");
 	/* buffer copy (arrow::Table --> GPU memory) */
 	kds_host->usage = ARROW_ALIGN(kds_headsz);
-	for (int j=0; j < table->num_columns(); j++)
+	for (int k=0; k < table->num_columns(); k++)
 	{
-		auto	carray = table->column(j);
-		auto	cmeta = &kds_host->colmeta[revmap[j]];
+		auto	carray = table->column(k);
+		auto	field_id = source_fields[k];
+
 		/* number of items must be identical */
-		if (j == 0)
+		if (k == 0)
 			kds_host->nitems = carray->length();
 		else if (kds_host->nitems != carray->length())
 			__Elog("number of elements mismatch");
 		/* chunked-array must be single array */
 		assert(carray->num_chunks() <= 1);
 		if (carray->num_chunks() > 0)
-			fillupArrowColumnBuffer(kds_host, cmeta,
-									m_segment + m_offset,
-									carray->chunk(0),
-									pq_fstat);
-		/* ok, update stats */
-        (*p_nchunks_parquet_read)++;
+		{
+			const kern_colmeta *first = NULL;
+
+			for (int j=0; j < kds_host->ncols; j++)
+			{
+				auto	cmeta = &kds_host->colmeta[j];
+
+				if (cmeta->field_index != field_id)
+					continue;
+				if (!first)
+				{
+					fillupArrowColumnBuffer(kds_host, cmeta,
+											m_segment + m_offset,
+											carray->chunk(0),
+											pq_fstat);
+					first = cmeta;
+				}
+				else
+				{
+					reuseArrowColumnBuffer(kds_host, cmeta, first);
+				}
+			}
+			/* ok, update stats */
+			(*p_nchunks_parquet_read)++;
+		}
 	}
 	/* buffer copy (Parquet Cache --> GPU memory) */
 	kds_host->usage = PAGE_ALIGN(kds_host->usage);
@@ -1050,14 +1134,14 @@ __parquetReadOneRowGroupNormal(std::shared_ptr<arrow::io::ReadableFile> parquet_
 	{
 		std::shared_ptr<arrow::Table> table;
 		std::vector<int>	referenced;
-		std::vector<int>	revmap;
+		std::vector<int>	source_fields;
 
 		setupParquetFileReferenced(kds_head,
 								   arrow_file_reader->manifest(),
 								   (malloc_gpu_callback != NULL),
 								   parquet_cached_chunks,
 								   referenced,
-								   revmap);
+								   source_fields);
 #if PARQUET_VERSION_MAJOR >= 24
 		{
 			auto	rv = arrow_file_reader->ReadRowGroup(row_group_id,
@@ -1101,7 +1185,7 @@ __parquetReadOneRowGroupNormal(std::shared_ptr<arrow::io::ReadableFile> parquet_
 		if (malloc_gpu_callback)
 		{
 			kds = parquetReadArrowTableWithCache(table,
-												 revmap,
+												 source_fields,
 												 kds_head,
 												 stat_buf,
 												 parquet_cached_chunks,
@@ -1115,7 +1199,7 @@ __parquetReadOneRowGroupNormal(std::shared_ptr<arrow::io::ReadableFile> parquet_
 		else
 		{
 			kds = parquetReadArrowTableSimple(table,
-											  revmap,
+											  source_fields,
 											  kds_head,
 											  stat_buf,
 											  malloc_cpu_callback,
