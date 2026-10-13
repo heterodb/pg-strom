@@ -632,7 +632,7 @@ gpuCacheSharedStateHashIndex(Oid database_oid,
 	hkey.database_oid = database_oid;
 	hkey.table_oid = table_oid;
 	hkey.table_sig = table_sig;
-	return hash_bytes((unsigned char *)&hkey, sizeof(hkey)) % GPUCACHE_KDS_HASH_NSLOTS;
+	return hash_bytes((unsigned char *)&hkey, sizeof(hkey)) % GPUCACHE_STATE_HASH_NSLOTS;
 }
 
 /*
