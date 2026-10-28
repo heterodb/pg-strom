@@ -2322,12 +2322,14 @@ gpuCacheReleaseMasterState(gpuContext *gcontext)
  * __gpuCacheMarkAsCorrupted
  */
 static kern_gpucache_data_store *
-__gpuCacheMarkAsCorrupted(kern_gpucache_data_store *curr, int hindex)
+__gpuCacheMarkAsCorrupted(kern_gpucache_data_store *curr)
 {
 	kern_gpucache_data_store *next = curr->next;
 	dlist_iter	iter;
 	CUresult	rc;
-
+	uint32_t	hindex = gpuCacheHashValue(curr->database_oid,
+										   curr->table_oid,
+										   curr->table_sig) % GPUCACHE_STATE_HASH_NSLOTS;
 	pthreadMutexLock(&gpucache_shared_head->hash_mutex);
 	dlist_foreach(iter, &gpucache_shared_head->hash_slots[hindex])
 	{
@@ -2475,7 +2477,7 @@ gpuCacheExecCompactionNoLock(gpuContext *gcontext)
 				else
 				{
 					/* failed on compaction */
-					kern_gpucache_data_store *next = __gpuCacheMarkAsCorrupted(curr, hindex);
+					kern_gpucache_data_store *next = __gpuCacheMarkAsCorrupted(curr);
 					if (prev)
 						prev->next = next;
 					else
@@ -2486,7 +2488,7 @@ gpuCacheExecCompactionNoLock(gpuContext *gcontext)
 			else if (consumed > curr->kds.length)
 			{
 				/* compaction does not make sense, corrupted */
-				kern_gpucache_data_store *next = __gpuCacheMarkAsCorrupted(curr, hindex);
+				kern_gpucache_data_store *next = __gpuCacheMarkAsCorrupted(curr);
 				if (prev)
 					prev->next = next;
 				else
