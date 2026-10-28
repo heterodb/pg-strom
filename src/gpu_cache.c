@@ -1459,8 +1459,9 @@ append_gpucache_info(StringInfo buf,
 				is_first = false;
 			}
 		}
+		appendStringInfo(buf, "]");
 	}
-	appendStringInfo(buf, "]}");
+	appendStringInfo(buf, "}");
 	if (p_total_virtual_sz)
 		*p_total_virtual_sz += total_virtual_sz;
 	if (p_total_physical_sz)
