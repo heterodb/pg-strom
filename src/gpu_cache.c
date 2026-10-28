@@ -616,12 +616,15 @@ gpuCacheTableSignatureInvalidation(Oid table_oid)
 }
 
 /*
- * gpuCacheSharedStateHashIndex
+ * gpuCacheHashValue
+ *   to be divided by GPUCACHE_STATE_HASH_NSLOTS for GpuCacheSharedState
+ *                 by GPUCACHE_STATE_HASH_NSLOTS for kern_gpucache_data_store
+ *
  */
 static uint32_t
-gpuCacheSharedStateHashIndex(Oid database_oid,
-							 Oid table_oid,
-							 uint32_t table_sig)
+gpuCacheHashValue(Oid database_oid,
+				  Oid table_oid,
+				  uint32_t table_sig)
 {
 	struct {
 		Oid			database_oid;
@@ -632,7 +635,7 @@ gpuCacheSharedStateHashIndex(Oid database_oid,
 	hkey.database_oid = database_oid;
 	hkey.table_oid = table_oid;
 	hkey.table_sig = table_sig;
-	return hash_bytes((unsigned char *)&hkey, sizeof(hkey)) % GPUCACHE_KDS_HASH_NSLOTS;
+	return hash_bytes((unsigned char *)&hkey, sizeof(hkey));
 }
 
 /*
@@ -647,9 +650,9 @@ getGpuCacheSharedState(Oid database_oid,
 {
 	GpuCacheSharedState *gc_sstate;
 	dlist_iter	iter;
-	uint32_t	hindex = gpuCacheSharedStateHashIndex(database_oid,
-													  table_oid,
-													  table_sig);
+	uint32_t	hindex = gpuCacheHashValue(database_oid,
+										   table_oid,
+										   table_sig) % GPUCACHE_STATE_HASH_NSLOTS;
 	pthreadMutexLock(&gpucache_shared_head->hash_mutex);
 	dlist_foreach(iter, &gpucache_shared_head->hash_slots[hindex])
 	{
@@ -2770,9 +2773,9 @@ gpuCacheProcessSetupCacheLog(gpuContext *gcontext, GpuCacheLogSetupCache *log)
 	memcpy(&kds_gc->kds, &log->kds_head, head_sz);
 
 	/* add to the gpucache master state */
-	hindex = gpuCacheSharedStateHashIndex(log->database_oid,
-										  log->table_oid,
-										  log->table_sig);
+	hindex = gpuCacheHashValue(log->database_oid,
+							   log->table_oid,
+							   log->table_sig) % GPUCACHE_KDS_HASH_NSLOTS;
 	pthreadRWLockWriteLock(&gcontext->gpucache_rwlock);
 	gc_mstate = gcontext->gpucache_master_state;
 	kds_gc->next = gc_mstate->hslots[hindex];
@@ -3003,9 +3006,9 @@ again:
 			gpuCacheFlushPendingLogs(gcontext, false);
 			goto again;
 		}
-		hindex = gpuCacheSharedStateHashIndex(database_oid,
-											  table_oid,
-											  table_sig);
+		hindex = gpuCacheHashValue(database_oid,
+								   table_oid,
+								   table_sig) % GPUCACHE_KDS_HASH_NSLOTS;
 		for (kds_gc = gc_mstate->hslots[hindex];
 			 kds_gc != NULL;
 			 kds_gc = kds_gc->next)
