@@ -6630,6 +6630,7 @@ gpuservBgWorkerMain(Datum arg)
 		elog(ERROR, "failed on cuInit: %s", cuStrError(rc));
 	/* Misc init */
 	srand48(time(NULL) ^ getpid());
+	arrowFdwStartMetadataPrefetch();
 	PG_TRY();
 	{
 		gpuserv_gpucontext_array = calloc(numGpuDevAttrs,
@@ -6686,6 +6687,7 @@ gpuservBgWorkerMain(Datum arg)
 	{
 		gpuserv_shared_state->gpuserv_ready_accept = false;
 		gpuservCloseServerSocket();
+		arrowFdwStopMetadataPrefetch();
 		while (!dlist_is_empty(&gpuserv_gpucontext_list))
 		{
 			dlist_node *dnode = dlist_pop_head_node(&gpuserv_gpucontext_list);
@@ -6701,6 +6703,7 @@ gpuservBgWorkerMain(Datum arg)
 	/* cleanup */
 	gpuserv_shared_state->gpuserv_ready_accept = false;
 	gpuservCloseServerSocket();
+	arrowFdwStopMetadataPrefetch();
 	while (!dlist_is_empty(&gpuserv_gpucontext_list))
 	{
 		dlist_node *dnode = dlist_pop_head_node(&gpuserv_gpucontext_list);

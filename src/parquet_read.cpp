@@ -184,12 +184,17 @@ __readParquetFileMetadata(std::shared_ptr<arrow::io::ReadableFile> filp, const c
 	return parquet::FileMetaData::Make(buffer->data(), &foot.metadata_len);
 }
 
+/*
+ * lookupParquetFileMetadata
+ */
 static std::shared_ptr<parquet::FileMetaData>
-lookupParquetFileMetadata(std::shared_ptr<arrow::io::ReadableFile> filp, const char *fname)
+__lookupParquetFileMetadata(std::shared_ptr<arrow::io::ReadableFile> filp,
+							const char *filename,
+							const struct stat *fstat_ptr,
+							const char *raw_metadata,
+							uint32_t raw_metadata_len)
 {
-	int			fdesc = filp->file_descriptor();
 	uint32_t	hash, hindex;
-	struct stat	stat_buf;
 	struct {
 		dev_t   st_dev;
 		ino_t   st_ino;
@@ -198,13 +203,14 @@ lookupParquetFileMetadata(std::shared_ptr<arrow::io::ReadableFile> filp, const c
 	parquetFileMetadataCache *pq_mcache;
 	std::shared_ptr<parquet::FileMetaData> metadata = nullptr;
 
+	/* sanity checks */
+	assert((filp == nullptr && raw_metadata != nullptr) ||
+		   (filp != nullptr && raw_metadata == nullptr));
 	/* hash value */
-	if (fstat(fdesc, &stat_buf) != 0)
-		__Elog("failed on fstat('%s'): %m", fname);
 	memset(&hkey, 0, sizeof(hkey));
-	hkey.st_dev  = stat_buf.st_dev;
-	hkey.st_ino  = stat_buf.st_ino;
-	hkey.st_mtim = stat_buf.st_mtim;
+	hkey.st_dev  = fstat_ptr->st_dev;
+	hkey.st_ino  = fstat_ptr->st_ino;
+	hkey.st_mtim = fstat_ptr->st_mtim;
 	hash = hash_bytes((unsigned char *)&hkey, sizeof(hkey));
 
 	/* lookup hash table */
@@ -214,10 +220,10 @@ again:
 	__dlist_foreach(pq_mcache, &parquet_file_metadata_hash[hindex])
 	{
 		if (pq_mcache->hash                     == hash &&
-			pq_mcache->stat_buf.st_dev          == stat_buf.st_dev &&
-			pq_mcache->stat_buf.st_ino          == stat_buf.st_ino &&
-			pq_mcache->stat_buf.st_mtim.tv_sec  == stat_buf.st_mtim.tv_sec &&
-			pq_mcache->stat_buf.st_mtim.tv_nsec == stat_buf.st_mtim.tv_nsec)
+			pq_mcache->stat_buf.st_dev          == hkey.st_dev &&
+			pq_mcache->stat_buf.st_ino          == hkey.st_ino &&
+			pq_mcache->stat_buf.st_mtim.tv_sec  == hkey.st_mtim.tv_sec &&
+			pq_mcache->stat_buf.st_mtim.tv_nsec == hkey.st_mtim.tv_nsec)
 		{
 			/* found */
 			__dlist_move_tail(&parquet_file_metadata_lru,
@@ -238,8 +244,8 @@ again:
 		assert(pq_mcache == NULL);
 		pq_mcache = new(parquetFileMetadataCache);
 		pq_mcache->hash = hash;
-		pq_mcache->filename = std::string(fname);
-		memcpy(&pq_mcache->stat_buf, &stat_buf, sizeof(struct stat));
+		pq_mcache->filename = std::string(filename);
+		memcpy(&pq_mcache->stat_buf, fstat_ptr, sizeof(struct stat));
 		pq_mcache->metadata_status = 0;		/* still building */
 		pq_mcache->metadata = nullptr;
 		__dlist_push_tail(&parquet_file_metadata_hash[hindex], &pq_mcache->hash_chain);
@@ -255,7 +261,10 @@ again:
 	__parquetFileMetadataMutexUnlock();
 	/* read parquet file metadata */
 	try {
-		metadata = __readParquetFileMetadata(filp, fname);
+		if (!raw_metadata)
+			metadata = __readParquetFileMetadata(filp, filename);
+		else
+			metadata = parquet::FileMetaData::Make(raw_metadata, &raw_metadata_len);
 	}
 	catch(const std::exception &e) {
 		__parquetFileMetadataMutexLock();
@@ -274,6 +283,26 @@ again:
 	__parquetFileMetadataMutexUnlock();
 	__parquetFileMetadataMutexNotify();
 	return metadata;
+}
+
+static std::shared_ptr<parquet::FileMetaData>
+lookupParquetFileMetadata(std::shared_ptr<arrow::io::ReadableFile> filp, const char *filename)
+{
+	struct stat	stat_buf;
+
+	if (fstat(filp->file_descriptor(), &stat_buf) != 0)
+		__Elog("failed on fstat('%s'): %m", filename);
+	return __lookupParquetFileMetadata(filp, filename, &stat_buf, nullptr, 0UL);
+}
+
+void
+prefetchParquetFileMetadata(const arrowFdwRawMetadata *rawmeta)
+{
+	(void)__lookupParquetFileMetadata(nullptr,
+									  rawmeta->filename,
+									  &rawmeta->fstat_buf,
+									  rawmeta->filename + rawmeta->metadata_offset,
+									  rawmeta->metadata_length);
 }
 
 /*

@@ -81,6 +81,10 @@ parquetReadOneRowGroup(const char *filename,
 					   size_t error_message_sz);
 __EXTERN void
 releaseParquetCacheWriteAsyncData(parquetCacheWriteAsyncData *data);
+__EXTERN void
+parquetReadRawMetadataWorkerStart(void);
+__EXTERN void
+parquetReadRawMetadataWorkerStop(void);
 
 /*
  * parquet_cache.c
@@ -106,5 +110,22 @@ parquetCacheWriteAsync(parquetCacheWriteAsyncData *data);
 
 __EXTERN bool		pgstrom_parquet_cache_enabled(void);
 __EXTERN void		pgstrom_init_parquet_cache(void);
+
+/*
+ * arrow_fdw.c
+ */
+#define RAW_METADATA_MSG_MAGIC		0xD7A39E52C86BF105UL
+typedef struct
+{
+	uint64_t		magic;			/* must be RAW_METADATA_MSG_MAGIC */
+	uint32_t		length;			/* total length includes head/tail magic */
+	ArrowMetadataVersion metadata_version;
+	uint32_t		metadata_offset;
+	uint32_t		metadata_length;
+	struct stat		fstat_buf;
+	char			filename[1]		__MAXALIGNED__;
+} arrowFdwRawMetadata;
+__EXTERN void		prefetchParquetFileMetadata(const arrowFdwRawMetadata *rawmeta);
+
 #undef __EXTERN
 #endif	/* _ARROW_FDW_H_ */

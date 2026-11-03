@@ -238,6 +238,11 @@ typedef struct
 	dlist_head	lru_list;
 	dlist_head	free_blocks;	/* list of arrowMetadataCacheBlock */
 	dlist_head	hash_slots[ARROW_METADATA_HASH_NSLOTS];
+	/* metadata prefetch */
+	pg_atomic_uint32 metadata_prefetch_is_ready;
+	pthread_mutex_t metadata_prefetch_mutex;
+	uint32_t	metadata_prefetch_count;
+	size_t		metadata_prefetch_length;
 	/* statistics */
 	size_t		total_cache_usage;
 	uint32_t	num_active_blocks;
@@ -258,6 +263,7 @@ static bool			arrow_fdw_stats_hint_enabled;	/* GUC */
 int					arrow_metadata_cache_size_kb;	/* GUC */
 static int			parquet_parallel_read_threshold;/* GUC */
 static bool			default_parquet_cache_enabled;	/* GUC */
+static int			arrow_fdw_metadata_prefetch_nworkers; /* GUC */
 
 /* ----------------------------------------------------------------
  *
@@ -1832,7 +1838,6 @@ execEndArrowStatsHint(arrowStatsHint *stats_hint)
 	FreeExprContext(econtext, true);
 }
 
-
 /* ----------------------------------------------------------------
  *
  * BuildArrowFileState
@@ -2486,6 +2491,223 @@ __buildRecordBatchStateOne(ArrowSchema *schema,
 }
 
 /*
+ * arrowFdwXXXXMetadataPrefetch - Arrow/Parquet metadata prefetcher
+ *
+ * When parsing a Parquet file with libparquet, it is useful to have its
+ * metadata available in advance as a std::shared_ptr<parquet::FileMetaData>.
+ * However, this is a C++ object and cannot be stored in shared memory.
+ *
+ * Loading Parquet metadata involves two steps: (1) reading the file footer
+ * and (2) converting the raw metadata into a C++ object. Both take a
+ * significant amount of time, so caching only the raw metadata in shared
+ * memory addresses only part of the problem.
+ *
+ * Therefore, when arrow_fdw loads metadata from a Parquet file, it retains
+ * the raw metadata and sends it to the GPU-Service process through a pipe,
+ * rather than discarding it. The GPU-Service process then converts the raw
+ * metadata into a process-local std::shared_ptr<parquet::FileMetaData>,
+ * making it available for subsequent use.
+ */
+static int			metadata_prefetch_pipefd[2] = {-1, -1};	/* for metadata prefetch */
+static pthread_t   *metadata_prefetch_workers = NULL;
+
+static void
+arrowFdwInitMetadataPrefetch(void)
+{
+	if (arrow_fdw_metadata_prefetch_nworkers > 0)
+	{
+		metadata_prefetch_workers = calloc(arrow_fdw_metadata_prefetch_nworkers,
+										   sizeof(pthread_t));
+		if (pipe(metadata_prefetch_pipefd) != 0)
+			elog(ERROR, "failed on pipe(2): %m");
+	}
+}
+
+static void
+arrowFdwSendMetadataPrefetch(const ArrowFileInfo *af_info)
+{
+	arrowFdwRawMetadata *rawmeta;
+	size_t		filename_len;
+	size_t		remained;
+	const char *buffer;
+
+	if (metadata_prefetch_pipefd[1] < 0 ||
+		pg_atomic_read_u32(&arrow_metadata_cache->metadata_prefetch_is_ready) == 0)
+		return;		/* no need to send the raw-metadata to GPU-service */
+	filename_len = MAXALIGN(strlen(af_info->filename) + 1);
+	remained = offsetof(arrowFdwRawMetadata, filename) + filename_len;
+	rawmeta = alloca(remained);
+	rawmeta->magic  = RAW_METADATA_MSG_MAGIC;
+	rawmeta->length = remained + MAXALIGN(af_info->raw_footer_sz);
+	rawmeta->metadata_version = af_info->footer.version;
+	rawmeta->metadata_offset  = filename_len;
+	rawmeta->metadata_length  = af_info->raw_footer_sz;
+	memcpy(&rawmeta->fstat_buf, &af_info->stat_buf, sizeof(struct stat));
+	strcpy(rawmeta->filename, af_info->filename);
+
+	pthreadMutexLock(&arrow_metadata_cache->metadata_prefetch_mutex);
+	buffer = (char *)rawmeta;
+	for (int loop=0; loop < 2; loop++)
+	{
+		ssize_t	nbytes;
+
+		while (remained > 0)
+		{
+			if (pg_atomic_read_u32(&arrow_metadata_cache->metadata_prefetch_is_ready) == 0)
+				goto bailout;
+			nbytes = write(metadata_prefetch_pipefd[1], buffer, remained);
+			if (nbytes > 0)
+			{
+				assert(nbytes <= remained);
+				buffer += nbytes;
+				remained -= nbytes;
+			}
+			else if (nbytes == 0 || errno != EINTR)
+			{
+				/* currently pipe is broken */
+				pg_atomic_write_u32(&arrow_metadata_cache->metadata_prefetch_is_ready, 0);
+				goto bailout;
+			}
+		}
+		buffer = af_info->raw_footer;
+		remained = MAXALIGN(af_info->raw_footer_sz);
+	}
+bailout:
+	pthreadMutexUnlock(&arrow_metadata_cache->metadata_prefetch_mutex);
+}
+
+static arrowFdwRawMetadata *
+arrowFdwRecvMetadataPrefetch(bool *p_terminated)
+{
+	/* must be called from GPU-Service bgworker process */
+	static pthread_mutex_t	recv_mutex = PTHREAD_MUTEX_INITIALIZER;
+	arrowFdwRawMetadata *rawmeta = NULL;
+	arrowFdwRawMetadata	__rawmetaData;
+	size_t		remained;
+	char	   *buffer;
+	bool		terminated = true;
+
+	/* not opened? */
+	if (metadata_prefetch_pipefd[0] < 0)
+		return NULL;
+
+	pthreadMutexLock(&recv_mutex);
+	remained = offsetof(arrowFdwRawMetadata, filename);
+	buffer = (char *)&__rawmetaData;
+restart:
+	while (remained > 0)
+	{
+		struct pollfd pfd;
+		ssize_t		nbytes;
+		int			status;
+
+		if (pg_atomic_read_u32(&arrow_metadata_cache->metadata_prefetch_is_ready) == 0)
+			goto bailout;
+		/* check readable data */
+		pfd.fd = metadata_prefetch_pipefd[0];
+		pfd.events = POLLIN | POLLERR;
+		pfd.revents = 0;
+		status = poll(&pfd, 1, 4000);
+		if (status < 0)
+		{
+			if (errno != EINTR)
+				goto bailout;
+		}
+		else if (status > 0)
+		{
+			if (pg_atomic_read_u32(&arrow_metadata_cache->metadata_prefetch_is_ready) == 0)
+				goto bailout;
+			nbytes = read(metadata_prefetch_pipefd[0], buffer, remained);
+			if (nbytes > 0)
+			{
+				assert(nbytes <= remained);
+				buffer += nbytes;
+				remained -= nbytes;
+			}
+			else if (nbytes == 0 || errno != EINTR)
+				goto bailout;
+		}
+	}
+	/* move to the bottom half */
+	if (!rawmeta)
+	{
+		assert(__rawmetaData.magic == RAW_METADATA_MSG_MAGIC);
+		assert(offsetof(arrowFdwRawMetadata, filename)
+			   + __rawmetaData.metadata_offset
+			   + __rawmetaData.metadata_length <= __rawmetaData.length);
+		rawmeta = (arrowFdwRawMetadata *)malloc(__rawmetaData.length);
+		if (!rawmeta)
+			goto bailout;
+		memcpy(rawmeta, &__rawmetaData,
+			   offsetof(arrowFdwRawMetadata, filename));
+		buffer = rawmeta->filename;
+		remained = rawmeta->length - offsetof(arrowFdwRawMetadata, filename);
+		goto restart;
+	}
+	terminated = false;
+bailout:
+	if (terminated)
+	{
+		if (rawmeta)
+			free(rawmeta);
+		rawmeta = NULL;
+	}
+	pthreadMutexUnlock(&recv_mutex);
+	*p_terminated = terminated;
+	return rawmeta;
+}
+
+static void *
+__arrowFdwMetadataPrefetchWorker(void *__data)
+{
+	bool	terminated;
+
+	do {
+		arrowFdwRawMetadata *rawmeta
+			= arrowFdwRecvMetadataPrefetch(&terminated);
+		if (rawmeta)
+		{
+			prefetchParquetFileMetadata(rawmeta);
+			free(rawmeta);
+		}
+	} while (!terminated);
+
+	return NULL;
+}
+
+void
+arrowFdwStartMetadataPrefetch(void)
+{
+	int		worker_count = 0;
+
+	if (arrow_metadata_cache)
+	{
+		pg_atomic_write_u32(&arrow_metadata_cache->metadata_prefetch_is_ready, 1);
+		for (int i=0; i < arrow_fdw_metadata_prefetch_nworkers; i++)
+		{
+			if ((errno = pthread_create(&metadata_prefetch_workers[i],
+										NULL,
+										__arrowFdwMetadataPrefetchWorker,
+										NULL)) == 0)
+				worker_count++;
+			else
+				metadata_prefetch_workers[i] = pthread_self();
+		}
+	}
+}
+
+void
+arrowFdwStopMetadataPrefetch(void)
+{
+	uint64_t	zero = 0;
+
+	if (arrow_metadata_cache)
+		pg_atomic_write_u32(&arrow_metadata_cache->metadata_prefetch_is_ready, 0);
+	if (metadata_prefetch_pipefd[1] >= 0)
+		write(metadata_prefetch_pipefd[1], &zero, sizeof(uint64_t));
+}
+
+/*
  * readArrowFile
  */
 static bool
@@ -2504,6 +2726,11 @@ readArrowFile(const char *filename, ArrowFileInfo *af_info, bool missing_ok)
 	if (af_info->dictionaries != NULL)
 		elog(ERROR, "DictionaryBatch is not supported at '%s'", filename);
 	Assert(af_info->footer._num_dictionaries == 0);
+	/* prefetch parquet metadata */
+	if (af_info->footer.version == ArrowMetadataVersion__Parquet_V2_6 ||
+		af_info->footer.version == ArrowMetadataVersion__Parquet_V2_4 ||
+		af_info->footer.version == ArrowMetadataVersion__Parquet_V1_0)
+		arrowFdwSendMetadataPrefetch(af_info);
 	return true;
 }
 
@@ -6851,6 +7078,8 @@ pgstrom_arrow_fdw_metadata_stats(PG_FUNCTION_ARGS)
 	uint32_t	num_total_blocks;
     uint32_t	num_active_blocks;
     uint32_t	num_file_entries;
+	uint32_t	metadata_prefetch_count;
+	size_t		metadata_prefetch_length;
     struct timeval tm_last_allocate;
     struct timeval tm_last_reclaimed;
 	struct tm *tm;
@@ -6870,6 +7099,8 @@ pgstrom_arrow_fdw_metadata_stats(PG_FUNCTION_ARGS)
 	memcpy(&tm_last_reclaimed,
 		   &arrow_metadata_cache->tm_last_reclaimed,
 		   sizeof(struct timeval));
+	metadata_prefetch_count = arrow_metadata_cache->metadata_prefetch_count;
+	metadata_prefetch_length = arrow_metadata_cache->metadata_prefetch_length;
 	LWLockRelease(&arrow_metadata_cache->mutex);
 	/* build the result JSON */
 	initStringInfo(&buf);
@@ -6901,7 +7132,7 @@ pgstrom_arrow_fdw_metadata_stats(PG_FUNCTION_ARGS)
 	{
 		tm = localtime(&tm_last_allocate.tv_sec);
 		appendStringInfo(&buf,
-						 " \"last_allocate_timestamp\""
+						 ", \"last_allocate_timestamp\""
 						 " : \"%04d-%02d-%02d %02d:%02d:%02d.%03d\"",
 						 tm->tm_year+1900,
 						 tm->tm_mon+1,
@@ -6915,7 +7146,7 @@ pgstrom_arrow_fdw_metadata_stats(PG_FUNCTION_ARGS)
 	{
 		tm = localtime(&tm_last_reclaimed.tv_sec);
 		appendStringInfo(&buf,
-						 " \"last_reclaim_timestamp\""
+						 ", \"last_reclaim_timestamp\""
 						 " : \"%04d-%02d-%02d %02d:%02d:%02d.%03d\"",
 						 tm->tm_year+1900,
 						 tm->tm_mon+1,
@@ -6924,6 +7155,16 @@ pgstrom_arrow_fdw_metadata_stats(PG_FUNCTION_ARGS)
 						 tm->tm_min,
 						 tm->tm_sec,
 						 (int)(tm_last_allocate.tv_usec / 1000));
+	}
+	if (arrow_fdw_metadata_prefetch_nworkers > 0)
+	{
+		appendStringInfo(&buf,
+						 ", \"metadata_prefetch_nworkers\" : %u"
+						 ", \"metadata_prefetch_count\" : %u"
+						 ", \"metadata_prefetch_length\" : %lu",
+						 arrow_fdw_metadata_prefetch_nworkers,
+						 metadata_prefetch_count,
+						 metadata_prefetch_length);
 	}
 	appendStringInfo(&buf, " }");
 	SET_VARSIZE(buf.data, buf.len);
@@ -6971,6 +7212,9 @@ pgstrom_startup_arrow_fdw(void)
 	dlist_init(&arrow_metadata_cache->free_blocks);
 	for (int i=0; i < ARROW_METADATA_HASH_NSLOTS; i++)
 		dlist_init(&arrow_metadata_cache->hash_slots[i]);
+	pg_atomic_init_u32(&arrow_metadata_cache->metadata_prefetch_is_ready, 0);
+	pthreadMutexInitShared(&arrow_metadata_cache->metadata_prefetch_mutex);
+
 	/* arrowMetadataCacheBlock allocation  */
 	sz = TYPEALIGN(ARROW_METADATA_BLOCKSZ,
 				   (size_t)arrow_metadata_cache_size_kb << 10);
@@ -7054,6 +7298,16 @@ pgstrom_init_arrow_fdw(void)
 							PGC_POSTMASTER,
 							GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
 							NULL, NULL, NULL);
+	DefineCustomIntVariable("arrow_fdw.metadata_prefetch_nworkers",
+							"number of worker threads for arrow/parquet metadata prefetch",
+							NULL,
+							&arrow_fdw_metadata_prefetch_nworkers,
+							4,
+							0,		/* 0 means disable */
+							100,
+							PGC_POSTMASTER,
+                            GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
+                            NULL, NULL, NULL);
 	/*
 	 * Threshold of using threadpool for parquet read
 	 */
@@ -7083,8 +7337,6 @@ pgstrom_init_arrow_fdw(void)
 	shmem_request_hook = pgstrom_request_arrow_fdw;
 	shmem_startup_next = shmem_startup_hook;
 	shmem_startup_hook = pgstrom_startup_arrow_fdw;
+	/* init arrow/parquet metadata prefetch */
+	arrowFdwInitMetadataPrefetch();
 }
-
-
-
-

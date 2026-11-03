@@ -125,6 +125,21 @@ static inline char *__pstrdup(const flatbuffers::String *str)
 	result[sz] = '\0';
 	return result;
 }
+static inline void *__pmemdup(const void *ptr, size_t sz)
+{
+	size_t	__sz = MAXALIGN(sz);
+	char   *copy = (char *)__palloc(__sz);
+
+	memcpy(copy, ptr, sz);
+	if (sz != __sz)
+	{
+		int		diff = (__sz - sz);
+
+		memset(copy + sz, 0, diff);
+	}
+	return copy;
+}
+
 // ============================================================
 //
 // Routines to dump Apache Arrow nodes in JSON string
@@ -2791,8 +2806,9 @@ __readArrowFileMetadata(std::shared_ptr<arrow::io::ReadableFile> rfilp,
 		auto	footer = org::apache::arrow::flatbuf::GetFooter(buffer->data());
 
 		/* extract Footer */
+		af_info->raw_footer = (const char *)__pmemdup(buffer->data(), buffer->size());
+		af_info->raw_footer_sz = buffer->size();
 		readArrowFooter(&af_info->footer, footer);
-
 		/* extract DictionaryBatch message*/
 		auto	__dictionaries = footer->dictionaries();
 		if (__dictionaries && __dictionaries->size() > 0)
@@ -3466,7 +3482,8 @@ __readParquetRowGroupMetadata(ArrowMessage *rbatch_message,
  */
 static std::shared_ptr<parquet::FileMetaData>
 __readParquetFileRawMetadata(std::shared_ptr<arrow::io::ReadableFile> rfilp,
-							 parquet::arrow::SchemaManifest *manifest)
+							 parquet::arrow::SchemaManifest *manifest,
+							 ArrowFileInfo *af_info)
 {
 	struct {
 		uint32_t	metadata_len;
@@ -3503,6 +3520,10 @@ __readParquetFileRawMetadata(std::shared_ptr<arrow::io::ReadableFile> rfilp,
 			Elog("failed on arrow::io::ReadableFile::ReadAt: %s",
 				 rv.status().ToString().c_str());
 		buffer = rv.ValueOrDie();
+
+		/* save the raw footer */
+		af_info->raw_footer = (const char *)__pmemdup(buffer->data(), buffer->size());
+		af_info->raw_footer_sz = buffer->size();
 	}
 	auto	metadata = parquet::FileMetaData::Make(buffer->data(), &foot.metadata_len);
 	/* also, setup SchemaManifest */
@@ -3530,7 +3551,7 @@ __readParquetFileMetadata(std::shared_ptr<arrow::io::ReadableFile> rfilp,
 {
 	ArrowFooter *footer = &af_info->footer;
 	parquet::arrow::SchemaManifest manifest;
-	auto		metadata = __readParquetFileRawMetadata(rfilp, &manifest);
+	auto		metadata = __readParquetFileRawMetadata(rfilp, &manifest, af_info);
 
 	INIT_ARROW_NODE(footer, Footer);
 	/* Parquet file version */

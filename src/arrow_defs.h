@@ -888,6 +888,8 @@ typedef struct
 {
 	const char	   *filename;
 	struct stat		stat_buf;
+	const char	   *raw_footer;
+	size_t			raw_footer_sz;
 	ArrowFooter		footer;
 	ArrowMessage   *dictionaries;	/* array of ArrowDictionaryBatch */
 	int				_num_dictionaries;

@@ -1038,6 +1038,8 @@ extern gpumask_t GetOptimalGpusForArrowFdw(PlannerInfo *root,
 extern Cost		disk_cost_arrow_fdw(PlannerInfo *root,
 									RelOptInfo *base_rel,
 									double *p_setup_cost);
+extern void		arrowFdwStartMetadataPrefetch(void);
+extern void		arrowFdwStopMetadataPrefetch(void);
 extern void		pgstromArrowFdwExecInit(pgstromTaskState *pts,
 										pgstromTaskScanState *ptss,
 										List *outer_quals,
