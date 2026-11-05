@@ -2254,30 +2254,34 @@ pgstromSharedStateShutdownDSM(CustomScanState *node)
 	 */
 	if (!ps_state)
 		return;
-	/* make a local duplication */
-	loc_addr =  MemoryContextAlloc(estate->es_query_cxt, ps_state->ss_length);
-	memcpy(loc_addr, ps_state, ps_state->ss_length);
-	/* replace dsm pointers by local duplication */
-	pts->ps_state = (pgstromSharedState *)loc_addr;
-	loc_addr += MAXALIGN(sizeof(pgstromSharedScanState));
-	for (int k=0; k < pts->num_scan_rels; k++)
+	/* make a local duplication, if pgstromSharedState is on DSM segment */
+	if (ps_state->ss_handle != DSM_HANDLE_INVALID)
 	{
-		pgstromTaskScanState *ptss = &pts->scan_rels[k];
+		loc_addr =  MemoryContextAlloc(estate->es_query_cxt, ps_state->ss_length);
+		memcpy(loc_addr, ps_state, ps_state->ss_length);
+		/* replace dsm pointers by local duplication */
+		pts->ps_state = (pgstromSharedState *)loc_addr;
+		pts->ps_state->ss_handle = DSM_HANDLE_INVALID;
+		loc_addr += MAXALIGN(sizeof(pgstromSharedState));
+		for (int k=0; k < pts->num_scan_rels; k++)
+		{
+			pgstromTaskScanState *ptss = &pts->scan_rels[k];
 
-		ptss->dsm = (pgstromSharedScanState *)loc_addr;
-		if (ptss->arrow_state)
-			loc_addr += pgstromArrowFdwShutdownDSM(ptss->arrow_state);
-		else if (ptss->brin_state)
-			loc_addr += pgstromBrinIndexShutdownDSM(ptss->brin_state);
-		else
-			loc_addr += MAXALIGN(sizeof(pgstromSharedScanState));
-	}
-	for (int k=0; k < pts->num_inner_rels; k++)
-	{
-		pgstromTaskInnerState *ptis = &pts->inners[k];
+			ptss->dsm = (pgstromSharedScanState *)loc_addr;
+			if (ptss->arrow_state)
+				loc_addr += pgstromArrowFdwShutdownDSM(ptss->arrow_state);
+			else if (ptss->brin_state)
+				loc_addr += pgstromBrinIndexShutdownDSM(ptss->brin_state);
+			else
+				loc_addr += MAXALIGN(sizeof(pgstromSharedScanState));
+		}
+		for (int k=0; k < pts->num_inner_rels; k++)
+		{
+			pgstromTaskInnerState *ptis = &pts->inners[k];
 
-		ptis->dsm = (pgstromSharedInnerState *)loc_addr;
-		loc_addr += MAXALIGN(sizeof(pgstromSharedInnerState));
+			ptis->dsm = (pgstromSharedInnerState *)loc_addr;
+			loc_addr += MAXALIGN(sizeof(pgstromSharedInnerState));
+		}
 	}
 	/*
 	 * SELECT-INTO Direct mode needs to update processed tuples
@@ -2290,9 +2294,9 @@ pgstromSharedStateShutdownDSM(CustomScanState *node)
 		if (OidIsValid(pp_info->select_into_relid))
 		{
 			if ((pts->xpu_task_flags & DEVTASK__MERGE_FINAL_BUFFER) != 0)
-				n_processed = pg_atomic_read_u64(&ps_state->final_nitems);
+				n_processed = pg_atomic_exchange_u64(&ps_state->final_nitems, 0);
 			else
-				n_processed = pg_atomic_read_u64(&ps_state->result_ntuples);
+				n_processed = pg_atomic_exchange_u64(&ps_state->result_ntuples, 0);
 			pts->css.ss.ps.state->es_processed += n_processed;
 		}
 	}

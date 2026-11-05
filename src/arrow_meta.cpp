@@ -51,6 +51,7 @@ extern "C" {
 #else
 #define Max(a,b)		((a) > (b) ? (a) : (b))
 #define Min(a,b)		((a) < (b) ? (a) : (b))
+#define MAXALIGN(sz)	((sz + sizeof(uint64_t)-1) & ~(sizeof(uint64_t)-1))
 #endif
 #define Elog(fmt,...)								\
 	do {											\
