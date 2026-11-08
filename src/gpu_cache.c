@@ -1308,7 +1308,7 @@ PG_FUNCTION_INFO_V1(pgstrom_gpucache_apply_redo);
 PUBLIC_FUNCTION(Datum)
 pgstrom_gpucache_apply_redo(PG_FUNCTION_ARGS)
 {
-	pg_atomic_fetch_and_u32(&gpucache_shared_head->maintenance, 1);
+	pg_atomic_fetch_add_u32(&gpucache_shared_head->maintenance, 1);
 
 	PG_RETURN_VOID();
 }
@@ -2583,9 +2583,12 @@ gpuCacheMaintenanceHandler(gpuContext *gcontext)
 			kern_gpucache_data_store *next = curr->next;
 			dlist_iter	iter;
 			CUresult	rc;
+			uint32_t	sindex = gpuCacheHashValue(curr->database_oid,
+												   curr->table_oid,
+												   curr->table_sig) % GPUCACHE_STATE_HASH_NSLOTS;
 
 			pthreadMutexLock(&gpucache_shared_head->hash_mutex);
-			dlist_foreach(iter, &gpucache_shared_head->hash_slots[hindex])
+			dlist_foreach(iter, &gpucache_shared_head->hash_slots[sindex])
 			{
 				GpuCacheSharedState *gc_sstate = dlist_container(GpuCacheSharedState,
 																 chain, iter.cur);
