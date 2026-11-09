@@ -2507,7 +2507,7 @@ gpuCacheExecCompactionNoLock(gpuContext *gcontext)
  *
  * NOTE: caller must hold exclusive lock
  */
-static void
+static kern_gpucache_data_store *
 __gpuCacheMaintenanceCompaction(gpuContext *gcontext,
 								GpuCacheSharedState *gc_sstate,
 								kern_gpucache_data_store *curr,
@@ -2524,14 +2524,16 @@ __gpuCacheMaintenanceCompaction(gpuContext *gcontext,
 	{
 		/* success */
 		assert(comp->next == next);
+		*p_prev = comp;
 	}
 	else
 	{
 		/* failed, so buffer is released */
 		pg_atomic_write_u32(&gc_sstate->phase,
 							GPUCACHE_PHASE__IS_CORRUPTED);
+		*p_prev = next;
 	}
-	*p_prev = next;
+	return comp;
 }
 
 /*
@@ -2599,11 +2601,14 @@ gpuCacheMaintenanceHandler(gpuContext *gcontext)
 					if ((gc_sstate->req_compaction & gcontext->cuda_dmask) != 0)
 					{
 						if (pg_atomic_read_u32(&gc_sstate->phase) == GPUCACHE_PHASE__IS_READY)
-							__gpuCacheMaintenanceCompaction(gcontext, gc_sstate, curr, p_prev);
+							curr = __gpuCacheMaintenanceCompaction(gcontext,
+																   gc_sstate,
+																   curr, p_prev);
 						gc_sstate->req_compaction &= ~gcontext->cuda_dmask;
 					}
 					/* ok, found */
-					__gpuCacheMaintenanceStatsUpdate(gcontext, gc_sstate, curr);
+					if (curr)
+						__gpuCacheMaintenanceStatsUpdate(gcontext, gc_sstate, curr);
 					p_prev = &curr->next;
 					goto found;
 				}
