@@ -81,9 +81,9 @@ struct GpuCacheDesc
 	bool		drop_on_rollback;
 	bool		drop_on_commit;
 	uint32_t	nitems;
-	StringInfoData buf;	/* array of PendingCtidItem */
+	StringInfoData buf;		/* array of PendingCtidItem */
 	int			nr_gpus;
-	int			pindex[1];
+	int			cuda_dindex[1];	/* reverse map pindex -> GPU device id */
 };
 
 typedef struct
@@ -257,11 +257,11 @@ __parseSyncTriggerOptions(int elevel,
  * gpuCacheSendTxLog
  */
 static void
-__gpuCacheSendTxLogOne(GpuCacheDesc *gc_desc, int pindex,
+__gpuCacheSendTxLogOne(GpuCacheDesc *gc_desc, int cuda_dindex,
 					   const GpuCacheLogCommon *gc_log)
 {
-	pthread_mutex_t *mutex = &gpucache_shared_head->gpus[pindex].pipe_mutex;
-	int			fdesc = gpucache_pipe_write_fdesc[pindex];
+	pthread_mutex_t *mutex = &gpucache_shared_head->gpus[cuda_dindex].pipe_mutex;
+	int			fdesc = gpucache_pipe_write_fdesc[cuda_dindex];
 	const char *buf = (const char *)gc_log;
 	size_t		len = gc_log->length;
 	size_t		off = 0;
@@ -293,12 +293,12 @@ gpuCacheSendTxLog(GpuCacheDesc *gc_desc, int pindex,
 	{
 		/* broadcast */
 		for (int i=0; i < gc_desc->nr_gpus; i++)
-			__gpuCacheSendTxLogOne(gc_desc, gc_desc->pindex[i], gc_log);
+			__gpuCacheSendTxLogOne(gc_desc, gc_desc->cuda_dindex[i], gc_log);
 	}
 	else
 	{
 		assert(pindex < gc_desc->nr_gpus);
-		__gpuCacheSendTxLogOne(gc_desc, pindex, gc_log);
+		__gpuCacheSendTxLogOne(gc_desc, gc_desc->cuda_dindex[pindex], gc_log);
 	}
 }
 
@@ -716,7 +716,7 @@ lookupGpuCacheDescRaw(Oid table_oid,
 
 		memset(&hctl, 0, sizeof(hctl));
 		hctl.keysize = offsetof(GpuCacheDesc, xid) + sizeof(TransactionId);
-		hctl.entrysize = offsetof(GpuCacheDesc, pindex[numGpuDevAttrs]);
+		hctl.entrysize = offsetof(GpuCacheDesc, cuda_dindex[numGpuDevAttrs]);
 		hctl.hcxt = CacheMemoryContext;
 		gpucache_table_desc_htab = hash_create("GPU-Cache Descriptor",
 											   128,
@@ -746,7 +746,7 @@ lookupGpuCacheDescRaw(Oid table_oid,
 		for (int i=0, k=0; i < numGpuDevAttrs; i++)
 		{
 			if ((gpumask & (1UL<<i)) != 0)
-				entry->pindex[k++] = i;
+				entry->cuda_dindex[k++] = i;
 			assert(k <= entry->nr_gpus);
 		}
 		entry->gc_sstate = getGpuCacheSharedState(MyDatabaseId,
@@ -964,7 +964,7 @@ __gpuCacheInsertLog(GpuCacheDesc *gc_desc,
 	ins->database_oid = MyDatabaseId;
 	ins->table_oid = gc_desc->table_oid;
 	ins->table_sig = gc_desc->table_sig;
-	pindex = gc_desc->pindex[ins->tupitem.hash % gc_desc->nr_gpus];
+	pindex = (ins->tupitem.hash % gc_desc->nr_gpus);
 	/* also write out pending ctid */
 	if (xmin != FrozenTransactionId ||
 		xmax != InvalidTransactionId)
@@ -989,7 +989,7 @@ __gpuCacheDeleteLog(GpuCacheDesc *gc_desc, const HeapTuple tuple)
 	GpuCacheLogDelete del;
 	PendingCtidItem pci;
 	uint32_t	hash = getCtidHash(&tuple->t_self);
-	int			pindex = gc_desc->pindex[hash % gc_desc->nr_gpus];
+	int			pindex = (hash % gc_desc->nr_gpus);
 	/* setup DELETE log */
 	del.c.type = GCACHE_TX_LOG__DELETE;
 	del.c.length = sizeof(del);
@@ -1615,7 +1615,7 @@ pgstromScanChunkGpuCache(pgstromTaskState *pts,
 	if (gpucache_count < gc_desc->nr_gpus)
 	{
 		XpuCommand	__xcmd;
-		int			__cuda_dindex = gc_desc->pindex[gpucache_count];
+		int			__cuda_dindex = gc_desc->cuda_dindex[gpucache_count];
 
 		if (!__gpuCacheInitialLoad(gc_desc, ptss->scan_rel))
 			elog(ERROR, "gpucache: corrupted GPU-Cache for '%s'",

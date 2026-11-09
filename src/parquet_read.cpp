@@ -240,6 +240,7 @@ again:
 		}
 	}
 	/* not found, so insert a WIP entry */
+	fprintf(stderr, "parquet cache not found (%s)\n", filename);
 	try {
 		assert(pq_mcache == NULL);
 		pq_mcache = new(parquetFileMetadataCache);
