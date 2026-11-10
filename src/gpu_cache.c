@@ -220,19 +220,32 @@ __parseSyncTriggerOptions(int elevel,
 			else if (strcmp(key, "cache_size") == 0)
 			{
 				char   *end;
+				long	ival;
+				int		shift;
 
-				gpucache_sz = strtol(val, &end, 10);
+				errno = 0;
+				ival = strtol(val, &end, 10);
 				if (strcasecmp(end, "g") == 0 || strcasecmp(end, "gb") == 0)
-					gpucache_sz <<= 30;
+					shift = 30;
 				else if (strcasecmp(end, "m") == 0 || strcasecmp(end, "mb") == 0)
-					gpucache_sz <<= 20;
+					shift = 20;
 				else if (strcasecmp(end, "k") == 0 || strcasecmp(end, "kb") == 0)
-					gpucache_sz <<= 10;
-				else if (*end != '\0')
+					shift = 10;
+				else if (*end == '\0')
+					shift = 0;
+				else
 				{
 					elog(elevel, "gpucache: invalid cache_size [%s]", val);
 					return false;
 				}
+				/* reject no digits, negative value, and overflow */
+				if (end == val || ival < 0 || errno == ERANGE ||
+					(size_t)ival > (SIZE_MAX >> shift))
+				{
+					elog(elevel, "gpucache: invalid cache_size [%s]", val);
+					return false;
+				}
+				gpucache_sz = ((size_t)ival << shift);
 				if (gpucache_sz < (64UL<<20))
 				{
 					elog(elevel, "gpucache: too small cache_size [%s], at least 64MB", val);
