@@ -2961,11 +2961,15 @@ gpuCacheWorkerMain(void *__gcontext)
 		{
 			size_t	sz;
 
-			if (wip_usage + nbytes < sizeof(GpuCacheLogCommon))
+			/* fill up the log header first, to read log->length */
+			if (wip_usage < sizeof(GpuCacheLogCommon))
 			{
-				memcpy(wip_buffer + wip_usage, pipe_buffer, nbytes);
-				wip_usage += nbytes;
-				continue;
+				sz = Min(sizeof(GpuCacheLogCommon) - wip_usage, nbytes);
+				memcpy(wip_buffer + wip_usage, pipe_buffer, sz);
+				wip_usage += sz;
+				read_off = sz;
+				if (wip_usage < sizeof(GpuCacheLogCommon))
+					continue;
 			}
 			log = (GpuCacheLogCommon *)wip_buffer;
 			if (wip_length < log->length)
@@ -2982,13 +2986,15 @@ gpuCacheWorkerMain(void *__gcontext)
 				wip_length = new_length;
 				log = (GpuCacheLogCommon *)wip_buffer;
 			}
-			sz = Min(log->length - wip_usage, nbytes);
-			memcpy(wip_buffer + wip_usage, pipe_buffer, sz);
+			sz = Min(log->length - wip_usage, nbytes - read_off);
+			memcpy(wip_buffer + wip_usage, pipe_buffer + read_off, sz);
 			wip_usage += sz;
+			read_off += sz;
 			if (wip_usage < log->length)
 				continue;
 			gpuCacheProcessOneRedoLog(gcontext, log);
-			read_off = sz;
+			/* the log in the wip_buffer is already processed */
+			wip_usage = 0;
 		}
 		while (read_off < nbytes)
 		{
