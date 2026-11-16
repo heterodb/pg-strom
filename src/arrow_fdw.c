@@ -2572,6 +2572,8 @@ arrowFdwSendMetadataPrefetch(const ArrowFileInfo *af_info)
 		buffer = af_info->raw_footer;
 		remained = MAXALIGN(af_info->raw_footer_sz);
 	}
+	arrow_metadata_cache->metadata_prefetch_count++;
+	arrow_metadata_cache->metadata_prefetch_length += rawmeta->length;
 bailout:
 	pthreadMutexUnlock(&arrow_metadata_cache->metadata_prefetch_mutex);
 }
@@ -2727,7 +2729,7 @@ readArrowFile(const char *filename, ArrowFileInfo *af_info, bool missing_ok)
 		elog(ERROR, "DictionaryBatch is not supported at '%s'", filename);
 	Assert(af_info->footer._num_dictionaries == 0);
 	/* prefetch parquet metadata */
-#if 0
+#if 1
 	if (af_info->footer.version == ArrowMetadataVersion__Parquet_V2_6 ||
 		af_info->footer.version == ArrowMetadataVersion__Parquet_V2_4 ||
 		af_info->footer.version == ArrowMetadataVersion__Parquet_V1_0)

@@ -1232,7 +1232,7 @@ __gpuCacheInitialLoad(GpuCacheDesc *gc_desc, Relation rel)
 			{
 				pg_atomic_exchange_u32(&gc_sstate->phase,
 									   GPUCACHE_PHASE__IS_CORRUPTED);
-				pg_atomic_fetch_and_u32(&gpucache_shared_head->maintenance, 1);
+				pg_atomic_fetch_add_u32(&gpucache_shared_head->maintenance, 1);
 				PG_RE_THROW();
 			}
 			PG_END_TRY();
@@ -1327,7 +1327,7 @@ pgstrom_gpucache_compaction(PG_FUNCTION_ARGS)
 	{
 		pthreadMutexLock(&gpucache_shared_head->hash_mutex);
 		gc_desc->gc_sstate->req_compaction |= gc_desc->gpumask;
-		pg_atomic_fetch_and_u32(&gpucache_shared_head->maintenance, 1);
+		pg_atomic_fetch_add_u32(&gpucache_shared_head->maintenance, 1);
 		pthreadMutexUnlock(&gpucache_shared_head->hash_mutex);
 	}
 	else
@@ -1357,7 +1357,7 @@ pgstrom_gpucache_recovery(PG_FUNCTION_ARGS)
 										   &expected,
 										   GPUCACHE_PHASE__NOT_BUILT))
 		{
-			pg_atomic_fetch_and_u32(&gpucache_shared_head->maintenance, 1);
+			pg_atomic_fetch_add_u32(&gpucache_shared_head->maintenance, 1);
 		}
 		else
 		{
@@ -1987,7 +1987,7 @@ releaseGpuCacheDesc(GpuCacheDesc *gc_desc, bool normal_commit)
 		dlist_delete(&gc_sstate->chain);
 		dlist_push_tail(&gpucache_shared_head->free_list, &gc_sstate->chain);
 		pthreadMutexUnlock(&gpucache_shared_head->hash_mutex);
-		pg_atomic_fetch_and_u32(&gpucache_shared_head->maintenance, 1);
+		pg_atomic_fetch_add_u32(&gpucache_shared_head->maintenance, 1);
 
 		hash_search(gpucache_table_desc_htab,
 					gc_desc, HASH_REMOVE, NULL);
@@ -2345,7 +2345,7 @@ __gpuCacheMarkAsCorrupted(kern_gpucache_data_store *curr)
 		}
 	}
 	/* notify other GPU-Cache services to release corrupted caches */
-	pg_atomic_fetch_and_u32(&gpucache_shared_head->maintenance, 1);
+	pg_atomic_fetch_add_u32(&gpucache_shared_head->maintenance, 1);
 	pthreadMutexUnlock(&gpucache_shared_head->hash_mutex);
 	/* release the corrupted buffer */
 	rc = cuMemFree((CUdeviceptr)curr);
@@ -2721,7 +2721,7 @@ __gpuCacheFlushPendingLogsNoLock(gpuContext *gcontext, bool do_maintain)
 			retval = __gpuCacheExecFlushPendingLogs(gcontext);
 
 		gettimeofday(&tv, NULL);
-		curr_ts = ((uint64_t)tv.tv_sec * 1000 + (uint64_t)tv.tv_usec);
+		curr_ts = ((uint64_t)tv.tv_sec * 1000 + (uint64_t)tv.tv_usec / 1000);
 		if (do_maintain || curr_ts > gc_mstate->last_maintain_ts + 5000L)
 		{
 			gpuCacheMaintenanceHandler(gcontext);
