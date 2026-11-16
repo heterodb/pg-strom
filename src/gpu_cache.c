@@ -221,6 +221,7 @@ __parseSyncTriggerOptions(int elevel,
 			{
 				char   *end;
 				long	lval = strtol(val, &end, 10);
+				int		shift = 0;
 
 				if (lval < 0)
 				{
@@ -228,16 +229,23 @@ __parseSyncTriggerOptions(int elevel,
 					return false;
 				}
 				if (strcasecmp(end, "g") == 0 || strcasecmp(end, "gb") == 0)
-					lval <<= 30;
+					shift = 30;
 				else if (strcasecmp(end, "m") == 0 || strcasecmp(end, "mb") == 0)
-					lval <<= 20;
+					shift = 20;
 				else if (strcasecmp(end, "k") == 0 || strcasecmp(end, "kb") == 0)
-					lval <<= 10;
+					shift = 10;
 				else if (*end != '\0')
 				{
 					elog(elevel, "gpucache: invalid cache_size [%s]", val);
 					return false;
 				}
+				/* the unit shift must not overflow */
+				if (lval > (LONG_MAX >> shift))
+				{
+					elog(elevel, "gpucache: invalid cache_size [%s]", val);
+					return false;
+				}
+				lval <<= shift;
 				if (lval < (64UL<<20))
 				{
 					elog(elevel, "gpucache: too small cache_size [%s], at least 64MB", val);
