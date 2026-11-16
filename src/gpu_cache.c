@@ -1444,8 +1444,8 @@ append_gpucache_info(StringInfo buf,
 								 ", \"usage\" : %lu"
 								 ", \"dead_nitems\" : %u"
 								 ", \"dead_space\" : %lu"
-								 ", \"virtual_mem_sz : \"%lu\""
-								 ", \"physical_mem_sz : \"%lu\""
+								 ", \"virtual_mem_sz\" : %lu"
+								 ", \"physical_mem_sz\" : %lu"
 								 "}",
 								 k,
 								 __nitems,
