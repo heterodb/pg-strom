@@ -220,30 +220,52 @@ __parseSyncTriggerOptions(int elevel,
 			else if (strcmp(key, "cache_size") == 0)
 			{
 				char   *end;
+				long	lval = strtol(val, &end, 10);
 
-				gpucache_sz = strtol(val, &end, 10);
+				if (lval < 0)
+				{
+					elog(elevel, "gpucache: invalid cache_size [%s]", val);
+					return false;
+				}
 				if (strcasecmp(end, "g") == 0 || strcasecmp(end, "gb") == 0)
-					gpucache_sz <<= 30;
+					lval <<= 30;
 				else if (strcasecmp(end, "m") == 0 || strcasecmp(end, "mb") == 0)
-					gpucache_sz <<= 20;
+					lval <<= 20;
 				else if (strcasecmp(end, "k") == 0 || strcasecmp(end, "kb") == 0)
-					gpucache_sz <<= 10;
+					lval <<= 10;
 				else if (*end != '\0')
 				{
 					elog(elevel, "gpucache: invalid cache_size [%s]", val);
 					return false;
 				}
-				if (gpucache_sz < (64UL<<20))
+				if (lval < (64UL<<20))
 				{
 					elog(elevel, "gpucache: too small cache_size [%s], at least 64MB", val);
 					return false;
 				}
+				gpucache_sz = lval;
 			}
 			else
 			{
 				elog(elevel, "gpucache: unknown option [%s]=[%s]", key, val);
 				return false;
 			}
+		}
+	}
+	/* GPU-Cache size is also restricted to 2xGPU RAM size */
+	for (int k=0; k < numGpuDevAttrs; k++)
+	{
+		const GpuDevAttributes *dattr = &gpuDevAttrs[k];
+
+		if ((gpumask & (1UL<<k)) == 0)
+			continue;
+		if (gpucache_sz > 2 * dattr->DEV_TOTAL_MEMSZ)
+		{
+			elog(elevel, "gpucache: too large cache_size [%s] for GPU-%d [RAM: %s]",
+				 format_bytesz(gpucache_sz),
+				 k,
+				 format_bytesz(dattr->DEV_TOTAL_MEMSZ));
+			return false;
 		}
 	}
 	if (p_gpumask)
