@@ -2344,23 +2344,23 @@ gpuCacheReleaseMasterState(gpuContext *gcontext)
 /*
  * __gpuCacheMarkAsCorrupted
  */
-static kern_gpucache_data_store *
-__gpuCacheMarkAsCorrupted(kern_gpucache_data_store *curr)
+static void
+__gpuCacheMarkAsCorrupted(Oid database_oid,
+						  Oid table_oid,
+						  uint32_t table_sig)
 {
-	kern_gpucache_data_store *next = curr->next;
 	dlist_iter	iter;
-	CUresult	rc;
-	uint32_t	hindex = gpuCacheHashValue(curr->database_oid,
-										   curr->table_oid,
-										   curr->table_sig) % GPUCACHE_STATE_HASH_NSLOTS;
+	uint32_t	hindex = gpuCacheHashValue(database_oid,
+										   table_oid,
+										   table_sig) % GPUCACHE_STATE_HASH_NSLOTS;
 	pthreadMutexLock(&gpucache_shared_head->hash_mutex);
 	dlist_foreach(iter, &gpucache_shared_head->hash_slots[hindex])
 	{
 		GpuCacheSharedState *gc_sstate = dlist_container(GpuCacheSharedState,
 														 chain, iter.cur);
-		if (gc_sstate->database_oid == curr->database_oid &&
-			gc_sstate->table_oid    == curr->table_oid &&
-			gc_sstate->table_sig    == curr->table_sig)
+		if (gc_sstate->database_oid == database_oid &&
+			gc_sstate->table_oid    == table_oid &&
+			gc_sstate->table_sig    == table_sig)
 		{
 			pg_atomic_write_u32(&gc_sstate->phase,
 								GPUCACHE_PHASE__IS_CORRUPTED);
@@ -2369,11 +2369,6 @@ __gpuCacheMarkAsCorrupted(kern_gpucache_data_store *curr)
 	/* notify other GPU-Cache services to release corrupted caches */
 	pg_atomic_fetch_add_u32(&gpucache_shared_head->maintenance, 1);
 	pthreadMutexUnlock(&gpucache_shared_head->hash_mutex);
-	/* release the corrupted buffer */
-	rc = cuMemFree((CUdeviceptr)curr);
-	if (rc != CUDA_SUCCESS)
-		__GC_LOG("failed on cuMemFree: %s", cuStrError(rc));
-	return next;
 }
 
 /*
@@ -2500,7 +2495,14 @@ gpuCacheExecCompactionNoLock(gpuContext *gcontext)
 				else
 				{
 					/* failed on compaction */
-					kern_gpucache_data_store *next = __gpuCacheMarkAsCorrupted(curr);
+					kern_gpucache_data_store *next = curr->next;
+
+					__gpuCacheMarkAsCorrupted(curr->database_oid,
+											  curr->table_oid,
+											  curr->table_sig);
+					rc = cuMemFree((CUdeviceptr)curr);
+					if (rc != CUDA_SUCCESS)
+						__GC_LOG("failed on cuMemFree: %s", cuStrError(rc));
 					if (prev)
 						prev->next = next;
 					else
@@ -2511,7 +2513,14 @@ gpuCacheExecCompactionNoLock(gpuContext *gcontext)
 			else if (consumed > curr->kds.length)
 			{
 				/* compaction does not make sense, corrupted */
-				kern_gpucache_data_store *next = __gpuCacheMarkAsCorrupted(curr);
+				kern_gpucache_data_store *next = curr->next;
+
+				__gpuCacheMarkAsCorrupted(curr->database_oid,
+										  curr->table_oid,
+										  curr->table_sig);
+				rc = cuMemFree((CUdeviceptr)curr);
+				if (rc != CUDA_SUCCESS)
+					__GC_LOG("failed on cuMemFree: %s", cuStrError(rc));
 				if (prev)
 					prev->next = next;
 				else
@@ -2785,6 +2794,9 @@ gpuCacheProcessSetupCacheLog(gpuContext *gcontext, GpuCacheLogSetupCache *log)
 	head_sz = KDS_HEAD_LENGTH(&log->kds_head);
 	if (offsetof(GpuCacheLogSetupCache, kds_head) + head_sz > log->c.length)
 	{
+		__gpuCacheMarkAsCorrupted(log->database_oid,
+								  log->table_oid,
+								  log->table_sig);
 		__GC_LOG("corrupted GCACHE_TX_LOG__SETUP_CACHE log (len=%lu %u)",
 				 offsetof(GpuCacheLogSetupCache, kds_head) + head_sz,
 				 log->c.length);
@@ -2796,6 +2808,9 @@ gpuCacheProcessSetupCacheLog(gpuContext *gcontext, GpuCacheLogSetupCache *log)
 						   CU_MEM_ATTACH_GLOBAL);
 	if (rc != CUDA_SUCCESS)
 	{
+		__gpuCacheMarkAsCorrupted(log->database_oid,
+								  log->table_oid,
+								  log->table_sig);
 		__GC_LOG("out of managed memory");
 		return false;
 	}
@@ -2863,9 +2878,7 @@ gpuCacheProcessOneRedoLog(gpuContext *gcontext, GpuCacheLogCommon *log)
 	if (!gpuCacheAllocMasterState(gcontext))
 		return false;
 	if (log->type == GCACHE_TX_LOG__SETUP_CACHE)
-	{
 		return gpuCacheProcessSetupCacheLog(gcontext, (GpuCacheLogSetupCache *)log);
-	}
 	return gpuCacheProcessRedoLog(gcontext, log);
 }
 
