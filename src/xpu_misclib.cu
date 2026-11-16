@@ -1395,7 +1395,7 @@ PG_NETWORK_COMPARE_TEMPLATE(le, <=)
 PG_NETWORK_COMPARE_TEMPLATE(gt, > )
 PG_NETWORK_COMPARE_TEMPLATE(ge, >=)
 
-#define PG_NETWORK_SUBSUP_TEMPLATE(NAME,OPER)							\
+#define PG_NETWORK_SUBSUP_TEMPLATE(NAME,OPER,BITLEN)					\
 	PUBLIC_FUNCTION(bool)												\
 	pgfn_network_##NAME(XPU_PGFUNCTION_ARGS)							\
 	{																	\
@@ -1422,7 +1422,7 @@ PG_NETWORK_COMPARE_TEMPLATE(ge, >=)
 			result->expr_ops = &xpu_bool_ops;							\
 			result->value = (bitncmp(datum_a.value.ipaddr,				\
 									 datum_b.value.ipaddr,				\
-									 datum_a.value.bits) == 0);			\
+									 BITLEN.value.bits) == 0);			\
 		}																\
 		else															\
 		{																\
@@ -1432,10 +1432,10 @@ PG_NETWORK_COMPARE_TEMPLATE(ge, >=)
 		return true;													\
 	}
 
-PG_NETWORK_SUBSUP_TEMPLATE(sub, <)
-PG_NETWORK_SUBSUP_TEMPLATE(subeq, <=)
-PG_NETWORK_SUBSUP_TEMPLATE(sup, >)
-PG_NETWORK_SUBSUP_TEMPLATE(supeq, >=)
+PG_NETWORK_SUBSUP_TEMPLATE(sub,   >,  datum_b)
+PG_NETWORK_SUBSUP_TEMPLATE(subeq, >=, datum_b)
+PG_NETWORK_SUBSUP_TEMPLATE(sup,   <,  datum_a)
+PG_NETWORK_SUBSUP_TEMPLATE(supeq, <=, datum_a)
 
 PUBLIC_FUNCTION(bool)
 pgfn_network_overlap(XPU_PGFUNCTION_ARGS)
