@@ -488,11 +488,22 @@ execCpuFallbackBaseTuple(pgstromTaskState *pts,
 	forboth (lc1, pts->fallback_load_src,
 			 lc2, pts->fallback_load_dst)
 	{
-		int		src = lfirst_int(lc1) - 1;
-		int		dst = lfirst_int(lc2) - 1;
+		int		src = lfirst_int(lc1);
+		int		dst = lfirst_int(lc2);
+		bool	isnull;
+		Datum	datum;
 
-		scan_slot->tts_isnull[dst] = base_slot->tts_isnull[src];
-		scan_slot->tts_values[dst] = base_slot->tts_values[src];
+		if (src > 0)
+		{
+			isnull = base_slot->tts_isnull[src-1];
+			datum  = base_slot->tts_values[src-1];
+		}
+		else
+		{
+			datum = slot_getsysattr(base_slot, src, &isnull);
+		}
+		scan_slot->tts_isnull[dst-1] = isnull;
+		scan_slot->tts_values[dst-1] = datum;
 	}
 	if (pts->ps_state)
 	{
