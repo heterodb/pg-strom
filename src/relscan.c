@@ -332,7 +332,8 @@ setup_kern_data_store(kern_data_store *kds,
 					  size_t length,
 					  char format)
 {
-	int		j, attcacheoff = -1;
+	int		attcacheoff = -1;
+	size_t	head_sz;
 
 	/*
 	 * lp_items[] is declared as uint32 (and uint64 has no benefit because
@@ -353,13 +354,12 @@ setup_kern_data_store(kern_data_store *kds,
 	kds->table_oid	= InvalidOid;	/* to be set by the caller */
 	kds->hash_nslots = 0;			/* to be set by the caller, if any */
 	kds->nr_colmeta	= tupdesc->natts;
-
 	if (format == KDS_FORMAT_ROW  ||
 		format == KDS_FORMAT_HASH ||
 		format == KDS_FORMAT_BLOCK)
 		attcacheoff = 0;
 
-	for (j=0; j < tupdesc->natts; j++)
+	for (int j=0; j < tupdesc->natts; j++)
 	{
 		Form_pg_attribute attr = TupleDescAttr(tupdesc, j);
 
@@ -373,7 +373,47 @@ setup_kern_data_store(kern_data_store *kds,
 							 attr->atttypmod,
 							 &attcacheoff);
 	}
-	return MAXALIGN(offsetof(kern_data_store, colmeta[kds->nr_colmeta]));
+	/* assign missing values if any */
+	head_sz = MAXALIGN(offsetof(kern_data_store,
+								colmeta[kds->nr_colmeta]));
+	if (tupdesc->constr)
+	{
+		for (int j=0; j < tupdesc->natts; j++)
+		{
+			Form_pg_attribute attr = TupleDescAttr(tupdesc, j);
+			Datum	datum;
+			bool	isnull;
+
+			if (attr->attisdropped)
+				continue;
+			datum = getmissingattr(tupdesc, j+1, &isnull);
+			if (!isnull)
+			{
+				kds->colmeta[j].missing_value = head_sz;
+				if (attr->attlen > 0)
+				{
+					memcpy((char *)kds + head_sz, &datum, attr->attlen);
+					head_sz += MAXALIGN(attr->attlen);
+				}
+				else if (attr->attlen == -1)
+				{
+					void   *ptr = DatumGetPointer(datum);
+					int		sz = VARSIZE_ANY(ptr);
+					memcpy((char *)kds + head_sz, ptr, sz);
+					head_sz += sz;
+				}
+				else
+				{
+					elog(ERROR, "unexpected attlen=%d for type '%s' of '%s'",
+						 attr->attlen,
+						 format_type_be(attr->atttypid),
+						 NameStr(attr->attname));
+				}
+			}
+		}
+	}
+	kds->head_sz = head_sz;
+	return head_sz;
 }
 
 /*
@@ -387,16 +427,32 @@ size_t
 estimate_kern_data_store(TupleDesc tupdesc)
 {
 	int		j, nr_colmeta = tupdesc->natts;
+	size_t	extra_sz = 0;
 
 	for (j=0; j < tupdesc->natts; j++)
 	{
 		Form_pg_attribute attr = TupleDescAttr(tupdesc, j);
+		Datum	datum;
+		bool	isnull;
 
 		if (attr->attisdropped)
 			continue;
+		datum = getmissingattr(tupdesc, j+1, &isnull);
+		if (!isnull)
+		{
+			if (attr->attlen > 0)
+				extra_sz += MAXALIGN(attr->attlen);
+			else if (attr->attlen == -1)
+				extra_sz += MAXALIGN(VARSIZE_ANY(datum));
+			else
+				elog(ERROR, "unexpected attlen=%d for type '%s' of '%s'",
+					 attr->attlen,
+					 format_type_be(attr->atttypid),
+					 NameStr(attr->attname));
+		}
 		nr_colmeta += count_num_of_subfields(attr->atttypid);
 	}
-	return MAXALIGN(offsetof(kern_data_store, colmeta[nr_colmeta]));
+	return MAXALIGN(offsetof(kern_data_store, colmeta[nr_colmeta])) + extra_sz;
 }
 
 /* ----------------------------------------------------------------

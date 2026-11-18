@@ -4016,7 +4016,7 @@ arrowFdwSetupIOvector(RecordBatchState *rb_state,
 	con->rb_offset = rb_state->rb_offset;
 	con->f_offset  = ~0UL;	/* invalid offset */
 	con->m_offset  = 0;
-	con->kds_head_sz = KDS_HEAD_LENGTH(kds) + kds->arrow_virtual_usage;
+	con->kds_head_sz = KDS_HEAD_LENGTH(kds);
 	con->depth = 0;
 	con->io_index = -1;		/* invalid index */
 	for (int j=0; j < kds->ncols; j++)
@@ -4286,8 +4286,7 @@ __arrowFdwSetupKDSHead(Relation relation,
 			kds->parquet_cache_enabled = default_parquet_cache_enabled;
 	}
 	kds->parquet_row_group = rb_state->rb_index;
-	kds->arrow_virtual_usage = (chunk_buffer->len
-								- (head_off + KDS_HEAD_LENGTH(kds)));
+	kds->head_sz = (chunk_buffer->len - head_off);
 	return kds;
 }
 
@@ -4325,7 +4324,7 @@ arrowFdwFillupRecordBatch(Relation relation,
 	enlargeLargeStringInfo(chunk_buffer, kds->length);
 	kds = (kern_data_store *)chunk_buffer->data;
 	filp = PathNameOpenFile(af_state->filename, O_RDONLY | PG_BINARY);
-	base = (char *)kds + KDS_HEAD_LENGTH(kds) + kds->arrow_virtual_usage;
+	base = (char *)kds + KDS_HEAD_LENGTH(kds);
 	for (int i=0; i < iovec->nr_chunks; i++)
 	{
 		strom_io_chunk *ioc = &iovec->ioc[i];

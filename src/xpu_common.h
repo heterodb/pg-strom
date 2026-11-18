@@ -699,6 +699,12 @@ struct kern_colmeta {
 	 */
 	uint16_t		idx_subattrs;
 	uint16_t		num_subattrs;
+	/*
+	 * missing value is an alternative value when tuple has less columns
+	 * then the catalog definition.
+	 * (usually, tuples written before ALTER TABLE ... ADD COLUMN)
+	 */
+	uint32_t		missing_value;
 
 	/* column name */
 	char			attname[NAMEDATALEN];
@@ -748,6 +754,7 @@ struct kern_data_store {
 	Oid				tdtypeid;	/* copy of TupleDesc.tdtypeid */
 	int32_t			tdtypmod;	/* copy of TupleDesc.tdtypmod */
 	Oid				table_oid;	/* OID of the table (only if GpuScan) */
+	uint32_t		head_sz;	/* length of KDS header portion */
 	/* only KDS_FORMAT_HASH */
 	uint32_t		hash_nslots;	/* width of the hash-slot */
 	/* only KDS_FORMAT_BLOCK */
@@ -755,8 +762,6 @@ struct kern_data_store {
 	uint32_t		block_nloaded;	/* number of blocks already loaded by CPU */
 	/* only KDS_FORMAT_COLUMN */
 	uint32_t		column_nrooms;	/* = max_num_rows parameter */
-	/* only KDS_FORMAT_ARROW/PARQUET */
-	uint32_t		arrow_virtual_usage; /* usage of virtual column buffer */
 	/* only KDS_FORMAT_PARQUET */
 	uint32_t		parquet_row_group;	/* row-group id to be loaded */
 	bool			parquet_parallel_load; /* if parquet-reader use thread-pool */
@@ -1308,8 +1313,10 @@ typedef struct kern_fallbackitem	kern_fallbackitem;
 INLINE_FUNCTION(size_t)
 KDS_HEAD_LENGTH(const kern_data_store *kds)
 {
-	return MAXALIGN(offsetof(kern_data_store, colmeta) +
-					sizeof(kern_colmeta) * kds->nr_colmeta);
+	assert(kds->head_sz == MAXALIGN(kds->head_sz) &&
+		   kds->head_sz >= MAXALIGN(offsetof(kern_data_store, colmeta) +
+									sizeof(kern_colmeta) * kds->nr_colmeta));
+	return kds->head_sz;
 }
 
 /* Base address of the kern_data_store */

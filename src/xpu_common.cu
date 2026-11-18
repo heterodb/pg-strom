@@ -96,12 +96,25 @@ __kern_extract_common_tuple(kern_context *kcxt,
 		}
 	}
 	/* extract slow path */
-	while (resno <= ncols && kvload_nitems > 0)
+	while (resno <= kds->ncols && kvload_nitems > 0)
 	{
 		const kern_colmeta *cmeta = &kds->colmeta[resno-1];
 		const char	   *addr;
 
-		if (nullmap && att_isnull(resno-1, nullmap))
+		if (resno > ncols)
+		{
+			/*
+			 * In case when tuple is written before ALTER TABLE ... ADD COLUMN,
+			 * this tuple may have less number of columns than the declarations.
+			 * Usually, it is considered as NULL, however, it may have mission-
+			 * value; which is an alternative value for the missing-columns.
+			 */
+			if (cmeta->missing_value != 0)
+				addr = (char *)kds + cmeta->missing_value;
+			else
+				addr = NULL;
+		}
+		else if (nullmap && att_isnull(resno-1, nullmap))
 			addr = NULL;
 		else
 		{

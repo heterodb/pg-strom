@@ -835,7 +835,7 @@ __parquetReadOneRowGroupFullyCached(const kern_data_store *kds_head,
 									uint32_t *p_npages_vfs_read,
 									uint32_t *p_ncaches_parquet_load)
 {
-	size_t		kds_headsz = KDS_HEAD_LENGTH(kds_head) + kds_head->arrow_virtual_usage;
+	size_t		kds_headsz = KDS_HEAD_LENGTH(kds_head);
 	size_t		kds_length = PAGE_ALIGN(kds_headsz);
 	std::vector<char> __buf(kds_headsz);
 	kern_data_store *kds_host = (kern_data_store *)__buf.data();
@@ -903,8 +903,7 @@ parquetReadArrowTableSimple(std::shared_ptr<arrow::Table> table,
 							uint32_t *p_npages_direct_read,
 							uint32_t *p_nchunks_parquet_read)
 {
-	size_t		kds_headsz = ARROW_ALIGN(KDS_HEAD_LENGTH(kds_head) +
-										 kds_head->arrow_virtual_usage);
+	size_t		kds_headsz = ARROW_ALIGN(KDS_HEAD_LENGTH(kds_head));
 	size_t		kds_length = kds_headsz;
 	kern_data_store *kds;
 
@@ -989,7 +988,7 @@ parquetReadArrowTableWithCache(std::shared_ptr<arrow::Table> table,
 							   uint32_t *p_ncaches_parquet_load)
 							   
 {
-	size_t		kds_headsz = KDS_HEAD_LENGTH(kds_head) + kds_head->arrow_virtual_usage;
+	size_t		kds_headsz = KDS_HEAD_LENGTH(kds_head);
 	size_t		kds_length = ARROW_ALIGN(kds_headsz);
 	std::vector<char> __buf(kds_headsz);
 	kern_data_store *kds_host = (kern_data_store *)__buf.data();

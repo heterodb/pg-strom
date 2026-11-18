@@ -3510,13 +3510,10 @@ gpuservLoadKdsArrow(gpuClient *gclient,
 					uint32_t *p_npages_direct_read,
 					uint32_t *p_npages_vfs_read)
 {
-	size_t		base_offset;
-
 	Assert(kds->format == KDS_FORMAT_ARROW);
-	base_offset = KDS_HEAD_LENGTH(kds) + kds->arrow_virtual_usage;
 	return __gpuservLoadKdsCommon(gclient,
 								  kds,
-								  base_offset,
+								  KDS_HEAD_LENGTH(kds),
 								  pathname,
 								  kds_iovec,
 								  p_npages_direct_read,
