@@ -137,16 +137,19 @@ CREATE FUNCTION pgstrom.fmin_i1(bytea)
   AS 'MODULE_PATHNAME','pgstrom_fminmax_final_int8'
   LANGUAGE C STRICT PARALLEL SAFE;
 
+-- declaration bug fixed in 6.2
 CREATE FUNCTION pgstrom.fmin_i2(bytea)
   RETURNS int2
   AS 'MODULE_PATHNAME','pgstrom_fminmax_final_int8'
   LANGUAGE C STRICT PARALLEL SAFE;
 
+-- declaration bug fixed in 6.2
 CREATE FUNCTION pgstrom.fmin_i4(bytea)
   RETURNS int4
   AS 'MODULE_PATHNAME','pgstrom_fminmax_final_int8'
   LANGUAGE C STRICT PARALLEL SAFE;
 
+-- declaration bug fixed in 6.2
 CREATE FUNCTION pgstrom.fmin_i8(bytea)
   RETURNS int8
   AS 'MODULE_PATHNAME','pgstrom_fminmax_final_int8'
@@ -203,16 +206,19 @@ CREATE FUNCTION pgstrom.fmax_i1(bytea)
   AS 'MODULE_PATHNAME','pgstrom_fminmax_final_int8'
   LANGUAGE C STRICT PARALLEL SAFE;
 
+-- declaration bug fixed in 6.2
 CREATE FUNCTION pgstrom.fmax_i2(bytea)
   RETURNS int2
   AS 'MODULE_PATHNAME','pgstrom_fminmax_final_int8'
   LANGUAGE C STRICT PARALLEL SAFE;
 
+-- declaration bug fixed in 6.2
 CREATE FUNCTION pgstrom.fmax_i4(bytea)
   RETURNS int4
   AS 'MODULE_PATHNAME','pgstrom_fminmax_final_int8'
   LANGUAGE C STRICT PARALLEL SAFE;
 
+-- declaration bug fixed in 6.2
 CREATE FUNCTION pgstrom.fmax_i8(bytea)
   RETURNS int8
   AS 'MODULE_PATHNAME','pgstrom_fminmax_final_int8'
