@@ -10,6 +10,7 @@
  * it under the terms of the PostgreSQL License.
  */
 #include "pg_strom.h"
+#include <sys/ioctl.h>
 
 /*
  * GpuCacheSharedState
@@ -53,8 +54,18 @@ typedef struct
 	dlist_head	hash_slots[GPUCACHE_STATE_HASH_NSLOTS];
 	struct {
 		pthread_mutex_t	pipe_mutex;
+		/*
+		 * Total bytes of the redo logs written to / consumed from the pipe.
+		 * GPU-Service waits for the GPU-cache worker to consume the redo logs
+		 * already written, prior to the query execution.
+		 */
+		pg_atomic_uint64 pipe_written;
+		pg_atomic_uint64 pipe_consumed;
 	} gpus[1];
 } GpuCacheSharedHead;
+
+/* wait for the GPU-cache worker up to 60sec (= 0.2ms x 300000) */
+#define GPUCACHE_PIPE_WAIT_MAX_COUNT	300000
 
 /*
  * GpuCacheRelSignature
@@ -306,12 +317,14 @@ __gpuCacheSendTxLogOne(GpuCacheDesc *gc_desc, int cuda_dindex,
 			off += nbytes;
 		else if (nbytes == 0 || errno != EINTR)
 		{
+			pg_atomic_fetch_add_u64(&gpucache_shared_head->gpus[cuda_dindex].pipe_written, off);
 			pthreadMutexUnlock(mutex);
 			elog(NOTICE, "GPU-Cache for '%s' is marked as corrupted",
 				 get_rel_name(gc_desc->table_oid));
 			return;
 		}
 	}
+	pg_atomic_fetch_add_u64(&gpucache_shared_head->gpus[cuda_dindex].pipe_written, len);
 	pthreadMutexUnlock(mutex);
 }
 
@@ -2195,7 +2208,11 @@ pgstrom_startup_gpu_cache(void)
 		dlist_init(&gpucache_shared_head->hash_slots[i]);
 	pthreadMutexInitShared(&gpucache_shared_head->hash_mutex);
 	for (int k=0; k < numGpuDevAttrs; k++)
+	{
 		pthreadMutexInitShared(&gpucache_shared_head->gpus[k].pipe_mutex);
+		pg_atomic_init_u64(&gpucache_shared_head->gpus[k].pipe_written, 0);
+		pg_atomic_init_u64(&gpucache_shared_head->gpus[k].pipe_consumed, 0);
+	}
 	pos += MAXALIGN(offsetof(GpuCacheSharedHead, gpus[numGpuDevAttrs]));
 
 	for (int k=0; k < pgstrom_gpucache_max_relation_entries; k++)
@@ -2905,9 +2922,24 @@ gpuCacheWorkerMain(void *__gcontext)
 	size_t		wip_usage = 0;
 	uint32_t	maintenance_curr = 0;
 	uint32_t	maintenance_last = 0;
+	ssize_t		last_nbytes = 0;
 	CUresult	rc;
 
 	__GC_LOG("start for GPU-%d", gcontext->cuda_dindex);
+	/*
+	 * Logs already consumed by the previous worker (if GPU-Service restarted)
+	 * are lost, so we sync up pipe_consumed with the bytes in the pipe.
+	 */
+	{
+		int		nremains = 0;
+
+		pthreadMutexLock(&gpucache_shared_head->gpus[gcontext->cuda_dindex].pipe_mutex);
+		if (ioctl(fdesc, FIONREAD, &nremains) != 0)
+			nremains = 0;
+		pg_atomic_write_u64(&gpucache_shared_head->gpus[gcontext->cuda_dindex].pipe_consumed,
+							pg_atomic_read_u64(&gpucache_shared_head->gpus[gcontext->cuda_dindex].pipe_written) - nremains);
+		pthreadMutexUnlock(&gpucache_shared_head->gpus[gcontext->cuda_dindex].pipe_mutex);
+	}
 	rc = cuCtxSetCurrent(gcontext->cuda_context);
 	if (rc != CUDA_SUCCESS)
 	{
@@ -2934,6 +2966,13 @@ gpuCacheWorkerMain(void *__gcontext)
 		size_t		read_off = 0;
 		ssize_t		nbytes;
 
+		/* the previous read() is already processed */
+		if (last_nbytes > 0)
+		{
+			pg_atomic_fetch_add_u64(&gpucache_shared_head->gpus[gcontext->cuda_dindex].pipe_consumed,
+									last_nbytes);
+			last_nbytes = 0;
+		}
 		/* maintenance works */
 		maintenance_curr = pg_atomic_read_u32(&gpucache_shared_head->maintenance);
 		if (maintenance_curr != maintenance_last)
@@ -2956,6 +2995,7 @@ gpuCacheWorkerMain(void *__gcontext)
 			/* check gpuServiceGoingTerminate() */
 			continue;
 		}
+		last_nbytes = nbytes;
 
 		if (wip_usage > 0)
 		{
@@ -3045,6 +3085,27 @@ gpuCacheGetKdsBuffer(gpuContext *gcontext,
 {
 	kern_gpucache_master_state *gc_mstate;
 	CUdeviceptr	m_kds = 0UL;
+	uint64_t	pipe_written;
+	int			count = 0;
+
+	/*
+	 * Wait for the GPU-cache worker to consume the redo logs that are
+	 * already written to the pipe (e.g, initial loading or DML committed
+	 * prior to this query). Elsewhere, the query may see the GPU-Cache
+	 * that does not reflect the committed changes yet.
+	 */
+	pipe_written = pg_atomic_read_u64(&gpucache_shared_head->gpus[gcontext->cuda_dindex].pipe_written);
+	while (pg_atomic_read_u64(&gpucache_shared_head->gpus[gcontext->cuda_dindex].pipe_consumed) < pipe_written)
+	{
+		if (gpuServiceGoingTerminate() || ++count > GPUCACHE_PIPE_WAIT_MAX_COUNT)
+		{
+			__GC_LOG("GPU-cache worker does not consume the redo logs (%lu of %lu bytes)",
+					 pg_atomic_read_u64(&gpucache_shared_head->gpus[gcontext->cuda_dindex].pipe_consumed),
+					 pipe_written);
+			break;
+		}
+		pg_usleep(200L);	/* 0.2ms */
+	}
 again:
 	pthreadRWLockReadLock(&gcontext->gpucache_rwlock);
 	gc_mstate = gcontext->gpucache_master_state;
