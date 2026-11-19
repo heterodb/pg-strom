@@ -6639,6 +6639,25 @@ gpuservBgWorkerMain(Datum arg)
 			gpuContext *gcontext = gpuservSetupGpuContext(dindex);
 			dlist_push_tail(&gpuserv_gpucontext_list, &gcontext->chain);
 		}
+		/*
+		 * No GPU worker threads exist in this process yet, so we arm
+		 * max_async_tasks to launch them at the first __gpuContextAdjustWorkers().
+		 * Elsewhere, when GPU-Service is restarted (e.g, by CUDA errors),
+		 * the timestamp portion is already cleared by the previous process,
+		 * then no worker threads are launched and all the queries hang up.
+		 */
+		{
+			uint64_t	conf_val = pg_atomic_read_u64(&gpuserv_shared_state->max_async_tasks);
+
+			while ((conf_val & ~MAX_ASYNC_TASKS_MASK) == 0)
+			{
+				uint64_t	new_val = ((conf_val & MAX_ASYNC_TASKS_MASK) |
+									   (1UL<<MAX_ASYNC_TASKS_BITS));
+				if (pg_atomic_compare_exchange_u64(&gpuserv_shared_state->max_async_tasks,
+												   &conf_val, new_val))
+					break;
+			}
+		}
 		/* ready to accept connection from the PostgreSQL backend */
 		gpuserv_shared_state->gpuserv_ready_accept = true;
 
