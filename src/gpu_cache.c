@@ -912,8 +912,12 @@ __setupGpuCacheTupleItem(StringInfo buf,
 
 		if (nullmap && att_isnull(j, nullmap))
 			continue;
-		if (attr->attisdropped)
-			continue;
+		/*
+		 * NOTE: dropped columns still occupy the space of the heap tuple,
+		 * and GPU code skips them according to attlen/attalign of the
+		 * kern_colmeta, so we must also copy them. Elsewhere, the columns
+		 * behind the dropped column are fetched from the wrong offset.
+		 */
 		if (attr->attbyval || attr->attlen > 0)
 		{
 			hoff = TYPEALIGN(alignval, hoff);
@@ -933,7 +937,11 @@ __setupGpuCacheTupleItem(StringInfo buf,
 			addr = (char *)htup + hoff;
 			hoff += VARSIZE_ANY(addr);
 
-			datum = pg_detoast_datum_packed(addr);
+			/* no need to detoast the dropped columns; never referenced */
+			if (attr->attisdropped)
+				datum = (struct varlena *)addr;
+			else
+				datum = pg_detoast_datum_packed(addr);
 			if (VARATT_IS_4B(datum))
 			{
 				diff = TYPEALIGN(alignval, buf->len) - buf->len;
