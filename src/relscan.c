@@ -400,7 +400,7 @@ setup_kern_data_store(kern_data_store *kds,
 					void   *ptr = DatumGetPointer(datum);
 					int		sz = VARSIZE_ANY(ptr);
 					memcpy((char *)kds + head_sz, ptr, sz);
-					head_sz += sz;
+					head_sz += MAXALIGN(sz);
 				}
 				else
 				{
