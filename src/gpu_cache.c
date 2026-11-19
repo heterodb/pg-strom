@@ -75,6 +75,9 @@ struct GpuCacheDesc
 	Oid			table_oid;
 	uint32_t	table_sig;
 	TransactionId xid;
+	/* above fields are hash-key */
+	TransactionId top_xid;	/* top-level transaction that owns this entry */
+	SubTransactionId subid;	/* (sub-)transaction that owns this entry */
 	gpumask_t	gpumask;
 	size_t		gpucache_sz;
 	GpuCacheSharedState *gc_sstate;
@@ -765,6 +768,8 @@ lookupGpuCacheDescRaw(Oid table_oid,
 						&found);
 	if (!found)
 	{
+		entry->top_xid = GetTopTransactionId();
+		entry->subid = GetCurrentSubTransactionId();
 		entry->gpumask = gpumask;
 		entry->gpucache_sz = gpucache_sz;
 		entry->gc_sstate = NULL;
@@ -2086,15 +2091,22 @@ gpuCacheXactCallback(XactEvent event, void *arg)
 		hash_get_num_entries(gpucache_table_desc_htab) > 0 &&
 		(event == XACT_EVENT_COMMIT || event == XACT_EVENT_ABORT))
 	{
-		TransactionId   curr_xid = GetCurrentTransactionIdIfAny();
+		TransactionId   top_xid = GetTopTransactionIdIfAny();
 		HASH_SEQ_STATUS hseq;
 		GpuCacheDesc   *gc_desc;
 		bool            normal_commit = (event == XACT_EVENT_COMMIT);
 
+		/*
+		 * Entries of the aborted sub-transactions are already released at
+		 * SUBXACT_EVENT_ABORT_SUB, so all the remaining entries of this
+		 * transaction (including the committed sub-transactions; that have
+		 * their own xid) shall be committed or aborted here.
+		 */
 		hash_seq_init(&hseq, gpucache_table_desc_htab);
 		while ((gc_desc = hash_seq_search(&hseq)) != NULL)
 		{
-			if (gc_desc->xid == curr_xid)
+			if (TransactionIdIsValid(top_xid) &&
+				gc_desc->top_xid == top_xid)
 				releaseGpuCacheDesc(gc_desc, normal_commit);
 		}
 	}
@@ -2119,17 +2131,33 @@ gpuCacheSubXactCallback(SubXactEvent event,
 #endif
 	if (gpucache_table_desc_htab &&
 		hash_get_num_entries(gpucache_table_desc_htab) > 0 &&
-		event == SUBXACT_EVENT_ABORT_SUB)
+		(event == SUBXACT_EVENT_COMMIT_SUB ||
+		 event == SUBXACT_EVENT_ABORT_SUB))
 	{
-		TransactionId   curr_xid = GetCurrentTransactionIdIfAny();
+		TransactionId   top_xid = GetTopTransactionIdIfAny();
 		HASH_SEQ_STATUS hseq;
 		GpuCacheDesc   *gc_desc;
 
+		if (!TransactionIdIsValid(top_xid))
+			return;
 		hash_seq_init(&hseq, gpucache_table_desc_htab);
 		while ((gc_desc = hash_seq_search(&hseq)) != NULL)
 		{
-			if (gc_desc->xid == curr_xid)
+			if (gc_desc->top_xid != top_xid ||
+				gc_desc->subid != mySubid)
+				continue;
+			if (event == SUBXACT_EVENT_COMMIT_SUB)
+			{
+				/*
+				 * The changes are not committed yet, but owned by the parent
+				 * transaction; to be committed or aborted with the parent.
+				 */
+				gc_desc->subid = parentSubid;
+			}
+			else
+			{
 				releaseGpuCacheDesc(gc_desc, false);
+			}
 		}
 	}
 }
