@@ -321,26 +321,22 @@ This session introduces PG-Strom's configuration parameters.
 @ja{
 `pg_strom.enable_gpucache` [型: `bool` / 初期値: `on`]
 :   検索/分析系のクエリでGPUキャッシュを使用するかどうかを制御します。
-:   なお、この設定値を`off`にしてもトリガ関数は引き続きREDOログバッファを更新し続けます。
+:   なお、この設定値を`off`にしてもトリガ関数は引き続き更新ログを送出し続けます。
 }
 @en{
 `pg_strom.enable_gpucache` [type: `bool` / default: `on`]
 :   Controls whether search/analytic query tries to use GPU Cache.
-:   Note that GPU Cache trigger functions continue to update the REDO Log buffer, even if this parameter is turned off.
+:   Note that GPU Cache trigger functions continue to send the update logs, even if this parameter is turned off.
 }
 @ja{
-`pg_strom.gpucache_auto_preload` [型: `text` / 初期値: `null`]
-:   PostgreSQLの起動直後にGPUキャッシュをロードすべきテーブル名を指定します。
-:   書式は `DATABASE_NAME.SCHEMA_NAME.TABLE_NAME` で、複数個のテーブルを指定する場合はこれをカンマ区切りで並べます。
-:   GPUキャッシュの初回ロードは相応に時間のかかる処理ですが、事前に初回ロードを済ませておく事で、検索/分析クエリの初回実行時に応答速度が遅延するのを避けることができます。
-:   なお、本パラメータを '*' に設定すると、GPUキャッシュを持つ全てのテーブルの内容を順にGPUへロードしようと試みます。
+`pg_strom.gpucache_max_relation_entries` [型: `int` / 初期値: `1024`]
+:   GPUキャッシュを設定できるテーブル数の上限です。通常、既定値から変更する必要はありません。
+:   本パラメータはPostgreSQLの起動時にのみ設定できます。
 }
 @en{
-`pg_strom.gpucache_auto_preload` [type: `text` / default: `null`]
-:   It specifies the table names to be loaded onto GPU Cache just after PostgreSQL startup.
-:   Its format is `DATABASE_NAME.SCHEMA_NAME.TABLE_NAME`, and separated by comma if multiple tables are preloaded.
-:   Initial-loading of GPU Cache usually takes a lot of time. So, preloading enables to avoid delay of response time of search/analytic queries on the first time.
-:   If this parameter is '*', PG-Strom tries to load all the configured tables onto GPU Cache sequentially.
+`pg_strom.gpucache_max_relation_entries` [type: `int` / default: `1024`]
+:   The maximum number of tables that GPU Cache can be configured. Usually, no need to change from the default.
+:   This parameter can be set only at the PostgreSQL startup.
 }
 
 @ja:## GPUデバイスに関連する設定

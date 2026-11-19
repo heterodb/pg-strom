@@ -446,7 +446,6 @@ Using this as a reference, you can rewrite the condition clause to achieve the s
 postgres=# explain select count(*), lo_shipmode from lineorder where lo_orderdate % 256 = 34 group by lo_shipmode;
 DEBUG:  gpusort: disabled by pg_strom.cpu_fallback
 DEBUG:  gpusort: disabled by pg_strom.cpu_fallback
-DEBUG:  gpucache: table 'lineorder' is not configured - check row/statement triggers with pgstrom.gpucache_sync_trigger()
                                                 QUERY PLAN
 ----------------------------------------------------------------------------------------------------------
  HashAggregate  (cost=1221119.96..1221120.03 rows=7 width=19)
