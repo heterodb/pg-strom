@@ -107,6 +107,7 @@ static int		pgstrom_gpucache_sync_interval;		/* GUC */
 static int		pgstrom_gpucache_sync_threshold;	/* GUC */
 static int	   *gpucache_pipe_read_fdesc = NULL;	/* per-GPU */
 static int	   *gpucache_pipe_write_fdesc = NULL;	/* per-GPU */
+static List	   *gpucache_pending_drop_databases = NIL;	/* in TopTransactionContext */
 
 /*
  * gpucache_sync_trigger_function_oid
@@ -1937,6 +1938,56 @@ __gpuCacheTruncateLog(Oid table_oid)
 }
 
 /*
+ * __gpuCacheOnDropDatabase
+ *
+ * dropdb() invokes the drop hook prior to some checks (e.g, other sessions
+ * still connected), so we release the GPU-Caches on commit.
+ */
+static void
+__gpuCacheOnDropDatabase(Oid database_oid)
+{
+	MemoryContext	oldcxt = MemoryContextSwitchTo(TopTransactionContext);
+
+	gpucache_pending_drop_databases =
+		list_append_unique_oid(gpucache_pending_drop_databases, database_oid);
+	MemoryContextSwitchTo(oldcxt);
+}
+
+/*
+ * __gpuCacheReleaseDatabase
+ *
+ * Release all the GpuCacheSharedState of the dropped database. GPU-Caches
+ * residing in GPU memory will be discarded by the next maintenance task.
+ */
+static void
+__gpuCacheReleaseDatabase(Oid database_oid)
+{
+	uint32_t	count = 0;
+
+	pthreadMutexLock(&gpucache_shared_head->hash_mutex);
+	for (int i=0; i < GPUCACHE_STATE_HASH_NSLOTS; i++)
+	{
+		dlist_mutable_iter iter;
+
+		dlist_foreach_modify(iter, &gpucache_shared_head->hash_slots[i])
+		{
+			GpuCacheSharedState *gc_sstate = dlist_container(GpuCacheSharedState,
+															 chain, iter.cur);
+			if (gc_sstate->database_oid == database_oid)
+			{
+				dlist_delete(&gc_sstate->chain);
+				dlist_push_tail(&gpucache_shared_head->free_list,
+								&gc_sstate->chain);
+				count++;
+			}
+		}
+	}
+	pthreadMutexUnlock(&gpucache_shared_head->hash_mutex);
+	if (count > 0)
+		pg_atomic_fetch_add_u32(&gpucache_shared_head->maintenance, 1);
+}
+
+/*
  * gpuCacheObjectAccess
  */
 static void
@@ -1986,6 +2037,11 @@ gpuCacheObjectAccess(ObjectAccessType access,
 		{
 			/* DROP TRIGGER */
 			__gpuCacheOnDropTrigger(objectId);
+		}
+		else if (classId == DatabaseRelationId)
+		{
+			/* DROP DATABASE */
+			__gpuCacheOnDropDatabase(objectId);
 		}
 	}
 	else if (access == OAT_TRUNCATE)
@@ -2082,6 +2138,18 @@ gpuCacheXactCallback(XactEvent event, void *arg)
 		 GetCurrentTransactionIdIfAny(),
 		 GetTopTransactionIdIfAny());
 #endif
+	if (event == XACT_EVENT_COMMIT || event == XACT_EVENT_ABORT)
+	{
+		if (event == XACT_EVENT_COMMIT)
+		{
+			ListCell   *lc;
+
+			foreach (lc, gpucache_pending_drop_databases)
+				__gpuCacheReleaseDatabase(lfirst_oid(lc));
+		}
+		/* the list itself is released with TopTransactionContext */
+		gpucache_pending_drop_databases = NIL;
+	}
 	if (gpucache_table_desc_htab &&
 		hash_get_num_entries(gpucache_table_desc_htab) > 0 &&
 		(event == XACT_EVENT_COMMIT || event == XACT_EVENT_ABORT))
