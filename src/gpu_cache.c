@@ -78,6 +78,7 @@ struct GpuCacheDesc
 	gpumask_t	gpumask;
 	size_t		gpucache_sz;
 	GpuCacheSharedState *gc_sstate;
+	int8_t		has_dropped_attrs;	/* -1 means unknown */
 	bool		drop_on_rollback;
 	bool		drop_on_commit;
 	uint32_t	nitems;
@@ -768,6 +769,7 @@ lookupGpuCacheDescRaw(Oid table_oid,
 		entry->gpumask = gpumask;
 		entry->gpucache_sz = gpucache_sz;
 		entry->gc_sstate = NULL;
+		entry->has_dropped_attrs = -1;
 		entry->drop_on_rollback = false;
 		entry->drop_on_commit = false;
 		entry->nitems = 0;
@@ -870,6 +872,7 @@ getCtidHash(ItemPointer p_ctid)
  */
 static void
 __setupGpuCacheTupleItem(StringInfo buf,
+						 GpuCacheDesc *gc_desc,
 						 Relation rel,
 						 HeapTuple tuple,
 						 TransactionId xmin,
@@ -877,29 +880,51 @@ __setupGpuCacheTupleItem(StringInfo buf,
 {
 	TupleDesc	tupdesc = RelationGetDescr(rel);
 	HeapTupleHeader htup = tuple->t_data;
-	uint8_t	   *nullmap = NULL;
+	uint8_t	   *src_nullmap = NULL;
+	uint8_t	   *dst_nullmap = NULL;
 	int			nattrs = Min(HeapTupleHeaderGetNatts(tuple->t_data), tupdesc->natts);
 	int			base = buf->len;
+	uint16_t	t_infomask = 0;
 	uint32_t	head_sz;
 	uint32_t	hoff, diff;
 	kern_tupitem *tupitem;
 	kern_tupitem_xact_attrs *xattrs;
 	static uint64_t zero = 0;
 
-	assert(base == MAXALIGN(base));
+	/* check whether any dropped attributes */
+	if (gc_desc->has_dropped_attrs < 0)
+	{
+		bool	__has_dropped_attrs = false;
+
+		for (int j=0; j < tupdesc->natts; j++)
+		{
+			Form_pg_attribute attr = TupleDescAttr(tupdesc, j);
+
+			if (attr->attisdropped)
+			{
+				__has_dropped_attrs = true;
+				break;
+			}
+		}
+		gc_desc->has_dropped_attrs = (__has_dropped_attrs ? 1 : 0);
+	}
+
 	/* allocation of the header portion first */
+	assert(base == MAXALIGN(base));
 	if (HeapTupleHasNulls(tuple))
 	{
-		nullmap = htup->t_bits;
-		head_sz = MAXALIGN(offsetof(kern_tupitem, t_bits)
-						   + BITMAPLEN(nattrs)
-						   + sizeof(kern_tupitem_xact_attrs));
+		src_nullmap = htup->t_bits;
+		dst_nullmap = (uint8_t *)alloca(BITMAPLEN(nattrs));
+		t_infomask |= HEAP_HASNULL;
 	}
-	else
+	else if (gc_desc->has_dropped_attrs)
 	{
-		head_sz = MAXALIGN(offsetof(kern_tupitem, t_bits)
-						   + sizeof(kern_tupitem_xact_attrs));
+		dst_nullmap = (uint8_t *)alloca(BITMAPLEN(nattrs));
+		t_infomask |= HEAP_HASNULL;
 	}
+	head_sz = MAXALIGN(offsetof(kern_tupitem, t_bits)
+					   + (dst_nullmap ? BITMAPLEN(nattrs) : 0)
+					   + sizeof(kern_tupitem_xact_attrs));
 	enlargeStringInfo(buf, head_sz);
 	memset(buf->data + buf->len, 0, head_sz);
 	buf->len += head_sz;
@@ -910,17 +935,28 @@ __setupGpuCacheTupleItem(StringInfo buf,
 		Form_pg_attribute attr = TupleDescAttr(tupdesc, j);
 		int		alignval = typealign_get_width(attr->attalign);
 
-		if (nullmap && att_isnull(j, nullmap))
+		if (src_nullmap && att_isnull(j, src_nullmap))
+		{
+			dst_nullmap[(j>>3)] &= ~(1U<<(j&7));
 			continue;
-		if (attr->attisdropped)
-			continue;
+		}
 		if (attr->attbyval || attr->attlen > 0)
 		{
 			hoff = TYPEALIGN(alignval, hoff);
-			diff = TYPEALIGN(alignval, buf->len) - buf->len;
-			if (diff > 0)
-				appendBinaryStringInfo(buf, (char *)&zero, diff);
-			appendBinaryStringInfo(buf, (char *)htup + hoff, attr->attlen);
+			if (!attr->attisdropped)
+			{
+				diff = TYPEALIGN(alignval, buf->len) - buf->len;
+				if (diff > 0)
+					appendBinaryStringInfo(buf, (char *)&zero, diff);
+				appendBinaryStringInfo(buf, (char *)htup + hoff, attr->attlen);
+				if (dst_nullmap)
+					dst_nullmap[(j>>3)] |= (1U<<(j&7));
+			}
+			else
+			{
+				/* inject NULL, instead of the dropped attribute */
+				dst_nullmap[(j>>3)] &= ~(1U<<(j&7));
+			}
 			hoff += attr->attlen;
 		}
 		else if (attr->attlen == -1)
@@ -933,16 +969,27 @@ __setupGpuCacheTupleItem(StringInfo buf,
 			addr = (char *)htup + hoff;
 			hoff += VARSIZE_ANY(addr);
 
-			datum = pg_detoast_datum_packed(addr);
-			if (VARATT_IS_4B(datum))
+			if (!attr->attisdropped)
 			{
-				diff = TYPEALIGN(alignval, buf->len) - buf->len;
-				if (diff > 0)
-					appendBinaryStringInfo(buf, (char *)&zero, diff);
+				datum = pg_detoast_datum_packed(addr);
+				if (VARATT_IS_4B(datum))
+				{
+					diff = TYPEALIGN(alignval, buf->len) - buf->len;
+					if (diff > 0)
+						appendBinaryStringInfo(buf, (char *)&zero, diff);
+				}
+				appendBinaryStringInfo(buf, (char *)datum, VARSIZE_ANY(datum));
+				if (dst_nullmap)
+					dst_nullmap[(j>>3)] |= (1U<<(j&7));
+				t_infomask |= HEAP_HASVARWIDTH;
+				if (datum != addr)
+					pfree(datum);
 			}
-			appendBinaryStringInfo(buf, (char *)datum, VARSIZE_ANY(datum));
-			if (datum != addr)
-				pfree(datum);
+			else
+			{
+				/* inject NULL, instead of the dropped attribute */
+				dst_nullmap[(j>>3)] &= ~(1U<<(j&7));
+			}
 		}
 		else
 		{
@@ -960,10 +1007,10 @@ __setupGpuCacheTupleItem(StringInfo buf,
 	tupitem->hash  = getCtidHash(&tuple->t_self);
 	tupitem->has_xact_attrs = true;
 	tupitem->t_infomask2 = nattrs;
-	tupitem->t_infomask  = htup->t_infomask;
+	tupitem->t_infomask  = t_infomask;
 	tupitem->t_hoff = head_sz + MINIMAL_TUPLE_OFFSET;
-	if (nullmap)
-		memcpy(tupitem->t_bits, nullmap, BITMAPLEN(nattrs));
+	if (dst_nullmap)
+		memcpy(tupitem->t_bits, dst_nullmap, BITMAPLEN(nattrs));
 	xattrs = KERN_TUPITEM_GET_XACT_ATTRS(tupitem);
 	xattrs->xmin = xmin;
 	xattrs->xmax = xmax;
@@ -987,7 +1034,7 @@ __gpuCacheInsertLog(GpuCacheDesc *gc_desc,
 	/* setup INSERT log */
 	initStringInfo(&buf);
 	buf.len = offsetof(GpuCacheLogInsert, tupitem);
-	__setupGpuCacheTupleItem(&buf, rel, tuple, xmin, xmax);
+	__setupGpuCacheTupleItem(&buf, gc_desc, rel, tuple, xmin, xmax);
 	ins = (GpuCacheLogInsert *)buf.data;
 	ins->c.type = GCACHE_TX_LOG__INSERT;
 	ins->c.length = buf.len;
