@@ -1960,6 +1960,31 @@ __gpuCacheOnDropTrigger(Oid trigger_oid)
 }
 
 static void
+__gpuCacheOnDropDatabase(Oid database_oid)
+{
+	assert(database_oid != MyDatabaseId);
+	pthreadMutexLock(&gpucache_shared_head->hash_mutex);
+	for (int hindex=0; hindex < GPUCACHE_STATE_HASH_NSLOTS; hindex++)
+	{
+		dlist_mutable_iter iter;
+
+		dlist_foreach_modify(iter, &gpucache_shared_head->hash_slots[hindex])
+		{
+			GpuCacheSharedState *gc_sstate
+				= dlist_container(GpuCacheSharedState,
+								  chain, iter.cur);
+			if (gc_sstate->database_oid == database_oid)
+			{
+				dlist_delete(&gc_sstate->chain);
+				dlist_push_tail(&gpucache_shared_head->free_list, &gc_sstate->chain);
+			}
+		}
+	}
+	pg_atomic_fetch_add_u32(&gpucache_shared_head->maintenance, 1);
+	pthreadMutexUnlock(&gpucache_shared_head->hash_mutex);
+}
+
+static void
 __gpuCacheTruncateLog(Oid table_oid)
 {
 	uint32_t	table_sig;
@@ -2033,6 +2058,11 @@ gpuCacheObjectAccess(ObjectAccessType access,
 		{
 			/* DROP TRIGGER */
 			__gpuCacheOnDropTrigger(objectId);
+		}
+		else if (classId == DatabaseRelationId)
+		{
+			/* DROP DATABASE */
+			__gpuCacheOnDropDatabase(objectId);
 		}
 	}
 	else if (access == OAT_TRUNCATE)
