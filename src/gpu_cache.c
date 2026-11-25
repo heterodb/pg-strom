@@ -1401,7 +1401,6 @@ pgstrom_gpucache_apply_redo(PG_FUNCTION_ARGS)
 				break;
 			CHECK_FOR_INTERRUPTS();
 			pg_usleep(50000L);	/* 50ms */
-			fprintf(stderr, "hoge\n");
 		}
 	}
 	PG_RETURN_VOID();
