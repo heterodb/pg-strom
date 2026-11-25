@@ -47,12 +47,13 @@ typedef struct
 #define GPUCACHE_STATE_HASH_NSLOTS		509
 typedef struct
 {
-	pg_atomic_uint32 maintenance;
+	pg_atomic_uint64 maintenance_seq;
 	pthread_mutex_t hash_mutex;
 	dlist_head	free_list;
 	dlist_head	hash_slots[GPUCACHE_STATE_HASH_NSLOTS];
 	struct {
 		pthread_mutex_t	pipe_mutex;
+		pg_atomic_uint64 maintenance_done;
 	} gpus[1];
 } GpuCacheSharedHead;
 
@@ -1309,7 +1310,7 @@ __gpuCacheInitialLoad(GpuCacheDesc *gc_desc, Relation rel)
 			{
 				pg_atomic_exchange_u32(&gc_sstate->phase,
 									   GPUCACHE_PHASE__IS_CORRUPTED);
-				pg_atomic_fetch_add_u32(&gpucache_shared_head->maintenance, 1);
+				pg_atomic_add_fetch_u64(&gpucache_shared_head->maintenance_seq, 1);
 				PG_RE_THROW();
 			}
 			PG_END_TRY();
@@ -1385,8 +1386,24 @@ PG_FUNCTION_INFO_V1(pgstrom_gpucache_apply_redo);
 PUBLIC_FUNCTION(Datum)
 pgstrom_gpucache_apply_redo(PG_FUNCTION_ARGS)
 {
-	pg_atomic_fetch_add_u32(&gpucache_shared_head->maintenance, 1);
+	uint64_t	maintenance;
+	
+	maintenance = pg_atomic_add_fetch_u64(&gpucache_shared_head->maintenance_seq, 1);
+	for (int k=0; k < numGpuDevAttrs; k++)
+	{
+		pg_atomic_uint64 *ptr = &gpucache_shared_head->gpus[k].maintenance_done;
 
+		for (;;)
+		{
+			uint64_t	progress = pg_atomic_read_u64(ptr);
+
+			if (progress >= maintenance)
+				break;
+			CHECK_FOR_INTERRUPTS();
+			pg_usleep(50000L);	/* 50ms */
+			fprintf(stderr, "hoge\n");
+		}
+	}
 	PG_RETURN_VOID();
 }
 
@@ -1404,7 +1421,7 @@ pgstrom_gpucache_compaction(PG_FUNCTION_ARGS)
 	{
 		pthreadMutexLock(&gpucache_shared_head->hash_mutex);
 		gc_desc->gc_sstate->req_compaction |= gc_desc->gpumask;
-		pg_atomic_fetch_add_u32(&gpucache_shared_head->maintenance, 1);
+		pg_atomic_add_fetch_u64(&gpucache_shared_head->maintenance_seq, 1);
 		pthreadMutexUnlock(&gpucache_shared_head->hash_mutex);
 	}
 	else
@@ -1434,7 +1451,7 @@ pgstrom_gpucache_recovery(PG_FUNCTION_ARGS)
 										   &expected,
 										   GPUCACHE_PHASE__NOT_BUILT))
 		{
-			pg_atomic_fetch_add_u32(&gpucache_shared_head->maintenance, 1);
+			pg_atomic_add_fetch_u64(&gpucache_shared_head->maintenance_seq, 1);
 		}
 		else
 		{
@@ -1980,7 +1997,7 @@ __gpuCacheOnDropDatabase(Oid database_oid)
 			}
 		}
 	}
-	pg_atomic_fetch_add_u32(&gpucache_shared_head->maintenance, 1);
+	pg_atomic_add_fetch_u64(&gpucache_shared_head->maintenance_seq, 1);
 	pthreadMutexUnlock(&gpucache_shared_head->hash_mutex);
 }
 
@@ -2094,7 +2111,7 @@ releaseGpuCacheDesc(GpuCacheDesc *gc_desc, bool normal_commit)
 		dlist_delete(&gc_sstate->chain);
 		dlist_push_tail(&gpucache_shared_head->free_list, &gc_sstate->chain);
 		pthreadMutexUnlock(&gpucache_shared_head->hash_mutex);
-		pg_atomic_fetch_add_u32(&gpucache_shared_head->maintenance, 1);
+		pg_atomic_add_fetch_u64(&gpucache_shared_head->maintenance_seq, 1);
 
 		hash_search(gpucache_table_desc_htab,
 					gc_desc, HASH_REMOVE, NULL);
@@ -2272,7 +2289,10 @@ pgstrom_startup_gpu_cache(void)
 		dlist_init(&gpucache_shared_head->hash_slots[i]);
 	pthreadMutexInitShared(&gpucache_shared_head->hash_mutex);
 	for (int k=0; k < numGpuDevAttrs; k++)
+	{
 		pthreadMutexInitShared(&gpucache_shared_head->gpus[k].pipe_mutex);
+		pg_atomic_init_u64(&gpucache_shared_head->gpus[k].maintenance_done, ULONG_MAX);
+	}
 	pos += MAXALIGN(offsetof(GpuCacheSharedHead, gpus[numGpuDevAttrs]));
 
 	for (int k=0; k < pgstrom_gpucache_max_relation_entries; k++)
@@ -2407,6 +2427,8 @@ gpuCacheAllocMasterState(gpuContext *gcontext)
 		memset((void *)m_bufptr, 0, offsetof(kern_gpucache_master_state, log_items));
 		gcontext->gpucache_master_state = (kern_gpucache_master_state *)m_bufptr;
 		gcontext->gpucache_master_state->length = bufsz;
+		/* inform backend processes GPU-Cache is valid on this device */
+		pg_atomic_write_u64(&gpucache_shared_head->gpus[gcontext->cuda_dindex].maintenance_done, 0);
 	}
 	return true;
 }
@@ -2452,7 +2474,7 @@ __gpuCacheMarkAsCorrupted(Oid database_oid,
 		}
 	}
 	/* notify other GPU-Cache services to release corrupted caches */
-	pg_atomic_fetch_add_u32(&gpucache_shared_head->maintenance, 1);
+	pg_atomic_add_fetch_u64(&gpucache_shared_head->maintenance_seq, 1);
 	pthreadMutexUnlock(&gpucache_shared_head->hash_mutex);
 }
 
@@ -2826,7 +2848,8 @@ static bool
 __gpuCacheFlushPendingLogsNoLock(gpuContext *gcontext, bool do_maintain)
 {
 	kern_gpucache_master_state *gc_mstate = gcontext->gpucache_master_state;
-	bool	retval = true;
+	uint64_t	maintenance = pg_atomic_read_u64(&gpucache_shared_head->maintenance_seq);
+	bool		retval = true;
 
 	if (gc_mstate)
 	{
@@ -2842,6 +2865,7 @@ __gpuCacheFlushPendingLogsNoLock(gpuContext *gcontext, bool do_maintain)
 		{
 			gpuCacheMaintenanceHandler(gcontext);
 			gc_mstate->last_maintain_ts = curr_ts;
+			pg_atomic_exchange_u64(&gpucache_shared_head->gpus[gcontext->cuda_dindex].maintenance_done, maintenance);
 		}
 	}
 	return retval;
@@ -3012,7 +3036,7 @@ gpuCacheWorkerMain(void *__gcontext)
 		ssize_t		nbytes;
 
 		/* maintenance works */
-		maintenance_curr = pg_atomic_read_u32(&gpucache_shared_head->maintenance);
+		maintenance_curr = pg_atomic_read_u64(&gpucache_shared_head->maintenance_seq);
 		if (maintenance_curr != maintenance_last)
 		{
 			gpuCacheFlushPendingLogs(gcontext, true);
