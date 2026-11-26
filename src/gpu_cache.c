@@ -3056,18 +3056,23 @@ gpuCacheWorkerMain(void *__gcontext)
 			/* check gpuServiceGoingTerminate() */
 			continue;
 		}
-
-		if (wip_usage > 0)
+		while (read_off < nbytes)
 		{
-			size_t	sz;
+			size_t		sz;
 
-			if (wip_usage + nbytes < sizeof(GpuCacheLogCommon))
+			if (wip_usage < sizeof(GpuCacheLogCommon))
 			{
-				memcpy(wip_buffer + wip_usage, pipe_buffer, nbytes);
-				wip_usage += nbytes;
+				sz = (nbytes - read_off);
+				if (wip_usage + sz > sizeof(GpuCacheLogCommon))
+					sz = sizeof(GpuCacheLogCommon) - wip_usage;
+				memcpy(wip_buffer + wip_usage, pipe_buffer + read_off, sz);
+				read_off += sz;
+				wip_usage += sz;
 				continue;
 			}
 			log = (GpuCacheLogCommon *)wip_buffer;
+			assert(wip_usage <= log->length);
+			/* expand the buffer on the demand */
 			if (wip_length < log->length)
 			{
 				size_t	new_length = (log->length + wip_length);
@@ -3082,45 +3087,19 @@ gpuCacheWorkerMain(void *__gcontext)
 				wip_length = new_length;
 				log = (GpuCacheLogCommon *)wip_buffer;
 			}
-			sz = Min(log->length - wip_usage, nbytes);
-			memcpy(wip_buffer + wip_usage, pipe_buffer, sz);
+			sz = (nbytes - read_off);
+			if (wip_usage + sz > log->length)
+				sz = log->length - wip_usage;
+			memcpy(wip_buffer + wip_usage, pipe_buffer + read_off, sz);
 			wip_usage += sz;
-			if (wip_usage < log->length)
-				continue;
-			gpuCacheProcessOneRedoLog(gcontext, log);
-			read_off = sz;
-		}
-		while (read_off < nbytes)
-		{
-			size_t	remained = nbytes - read_off;
-
-			if (remained < sizeof(GpuCacheLogCommon))
+			read_off += sz;
+			if (wip_usage == log->length)
 			{
-				memcpy(wip_buffer, pipe_buffer + read_off, remained);
-				wip_usage = remained;
-				break;
+				gpuCacheProcessOneRedoLog(gcontext, log);
+				wip_usage = 0;	/* reset */
 			}
-			log = (GpuCacheLogCommon *)(pipe_buffer + read_off);
-			if (remained < log->length)
-			{
-				if (wip_length < log->length)
-				{
-					size_t	new_length = (log->length + wip_length);
-					char   *new_buffer = realloc(wip_buffer, new_length);
-					if (!new_buffer)
-					{
-						__GC_LOG("out of memory");
-						goto bailout;
-					}
-					wip_buffer = new_buffer;
-					wip_length = new_length;
-				}
-				memcpy(wip_buffer, log, remained);
-				wip_usage = remained;
-				break;
-			}
-			gpuCacheProcessOneRedoLog(gcontext, log);
-			read_off += log->length;
+			if (gpuServiceGoingTerminate())
+				goto bailout;
 		}
 	}
 bailout:
