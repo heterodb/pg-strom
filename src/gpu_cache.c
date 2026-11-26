@@ -48,12 +48,13 @@ typedef struct
 #define GPUCACHE_STATE_HASH_NSLOTS		509
 typedef struct
 {
-	pg_atomic_uint32 maintenance;
+	pg_atomic_uint64 maintenance_seq;
 	pthread_mutex_t hash_mutex;
 	dlist_head	free_list;
 	dlist_head	hash_slots[GPUCACHE_STATE_HASH_NSLOTS];
 	struct {
 		pthread_mutex_t	pipe_mutex;
+		pg_atomic_uint64 maintenance_done;
 		/*
 		 * Total bytes of the redo logs written to / consumed from the pipe.
 		 * GPU-Service waits for the GPU-cache worker to consume the redo logs
@@ -89,6 +90,7 @@ struct GpuCacheDesc
 	gpumask_t	gpumask;
 	size_t		gpucache_sz;
 	GpuCacheSharedState *gc_sstate;
+	int8_t		has_dropped_attrs;	/* -1 means unknown */
 	bool		drop_on_rollback;
 	bool		drop_on_commit;
 	uint32_t	nitems;
@@ -781,6 +783,7 @@ lookupGpuCacheDescRaw(Oid table_oid,
 		entry->gpumask = gpumask;
 		entry->gpucache_sz = gpucache_sz;
 		entry->gc_sstate = NULL;
+		entry->has_dropped_attrs = -1;
 		entry->drop_on_rollback = false;
 		entry->drop_on_commit = false;
 		entry->nitems = 0;
@@ -883,6 +886,7 @@ getCtidHash(ItemPointer p_ctid)
  */
 static void
 __setupGpuCacheTupleItem(StringInfo buf,
+						 GpuCacheDesc *gc_desc,
 						 Relation rel,
 						 HeapTuple tuple,
 						 TransactionId xmin,
@@ -890,29 +894,51 @@ __setupGpuCacheTupleItem(StringInfo buf,
 {
 	TupleDesc	tupdesc = RelationGetDescr(rel);
 	HeapTupleHeader htup = tuple->t_data;
-	uint8_t	   *nullmap = NULL;
+	uint8_t	   *src_nullmap = NULL;
+	uint8_t	   *dst_nullmap = NULL;
 	int			nattrs = Min(HeapTupleHeaderGetNatts(tuple->t_data), tupdesc->natts);
 	int			base = buf->len;
+	uint16_t	t_infomask = 0;
 	uint32_t	head_sz;
 	uint32_t	hoff, diff;
 	kern_tupitem *tupitem;
 	kern_tupitem_xact_attrs *xattrs;
 	static uint64_t zero = 0;
 
-	assert(base == MAXALIGN(base));
+	/* check whether any dropped attributes */
+	if (gc_desc->has_dropped_attrs < 0)
+	{
+		bool	__has_dropped_attrs = false;
+
+		for (int j=0; j < tupdesc->natts; j++)
+		{
+			Form_pg_attribute attr = TupleDescAttr(tupdesc, j);
+
+			if (attr->attisdropped)
+			{
+				__has_dropped_attrs = true;
+				break;
+			}
+		}
+		gc_desc->has_dropped_attrs = (__has_dropped_attrs ? 1 : 0);
+	}
+
 	/* allocation of the header portion first */
+	assert(base == MAXALIGN(base));
 	if (HeapTupleHasNulls(tuple))
 	{
-		nullmap = htup->t_bits;
-		head_sz = MAXALIGN(offsetof(kern_tupitem, t_bits)
-						   + BITMAPLEN(nattrs)
-						   + sizeof(kern_tupitem_xact_attrs));
+		src_nullmap = htup->t_bits;
+		dst_nullmap = (uint8_t *)alloca(BITMAPLEN(nattrs));
+		t_infomask |= HEAP_HASNULL;
 	}
-	else
+	else if (gc_desc->has_dropped_attrs)
 	{
-		head_sz = MAXALIGN(offsetof(kern_tupitem, t_bits)
-						   + sizeof(kern_tupitem_xact_attrs));
+		dst_nullmap = (uint8_t *)alloca(BITMAPLEN(nattrs));
+		t_infomask |= HEAP_HASNULL;
 	}
+	head_sz = MAXALIGN(offsetof(kern_tupitem, t_bits)
+					   + (dst_nullmap ? BITMAPLEN(nattrs) : 0)
+					   + sizeof(kern_tupitem_xact_attrs));
 	enlargeStringInfo(buf, head_sz);
 	memset(buf->data + buf->len, 0, head_sz);
 	buf->len += head_sz;
@@ -923,17 +949,28 @@ __setupGpuCacheTupleItem(StringInfo buf,
 		Form_pg_attribute attr = TupleDescAttr(tupdesc, j);
 		int		alignval = typealign_get_width(attr->attalign);
 
-		if (nullmap && att_isnull(j, nullmap))
+		if (src_nullmap && att_isnull(j, src_nullmap))
+		{
+			dst_nullmap[(j>>3)] &= ~(1U<<(j&7));
 			continue;
-		if (attr->attisdropped)
-			continue;
+		}
 		if (attr->attbyval || attr->attlen > 0)
 		{
 			hoff = TYPEALIGN(alignval, hoff);
-			diff = TYPEALIGN(alignval, buf->len) - buf->len;
-			if (diff > 0)
-				appendBinaryStringInfo(buf, (char *)&zero, diff);
-			appendBinaryStringInfo(buf, (char *)htup + hoff, attr->attlen);
+			if (!attr->attisdropped)
+			{
+				diff = TYPEALIGN(alignval, buf->len) - buf->len;
+				if (diff > 0)
+					appendBinaryStringInfo(buf, (char *)&zero, diff);
+				appendBinaryStringInfo(buf, (char *)htup + hoff, attr->attlen);
+				if (dst_nullmap)
+					dst_nullmap[(j>>3)] |= (1U<<(j&7));
+			}
+			else
+			{
+				/* inject NULL, instead of the dropped attribute */
+				dst_nullmap[(j>>3)] &= ~(1U<<(j&7));
+			}
 			hoff += attr->attlen;
 		}
 		else if (attr->attlen == -1)
@@ -946,16 +983,27 @@ __setupGpuCacheTupleItem(StringInfo buf,
 			addr = (char *)htup + hoff;
 			hoff += VARSIZE_ANY(addr);
 
-			datum = pg_detoast_datum_packed(addr);
-			if (VARATT_IS_4B(datum))
+			if (!attr->attisdropped)
 			{
-				diff = TYPEALIGN(alignval, buf->len) - buf->len;
-				if (diff > 0)
-					appendBinaryStringInfo(buf, (char *)&zero, diff);
+				datum = pg_detoast_datum_packed(addr);
+				if (VARATT_IS_4B(datum))
+				{
+					diff = TYPEALIGN(alignval, buf->len) - buf->len;
+					if (diff > 0)
+						appendBinaryStringInfo(buf, (char *)&zero, diff);
+				}
+				appendBinaryStringInfo(buf, (char *)datum, VARSIZE_ANY(datum));
+				if (dst_nullmap)
+					dst_nullmap[(j>>3)] |= (1U<<(j&7));
+				t_infomask |= HEAP_HASVARWIDTH;
+				if (datum != addr)
+					pfree(datum);
 			}
-			appendBinaryStringInfo(buf, (char *)datum, VARSIZE_ANY(datum));
-			if (datum != addr)
-				pfree(datum);
+			else
+			{
+				/* inject NULL, instead of the dropped attribute */
+				dst_nullmap[(j>>3)] &= ~(1U<<(j&7));
+			}
 		}
 		else
 		{
@@ -973,10 +1021,10 @@ __setupGpuCacheTupleItem(StringInfo buf,
 	tupitem->hash  = getCtidHash(&tuple->t_self);
 	tupitem->has_xact_attrs = true;
 	tupitem->t_infomask2 = nattrs;
-	tupitem->t_infomask  = htup->t_infomask;
+	tupitem->t_infomask  = t_infomask;
 	tupitem->t_hoff = head_sz + MINIMAL_TUPLE_OFFSET;
-	if (nullmap)
-		memcpy(tupitem->t_bits, nullmap, BITMAPLEN(nattrs));
+	if (dst_nullmap)
+		memcpy(tupitem->t_bits, dst_nullmap, BITMAPLEN(nattrs));
 	xattrs = KERN_TUPITEM_GET_XACT_ATTRS(tupitem);
 	xattrs->xmin = xmin;
 	xattrs->xmax = xmax;
@@ -1000,7 +1048,7 @@ __gpuCacheInsertLog(GpuCacheDesc *gc_desc,
 	/* setup INSERT log */
 	initStringInfo(&buf);
 	buf.len = offsetof(GpuCacheLogInsert, tupitem);
-	__setupGpuCacheTupleItem(&buf, rel, tuple, xmin, xmax);
+	__setupGpuCacheTupleItem(&buf, gc_desc, rel, tuple, xmin, xmax);
 	ins = (GpuCacheLogInsert *)buf.data;
 	ins->c.type = GCACHE_TX_LOG__INSERT;
 	ins->c.length = buf.len;
@@ -1275,7 +1323,7 @@ __gpuCacheInitialLoad(GpuCacheDesc *gc_desc, Relation rel)
 			{
 				pg_atomic_exchange_u32(&gc_sstate->phase,
 									   GPUCACHE_PHASE__IS_CORRUPTED);
-				pg_atomic_fetch_add_u32(&gpucache_shared_head->maintenance, 1);
+				pg_atomic_add_fetch_u64(&gpucache_shared_head->maintenance_seq, 1);
 				PG_RE_THROW();
 			}
 			PG_END_TRY();
@@ -1351,8 +1399,23 @@ PG_FUNCTION_INFO_V1(pgstrom_gpucache_apply_redo);
 PUBLIC_FUNCTION(Datum)
 pgstrom_gpucache_apply_redo(PG_FUNCTION_ARGS)
 {
-	pg_atomic_fetch_add_u32(&gpucache_shared_head->maintenance, 1);
+	uint64_t	maintenance;
+	
+	maintenance = pg_atomic_add_fetch_u64(&gpucache_shared_head->maintenance_seq, 1);
+	for (int k=0; k < numGpuDevAttrs; k++)
+	{
+		pg_atomic_uint64 *ptr = &gpucache_shared_head->gpus[k].maintenance_done;
 
+		for (;;)
+		{
+			uint64_t	progress = pg_atomic_read_u64(ptr);
+
+			if (progress >= maintenance)
+				break;
+			CHECK_FOR_INTERRUPTS();
+			pg_usleep(50000L);	/* 50ms */
+		}
+	}
 	PG_RETURN_VOID();
 }
 
@@ -1370,7 +1433,7 @@ pgstrom_gpucache_compaction(PG_FUNCTION_ARGS)
 	{
 		pthreadMutexLock(&gpucache_shared_head->hash_mutex);
 		gc_desc->gc_sstate->req_compaction |= gc_desc->gpumask;
-		pg_atomic_fetch_add_u32(&gpucache_shared_head->maintenance, 1);
+		pg_atomic_add_fetch_u64(&gpucache_shared_head->maintenance_seq, 1);
 		pthreadMutexUnlock(&gpucache_shared_head->hash_mutex);
 	}
 	else
@@ -1400,7 +1463,7 @@ pgstrom_gpucache_recovery(PG_FUNCTION_ARGS)
 										   &expected,
 										   GPUCACHE_PHASE__NOT_BUILT))
 		{
-			pg_atomic_fetch_add_u32(&gpucache_shared_head->maintenance, 1);
+			pg_atomic_add_fetch_u64(&gpucache_shared_head->maintenance_seq, 1);
 		}
 		else
 		{
@@ -1926,6 +1989,31 @@ __gpuCacheOnDropTrigger(Oid trigger_oid)
 }
 
 static void
+__gpuCacheOnDropDatabase(Oid database_oid)
+{
+	assert(database_oid != MyDatabaseId);
+	pthreadMutexLock(&gpucache_shared_head->hash_mutex);
+	for (int hindex=0; hindex < GPUCACHE_STATE_HASH_NSLOTS; hindex++)
+	{
+		dlist_mutable_iter iter;
+
+		dlist_foreach_modify(iter, &gpucache_shared_head->hash_slots[hindex])
+		{
+			GpuCacheSharedState *gc_sstate
+				= dlist_container(GpuCacheSharedState,
+								  chain, iter.cur);
+			if (gc_sstate->database_oid == database_oid)
+			{
+				dlist_delete(&gc_sstate->chain);
+				dlist_push_tail(&gpucache_shared_head->free_list, &gc_sstate->chain);
+			}
+		}
+	}
+	pg_atomic_add_fetch_u64(&gpucache_shared_head->maintenance_seq, 1);
+	pthreadMutexUnlock(&gpucache_shared_head->hash_mutex);
+}
+
+static void
 __gpuCacheTruncateLog(Oid table_oid)
 {
 	uint32_t	table_sig;
@@ -2000,6 +2088,11 @@ gpuCacheObjectAccess(ObjectAccessType access,
 			/* DROP TRIGGER */
 			__gpuCacheOnDropTrigger(objectId);
 		}
+		else if (classId == DatabaseRelationId)
+		{
+			/* DROP DATABASE */
+			__gpuCacheOnDropDatabase(objectId);
+		}
 	}
 	else if (access == OAT_TRUNCATE)
 	{
@@ -2030,7 +2123,7 @@ releaseGpuCacheDesc(GpuCacheDesc *gc_desc, bool normal_commit)
 		dlist_delete(&gc_sstate->chain);
 		dlist_push_tail(&gpucache_shared_head->free_list, &gc_sstate->chain);
 		pthreadMutexUnlock(&gpucache_shared_head->hash_mutex);
-		pg_atomic_fetch_add_u32(&gpucache_shared_head->maintenance, 1);
+		pg_atomic_add_fetch_u64(&gpucache_shared_head->maintenance_seq, 1);
 
 		hash_search(gpucache_table_desc_htab,
 					gc_desc, HASH_REMOVE, NULL);
@@ -2210,6 +2303,7 @@ pgstrom_startup_gpu_cache(void)
 	for (int k=0; k < numGpuDevAttrs; k++)
 	{
 		pthreadMutexInitShared(&gpucache_shared_head->gpus[k].pipe_mutex);
+		pg_atomic_init_u64(&gpucache_shared_head->gpus[k].maintenance_done, ULONG_MAX);
 		pg_atomic_init_u64(&gpucache_shared_head->gpus[k].pipe_written, 0);
 		pg_atomic_init_u64(&gpucache_shared_head->gpus[k].pipe_consumed, 0);
 	}
@@ -2347,6 +2441,8 @@ gpuCacheAllocMasterState(gpuContext *gcontext)
 		memset((void *)m_bufptr, 0, offsetof(kern_gpucache_master_state, log_items));
 		gcontext->gpucache_master_state = (kern_gpucache_master_state *)m_bufptr;
 		gcontext->gpucache_master_state->length = bufsz;
+		/* inform backend processes GPU-Cache is valid on this device */
+		pg_atomic_write_u64(&gpucache_shared_head->gpus[gcontext->cuda_dindex].maintenance_done, 0);
 	}
 	return true;
 }
@@ -2392,7 +2488,7 @@ __gpuCacheMarkAsCorrupted(Oid database_oid,
 		}
 	}
 	/* notify other GPU-Cache services to release corrupted caches */
-	pg_atomic_fetch_add_u32(&gpucache_shared_head->maintenance, 1);
+	pg_atomic_add_fetch_u64(&gpucache_shared_head->maintenance_seq, 1);
 	pthreadMutexUnlock(&gpucache_shared_head->hash_mutex);
 }
 
@@ -2766,7 +2862,8 @@ static bool
 __gpuCacheFlushPendingLogsNoLock(gpuContext *gcontext, bool do_maintain)
 {
 	kern_gpucache_master_state *gc_mstate = gcontext->gpucache_master_state;
-	bool	retval = true;
+	uint64_t	maintenance = pg_atomic_read_u64(&gpucache_shared_head->maintenance_seq);
+	bool		retval = true;
 
 	if (gc_mstate)
 	{
@@ -2782,6 +2879,7 @@ __gpuCacheFlushPendingLogsNoLock(gpuContext *gcontext, bool do_maintain)
 		{
 			gpuCacheMaintenanceHandler(gcontext);
 			gc_mstate->last_maintain_ts = curr_ts;
+			pg_atomic_exchange_u64(&gpucache_shared_head->gpus[gcontext->cuda_dindex].maintenance_done, maintenance);
 		}
 	}
 	return retval;
@@ -2974,7 +3072,7 @@ gpuCacheWorkerMain(void *__gcontext)
 			last_nbytes = 0;
 		}
 		/* maintenance works */
-		maintenance_curr = pg_atomic_read_u32(&gpucache_shared_head->maintenance);
+		maintenance_curr = pg_atomic_read_u64(&gpucache_shared_head->maintenance_seq);
 		if (maintenance_curr != maintenance_last)
 		{
 			gpuCacheFlushPendingLogs(gcontext, true);
