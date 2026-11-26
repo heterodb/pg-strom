@@ -1041,6 +1041,20 @@ __waitAndFetchNextXpuCommand(pgstromTaskState *pts, bool try_final_callback)
 		}
 		else if (conn->num_running_cmds > 0)
 		{
+			/*
+			 * If the session worker already exited (e.g, GPU-Service closed
+			 * the connection on restart), no responses shall arrive any more.
+			 */
+			if (conn->terminated != 0)
+			{
+				int		num_running_cmds = conn->num_running_cmds;
+
+				pthreadMutexUnlock(&conn->mutex);
+				ereport(ERROR,
+						(errcode(ERRCODE_CONNECTION_FAILURE),
+						 errmsg("connection to GPU-Service was closed unexpectedly (%d commands are still running)",
+								num_running_cmds)));
+			}
 			/* wait for the running commands */
 			pthreadMutexUnlock(&conn->mutex);
 		}

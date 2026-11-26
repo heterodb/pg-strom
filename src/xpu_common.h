@@ -271,7 +271,19 @@ __Fetch(const T *ptr)
 		return *ptr;
 	}
 #endif
-	memcpy(&temp, ptr, sizeof(T));
+	/*
+	 * NOTE: nvcc may optimize memcpy(&temp, ptr, sizeof(T)) to a load
+	 * instruction that assumes alignment of T, because 'ptr' is declared
+	 * as 'const T *'. Then, it raises CUDA_ERROR_MISALIGNED_ADDRESS on
+	 * the unaligned address (e.g, ArrayType in short-varlena).
+	 * So, we copy byte-by-byte using volatile pointer.
+	 */
+	{
+		const volatile char *src = (const volatile char *)ptr;
+		char   *dst = (char *)&temp;
+		for (int i=0; i < sizeof(T); i++)
+			dst[i] = src[i];
+	}
 	return temp;
 }
 
@@ -286,7 +298,10 @@ __FetchStore(T &dest, const T *ptr)
 	}
 	else
 	{
-		memcpy(&dest, ptr, sizeof(T));
+		const volatile char *src = (const volatile char *)ptr;
+		char   *dst = (char *)&dest;
+		for (int i=0; i < sizeof(T); i++)
+			dst[i] = src[i];
 	}
 }
 
