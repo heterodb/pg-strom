@@ -10,6 +10,8 @@
  * it under the terms of the PostgreSQL License.
  */
 #include "pg_strom.h"
+#include "access/xlog.h"
+#include "storage/checksum.h"
 
 void
 pgstrom_init_select_into(void)
@@ -1012,6 +1014,17 @@ __selectIntoWriteOutOneKDS(gpuClient *gclient,
 		strcpy(fname, si_state->base_name);
 	else
 		sprintf(fname, "%s.%u", si_state->base_name, segment_no);
+	/* set checksum of the heap pages, if enabled */
+	if (DataChecksumsEnabled())
+	{
+		for (uint32_t i=0; i < nblocks; i++)
+		{
+			PageHeaderData *hpage = (PageHeaderData *)(curr_pos + BLCKSZ * i);
+
+			hpage->pd_checksum = pg_checksum_page((char *)hpage,
+												  segment_no * RELSEG_SIZE + i);
+		}
+	}
 	fdesc = open(fname, O_WRONLY | O_CREAT | O_TRUNC | O_DIRECT, 0600);
 	if (fdesc < 0)
 	{
@@ -1272,7 +1285,9 @@ __selectIntoDirectWriteVM(gpuClient *gclient,
 	uint64_t	nblocks = si_state->nblocks_written;
 	char	   *vm_fname = (char *)alloca(strlen(si_state->base_name) + 20);
 	int			vm_fdesc;
-	uint8_t		vm_buf[BLCKSZ];
+	BlockNumber	vm_blkno = 0;
+	PGAlignedBlock vm_block;
+	uint8_t	   *vm_buf = (uint8_t *)vm_block.data;
 
 	sprintf(vm_fname, "%s_vm", si_state->base_name);
 	vm_fdesc = open(vm_fname, O_WRONLY | O_CREAT | O_TRUNC, 0600);
@@ -1311,6 +1326,10 @@ __selectIntoDirectWriteVM(gpuClient *gclient,
 		}
 		if (offset < BLCKSZ)
 			memset(vm_buf + offset, 0, BLCKSZ - offset);
+		/* set checksum of the VM page, if enabled */
+		if (DataChecksumsEnabled())
+			hpage->pd_checksum = pg_checksum_page((char *)hpage, vm_blkno);
+		vm_blkno++;
 		offset = 0;
 		while (offset < BLCKSZ)
 		{
