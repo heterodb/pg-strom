@@ -230,64 +230,29 @@ ERROR:  target lists can have at most 1664 entries
 @ja:##GPUキャッシュ
 @en:##GPU Cache
 
-`pgstrom.gpucache_info` @ja{システムビュー}@en{System View}
-@ja:: GPUキャッシュの現在の状態を表示します。<br>このビューのスキーマ定義は以下の通りです。
-@en:: It shows the current status of GPU Cache.<br>Below is schema definition of the view.
-
-
-|name               |type  |description  |
-|:------------------|:-----|-------------|
-|`database_oid`     |`oid` |@ja{GPUキャッシュを設定したテーブルの属するデータベースのOIDです}  @en{Database OID where the table with GPU Cache belongs to.} |
-|`database_name`    |`text`|@ja{GPUキャッシュを設定したテーブルの属するデータベースの名前です} @en{Database name where the table with GPU Cache belongs to.} |
-|`table_oid`        |`oid` |@ja{GPUキャッシュを設定したテーブルのOIDです。必ずしも現在のデータベースとは限らない事に留意してください。} @en{Table OID that has GPU Cache. Note that it may not be in the current database.} |
-|`table_name`       |`text`|@ja{GPUキャッシュを設定したテーブルの名前です。必ずしも現在のデータベースとは限らない事に留意してください。} @en{Table name that has GPU Cache. Note that it may not be in the current database.} |
-|`signature`        |`int8`|@ja{GPUキャッシュの一意性を示すハッシュ値です。例えば`ALTER TABLE`の前後などでこの値が変わる場合があります。} @en{An identifier hash value of GPU Cache. It may be changed after `ALTER TABLE` for example.} |
-|`phase`            |`text`|@ja{GPUキャッシュ構築の段階を示します。`not_built`, `is_empty`, `is_loading`, `is_ready`, `corrupted`のいずれかです。} @en{Phase of GPU cache construction: either `not_built`, `is_empty`, `is_loading`, `is_ready`, or `corrupted`} |
-|`rowid_num_used`   |`int8`|@ja{割当て済みの行IDの数です。} @en{Number of allocated row-id} |
-|`rowid_num_free`   |`int8`|@ja{未割当の行IDの数です。} @en{Number of free row-id} |
-|`gpu_main_sz`      |`int8`|@ja{GPUキャッシュ上の固定長データ用の領域のサイズです。} @en{Size of the fixed-length values area on the GPU Cache.} |
-|`gpu_main_nitems`  |`int8`|@ja{GPUキャッシュ上のタプル数です。} @en{Number of tuples on the GPU Cache.} |
-|`gpu_extra_sz`     |`int8`|@ja{GPUキャッシュ上の可変長データ用の領域のサイズです。} @en{Size of the variable-length values area on the GPU Cache.} |
-|`gpu_extra_usage`  |`int8`|@ja{GPUキャッシュ上の可変長データ領域の使用済みサイズです。} @en{Size of the used variable-length values area on the GPU Cache.} |
-|`gpu_extra_dead`   |`int8`|@ja{GPUキャッシュ上の可変長データ領域の未使用サイズです。} @en{Size of the free variable-length values area on the GPU Cache.} |
-|`redo_write_ts`    |`timestamptz`|@ja{REDOログバッファを最後に更新した時刻です。} @en{Last update timestamp on the REDO Log buffer} |
-|`redo_write_nitems`|`int8`|@ja{REDOログバッファに書き込まれたREDOログの総数です。} @en{Total number of REDO Log entries written to the REDO Log buffer.} |
-|`redo_write_pos`   |`int8`|@ja{REDOログバッファに書き込まれたREDOログの総バイト数です。} @en{Total bytes of REDO Log entries written to the REDO Log buffer.} |
-|`redo_read_nitems` |`int8`|@ja{REDOログバッファから読み出し、GPUに適用されたREDOログの総数です。} @en{Total number of REDO Log entries read from REDO Log buffer, and already applied to.} |
-|`redo_read_pos`    |`int8`|@ja{REDOログバッファから読み出し、GPUに適用されたREDOログの総バイト数です。} @en{Total bytes of REDO Log entries read from REDO Log buffer, and already applied to.} |
-|`redo_sync_pos`    |`int8`|@ja{REDOログバッファ書き込まれたREDOログのうち、既にGPUキャッシュへの適用をバックグラウンドワーカにリクエストした位置です。REDOログバッファの残り容量が逼迫してきた際に、多数のセッションが同時に非同期のリクエストを発生させる事を避けるため、内部的に使用されます。} @en{The latest position on the REDO Log buffer, where it is already required the background worker to synchronize onto the GPU Cache. When free space of REDO Log buffer becomes tight, it is internally used to avoid flood of simultaneous asynchronized requests by many sessions.} |
-|`config_options`   |`text`|@ja{GPUキャッシュのオプション文字列です。} @en{Options string of the GPU Cache} |
-
-@ja{
-以下は`pgstrom.gpucache_info`システムビューの出力例です。
-}
-@en{
-Below is an example of `pgstrom.gpucache_info` system view.
-}
-```
-=# select * from pgstrom.gpucache_info ;
- database_oid | database_name | table_oid |    table_name    | signature  |  phase   | rowid_num_used | rowid_num_free | gpu_main_sz | gpu_main_nitems | gpu_extra_sz | gpu_extra_usage | gpu_extra_dead |         redo_write_ts         | redo_write_nitems | redo_write_pos | redo_read_nitems | redo_read_pos |
-redo_sync_pos |                                                   config_options
---------------+---------------+-----------+------------------+------------+----------+----------------+----------------+-------------+-----------------+--------------+-----------------+----------------+-------------------------------+-------------------+----------------+------------------+---------------+---------------+---------------------------------------------------------------------------------------------------------------------
-       193450 | hoge          |    603029 | cache_test_table | 4529357070 | is_ready |           4000 |           6000 |      439904 |            4000 |      3200024 |          473848 |              0 | 2023-12-18 01:25:42.850193+09 |              4000 |         603368 |             4000 |        603368 |       603368 | gpu_device_id=0,max_num_rows=10000,redo_buffer_size=157286400,gpu_sync_interval=4000000,gpu_sync_threshold=10485760
-(1 row)
-```
-
 `trigger pgstrom.gpucache_sync_trigger()`
-: @ja{テーブル更新の際にGPUキャッシュを同期するためのトリガ関数です。詳しくは[GPUキャッシュ](gpucache.md)の章を参照してください。}
-: @en{A trigger function to synchronize GPU Cache on table updates. See [GPU Cache](gpucache.md) chapter for more details.}
+: @ja{テーブル更新の際にGPUキャッシュを同期するためのトリガ関数です。引数として`gpumask`、`cache_size`のオプション文字列を指定できます。詳しくは[GPUキャッシュ](gpucache.md)の章を参照してください。}
+: @en{A trigger function to synchronize GPU Cache on table updates. You can specify the option string of `gpumask` and `cache_size` as its argument. See [GPU Cache](gpucache.md) chapter for more details.}
 
-`bigint pgstrom.gpucache_apply_redo(regclass)`
-: @ja{引数で指定されたテーブルにGPUキャッシュが設定されている場合、未適用のREDOログを強制的にGPUキャッシュに適用します。}
-: @en{If the given table has GPU Cache configured, it forcibly applies the REDO log entries onto the GPU Cache.}
+`json pgstrom.gpucache_info(regclass)`
+: @ja{引数で指定されたテーブルのGPUキャッシュの現在の状態をJSON形式で返します。GPUキャッシュが設定されていないテーブルの場合は NULL を返します。各フィールドの意味は[GPUキャッシュ](gpucache.md)の章を参照してください。}
+: @en{It returns the current status of GPU Cache of the given table in JSON format. It returns NULL if the table has no GPU Cache configured. See [GPU Cache](gpucache.md) chapter for the meaning of each field.}
 
-`bigint pgstrom.gpucache_compaction(regclass)`
-: @ja{引数で指定されたテーブルにGPUキャッシュが設定されている場合、可変長データバッファを強制的にコンパクト化します。}
-: @en{If the given table has GPU Cache configured, it forcibly run compaction of the variable-length data buffer.}
+`json pgstrom.gpucache_info()`
+: @ja{全てのGPUキャッシュの現在の状態と、その合計値をJSON形式で返します。}
+: @en{It returns the current status of all the GPU Caches and their total in JSON format.}
 
-`bigint pgstrom.gpucache_recovery(regclass)`
-: @ja{破損（corrupted）状態となったGPUキャッシュを復元しようと試みます。}
-: @en{It tries to recover the corrupted GPU cache.}
+`void pgstrom.gpucache_apply_redo()`
+: @ja{全てのGPUキャッシュに対して、未適用の更新ログを適用するよう要求します。}
+: @en{It requests to apply the pending update logs on all the GPU Caches.}
+
+`void pgstrom.gpucache_compaction(regclass)`
+: @ja{引数で指定されたテーブルにGPUキャッシュが設定されている場合、GPUキャッシュのコンパクションを要求します。}
+: @en{If the given table has GPU Cache configured, it requests compaction of the GPU Cache.}
+
+`void pgstrom.gpucache_recovery(regclass)`
+: @ja{破損（corrupted）状態となったGPUキャッシュを`not_built`状態に戻し、次回の参照/更新時に再構築されるようにします。}
+: @en{It resets the corrupted GPU Cache to the `not_built` state, so that it is rebuilt on the next reference or update.}
 
 <!--
 @ja:##HyperLogLog 関数
